@@ -22,6 +22,7 @@ import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.DngCreator
 import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.MeteringRectangle
+import android.hardware.camera2.params.RggbChannelVector
 import android.media.Image
 import android.media.ImageReader
 import android.media.MediaRecorder
@@ -116,6 +117,9 @@ class Camera2Controller(
     private var manualExpNs = 8_000_000L
     private var evSteps = 0
     private var awbMode = CaptureRequest.CONTROL_AWB_MODE_AUTO
+    private var awbOffSupported = false
+    private var manualWb = false
+    private var wbKelvin = 5000
 
     // Anti-blur / estabilización
     private var aeFpsRange: Range<Int>? = null
@@ -561,7 +565,26 @@ class Camera2Controller(
 
     fun setWhiteBalance(mode: Int) {
         awbMode = mode
+        manualWb = false // un preset cancela el modo Kelvin manual
         applyAndUpdate()
+    }
+
+    val hasManualWb: Boolean get() = awbOffSupported
+    val kelvinRange: Pair<Int, Int> get() = Pair(2300, 7500)
+
+    fun setWhiteBalanceKelvin(k: Int) {
+        if (!awbOffSupported) return
+        manualWb = true
+        wbKelvin = k.coerceIn(2300, 7500)
+        applyAndUpdate()
+    }
+
+    /** Aprox.: K alto = imagen cálida (más rojo); K bajo = fría (más azul). Gains >= 1.0. */
+    private fun kelvinToRggb(kelvin: Int): RggbChannelVector {
+        val t = ((kelvin - 2300).toFloat() / (7500 - 2300)).coerceIn(0f, 1f)
+        val r = 1.0f + t * 1.4f   // 1.0 .. 2.4
+        val b = 2.2f - t * 1.2f   // 2.2 .. 1.0
+        return RggbChannelVector(r, 1.0f, 1.0f, b)
     }
 
     val hasFlash: Boolean get() = flashAvailable
@@ -677,7 +700,13 @@ class Camera2Controller(
             b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, evSteps)
             aeFpsRange?.let { b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
         }
-        b.set(CaptureRequest.CONTROL_AWB_MODE, awbMode)
+        if (manualWb && awbOffSupported) {
+            b.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF)
+            b.set(CaptureRequest.COLOR_CORRECTION_MODE, CameraMetadata.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX)
+            b.set(CaptureRequest.COLOR_CORRECTION_GAINS, kelvinToRggb(wbKelvin))
+        } else {
+            b.set(CaptureRequest.CONTROL_AWB_MODE, awbMode)
+        }
         if (oisAvailable) {
             b.set(
                 CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
@@ -956,6 +985,8 @@ class Camera2Controller(
         val ois = characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION) ?: IntArray(0)
         oisAvailable = ois.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)
         flashAvailable = characteristics.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) ?: false
+        val awbModes = characteristics.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES) ?: IntArray(0)
+        awbOffSupported = awbModes.contains(CameraMetadata.CONTROL_AWB_MODE_OFF)
 
         val jpegSizes = map.getOutputSizes(ImageFormat.JPEG) ?: arrayOf(Size(1920, 1080))
         // Tamaño según relación de aspecto y resolución elegidas; el preview adopta este aspecto.

@@ -264,6 +264,7 @@
             <TextView android:id="@+id/chip_iso" style="@style/ProChip" android:text="ISO" />
             <TextView android:id="@+id/chip_vel" style="@style/ProChip" android:text="VEL" />
             <TextView android:id="@+id/chip_wb" style="@style/ProChip" android:text="WB" />
+            <TextView android:id="@+id/chip_k" style="@style/ProChip" android:text="K" />
             <TextView android:id="@+id/chip_auto" style="@style/ProChip" android:text="AUTO" />
         </LinearLayout>
     </LinearLayout>

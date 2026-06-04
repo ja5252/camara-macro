@@ -65,6 +65,7 @@ class CameraActivity : AppCompatActivity() {
         CameraMetadata.CONTROL_AWB_MODE_SHADE
     )
     private val wbLabels = arrayOf("WB AUTO", "WB Incand.", "WB Fluor.", "WB Sol", "WB Nube", "WB Sombra")
+    private var wbKelvin = 5000
 
     private var timerSec = 0
     private var gridOn = false
@@ -209,6 +210,7 @@ class CameraActivity : AppCompatActivity() {
         binding.chipIso.setOnClickListener { selectParam("iso") }
         binding.chipVel.setOnClickListener { selectParam("vel") }
         binding.chipWb.setOnClickListener { cycleWb() }
+        binding.chipK.setOnClickListener { selectKelvin() }
         binding.chipAuto.setOnClickListener { resetAuto() }
         binding.proSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(s: SeekBar, progress: Int, fromUser: Boolean) {
@@ -701,6 +703,11 @@ class CameraActivity : AppCompatActivity() {
                 controller.setManualExposure(proIso, proExpNs)
                 binding.proValue.text = shutterLabel(proExpNs)
             }
+            "k" -> {
+                wbKelvin = progressToKelvin(p)
+                controller.setWhiteBalanceKelvin(wbKelvin)
+                binding.proValue.text = "${wbKelvin}K"
+            }
         }
     }
 
@@ -709,6 +716,27 @@ class CameraActivity : AppCompatActivity() {
         wbIndex = (wbIndex + 1) % wbModes.size
         controller.setWhiteBalance(wbModes[wbIndex])
         binding.proValue.text = wbLabels[wbIndex]
+    }
+
+    private fun selectKelvin() {
+        if (!controller.hasManualWb) {
+            Toast.makeText(this, "WB manual no disponible", Toast.LENGTH_SHORT).show()
+            return
+        }
+        proParam = "k"
+        binding.proSlider.progress = kelvinToProgress(wbKelvin)
+        controller.setWhiteBalanceKelvin(wbKelvin)
+        binding.proValue.text = "${wbKelvin}K"
+    }
+
+    private fun kelvinToProgress(k: Int): Int {
+        val r = controller.kelvinRange
+        return ((k - r.first) * 100 / (r.second - r.first)).coerceIn(0, 100)
+    }
+
+    private fun progressToKelvin(p: Int): Int {
+        val r = controller.kelvinRange
+        return (r.first + (r.second - r.first) * p / 100)
     }
 
     private fun resetAuto() {
