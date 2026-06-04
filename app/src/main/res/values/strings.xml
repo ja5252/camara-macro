@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Cámara Macro</string>
+    <string name="app_name">Cámara</string>
 
     <string name="setup_title">Elige tu lente</string>
     <string name="setup_hint">Usa Anterior / Siguiente y observa la vista previa. Elige la lente que se ve como tu modo macro (la que SÍ funciona) y toca \"Usar esta lente\".</string>

@@ -33,6 +33,7 @@ import android.os.HandlerThread
 import android.os.Looper
 import android.provider.MediaStore
 import android.util.Log
+import android.util.Range
 import android.util.Size
 import android.view.OrientationEventListener
 import android.view.Surface
@@ -102,6 +103,10 @@ class Camera2Controller(
     private var manualExpNs = 8_000_000L
     private var evSteps = 0
     private var awbMode = CaptureRequest.CONTROL_AWB_MODE_AUTO
+
+    // Anti-blur / estabilización
+    private var aeFpsRange: Range<Int>? = null
+    private var oisAvailable = false
 
     private var aeLocked = false
     private var afLocked = false
@@ -456,8 +461,15 @@ class Camera2Controller(
             b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
             b.set(CaptureRequest.CONTROL_AE_LOCK, aeLocked)
             b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, evSteps)
+            aeFpsRange?.let { b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
         }
         b.set(CaptureRequest.CONTROL_AWB_MODE, awbMode)
+        if (oisAvailable) {
+            b.set(
+                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON
+            )
+        }
         when {
             manualFocus -> {
                 b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
@@ -632,6 +644,13 @@ class Camera2Controller(
         if (expR != null) { expMinNs = expR.lower; expMaxNs = expR.upper }
         val evR = characteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
         if (evR != null) { evMin = evR.lower; evMax = evR.upper }
+
+        // Anti-blur: rango de FPS con cota inferior alta => exposiciones más cortas (menos movimiento).
+        val fpsRanges = characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+        aeFpsRange = fpsRanges?.filter { it.upper <= 60 }?.maxByOrNull { it.lower }
+            ?: fpsRanges?.maxByOrNull { it.lower }
+        val ois = characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION) ?: IntArray(0)
+        oisAvailable = ois.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)
 
         val jpegSizes = map.getOutputSizes(ImageFormat.JPEG) ?: arrayOf(Size(1920, 1080))
         val largest = jpegSizes.maxByOrNull { it.width.toLong() * it.height } ?: Size(1920, 1080)

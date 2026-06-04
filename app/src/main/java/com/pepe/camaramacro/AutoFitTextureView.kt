@@ -31,7 +31,8 @@ class AutoFitTextureView @JvmOverloads constructor(
         if (ratioWidth == 0 || ratioHeight == 0) {
             setMeasuredDimension(width, height)
         } else {
-            if (width < height * ratioWidth / ratioHeight) {
+            // COVER (pantalla completa, recorta el sobrante) en vez de FIT (letterbox).
+            if (width > height * ratioWidth / ratioHeight) {
                 setMeasuredDimension(width, width * ratioHeight / ratioWidth)
             } else {
                 setMeasuredDimension(height * ratioWidth / ratioHeight, height)
