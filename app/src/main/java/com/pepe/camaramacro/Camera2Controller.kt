@@ -18,6 +18,7 @@ import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureFailure
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.MeteringRectangle
 import android.media.Image
@@ -29,7 +30,6 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
 import android.provider.MediaStore
-import android.util.Range
 import android.util.Size
 import android.view.OrientationEventListener
 import android.view.Surface
@@ -37,12 +37,17 @@ import android.view.TextureView
 import java.io.File
 import java.io.FileOutputStream
 
+/** Estado del enfoque comunicado a la UI (mapea CONTROL_AF_STATE). */
+enum class FocusState { SCANNING, FOCUSED, NOT_FOCUSED, INACTIVE }
+
 /**
  * Abre una lente concreta por su ID, muestra la vista previa en un AutoFitTextureView
- * y permite tomar fotos guardándolas en la galería.
+ * y permite tomar fotos. Soporta enfoque por toque (con estado AF), bloqueo AE/AF,
+ * enfoque manual por distancia y zoom — degradando con gracia si la lente no expone
+ * alguna capacidad.
  *
- * Diseñado para EVITAR la lente principal dañada: nunca dispara un enfoque que pueda
- * colgarse, y tiene un "watchdog" que avisa si una lente no responde.
+ * Diseñado para EVITAR la lente principal dañada: tiene un "watchdog" que avisa si una
+ * lente no responde, y nunca bloquea el hilo de UI.
  */
 class Camera2Controller(
     private val activity: Activity,
@@ -51,6 +56,7 @@ class Camera2Controller(
 
     var onReady: (() -> Unit)? = null
     var onError: ((String) -> Unit)? = null
+    var onFocusState: ((FocusState) -> Unit)? = null
 
     private var cameraId: String = "0"
     private var cameraDevice: CameraDevice? = null
@@ -63,14 +69,21 @@ class Camera2Controller(
     private var facingFront = false
     private var afContinuousSupported = false
 
-    // Zoom y enfoque
+    // Capacidades / estado de control
+    var afAvailable = false
+        private set
+    private var minFocusDistance = 0f      // dioptrías; 0 = lente de foco fijo
+    private var activeArray: Rect? = null
+
     private var zoomRatio = 1f
     private var maxZoom = 1f
     private var zoomRatioSupported = false
-    private var activeArray: Rect? = null
-    var afAvailable = false
-        private set
-    val maxZoomRatio: Float get() = maxZoom
+
+    private var aeLocked = false
+    private var afLocked = false
+    private var manualFocus = false
+    private var manualDiopters = 0f
+    private var lastFocusState: FocusState? = null
 
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
@@ -89,11 +102,32 @@ class Camera2Controller(
         }
     }
 
+    // -------------------------------------------------------- Capacidades públicas
+
+    /** Rango de zoom (mín, máx). Mín siempre 1.0. */
+    val zoomRange: Pair<Float, Float> get() = Pair(1f, maxZoom)
+
+    /** Compatibilidad: máximo de zoom. */
+    val maxZoomRatio: Float get() = maxZoom
+
+    /** ¿La lente permite enfoque manual por distancia? */
+    val hasManualFocus: Boolean get() = minFocusDistance > 0f
+
+    /** Distancia mínima de enfoque en dioptrías (0 = foco fijo). */
+    val minFocusDiopters: Float get() = minFocusDistance
+
+    fun currentZoom(): Float = zoomRatio
+
     // ---------------------------------------------------------------- API pública
 
     fun open(camId: String) {
         failed = false
         zoomRatio = 1f
+        aeLocked = false
+        afLocked = false
+        manualFocus = false
+        manualDiopters = 0f
+        lastFocusState = null
         cameraId = camId
         if (backgroundThread == null) startBackgroundThread()
         if (orientationListener.canDetectOrientation()) orientationListener.enable()
@@ -115,14 +149,7 @@ class Camera2Controller(
             pendingResult = onResult
             val req = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
             req.addTarget(reader.surface)
-            req.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
-            req.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-            req.set(
-                CaptureRequest.CONTROL_AF_MODE,
-                if (afContinuousSupported) CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
-                else CaptureRequest.CONTROL_AF_MODE_OFF
-            )
-            applyZoom(req)
+            applyControls(req)
             req.set(CaptureRequest.JPEG_ORIENTATION, currentJpegOrientation())
             session.capture(req.build(), object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureFailed(
@@ -159,6 +186,186 @@ class Camera2Controller(
         cancelWatchdog()
         orientationListener.disable()
         stopBackgroundThread()
+    }
+
+    // ---------------------------------------------------------------- Zoom
+
+    private fun applyZoom(b: CaptureRequest.Builder) {
+        if (zoomRatioSupported) {
+            b.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoomRatio)
+        } else {
+            val arr = activeArray ?: return
+            val cropW = (arr.width() / zoomRatio).toInt().coerceAtLeast(1)
+            val cropH = (arr.height() / zoomRatio).toInt().coerceAtLeast(1)
+            val l = arr.left + (arr.width() - cropW) / 2
+            val t = arr.top + (arr.height() - cropH) / 2
+            b.set(CaptureRequest.SCALER_CROP_REGION, Rect(l, t, l + cropW, t + cropH))
+        }
+    }
+
+    /** Fija el nivel de zoom y devuelve el valor aplicado (acotado a [1, max]). */
+    fun setZoom(ratio: Float): Float {
+        zoomRatio = ratio.coerceIn(1f, maxZoom)
+        if (::previewRequestBuilder.isInitialized) {
+            applyZoom(previewRequestBuilder)
+            updatePreview()
+        }
+        return zoomRatio
+    }
+
+    // ---------------------------------------------------------------- Enfoque
+
+    /** Enfoque/medición en el punto tocado (coordenadas de la vista). */
+    fun setFocusPoint(x: Float, y: Float, viewW: Int, viewH: Int) {
+        val session = captureSession ?: return
+        if (!::previewRequestBuilder.isInitialized || viewW == 0 || viewH == 0) return
+        val rect = meteringRect(x / viewW, y / viewH) ?: return
+        val mr = arrayOf(MeteringRectangle(rect, MeteringRectangle.METERING_WEIGHT_MAX))
+        manualFocus = false
+        afLocked = afAvailable // tras un toque, mantenemos el enfoque fijado
+        lastFocusState = null
+        try {
+            previewRequestBuilder.set(CaptureRequest.CONTROL_AE_REGIONS, mr)
+            if (afAvailable) {
+                previewRequestBuilder.set(CaptureRequest.CONTROL_AF_REGIONS, mr)
+                previewRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
+                previewRequestBuilder.set(
+                    CaptureRequest.CONTROL_AF_TRIGGER,
+                    CameraMetadata.CONTROL_AF_TRIGGER_START
+                )
+                session.capture(previewRequestBuilder.build(), previewCallback, backgroundHandler)
+                previewRequestBuilder.set(
+                    CaptureRequest.CONTROL_AF_TRIGGER,
+                    CameraMetadata.CONTROL_AF_TRIGGER_IDLE
+                )
+            } else {
+                // Sin AF: solo fijamos exposición/medición en el punto.
+                activity.runOnUiThread { onFocusState?.invoke(FocusState.FOCUSED) }
+            }
+            updatePreview()
+        } catch (e: Exception) {
+        }
+    }
+
+    /** Bloquea/desbloquea exposición y enfoque. Al desbloquear, vuelve a enfoque continuo. */
+    fun lockAeAf(locked: Boolean) {
+        aeLocked = locked
+        if (!locked) {
+            afLocked = false
+            manualFocus = false
+        }
+        if (::previewRequestBuilder.isInitialized) {
+            applyControls(previewRequestBuilder)
+            updatePreview()
+        }
+    }
+
+    /** Enfoque manual por distancia (dioptrías). Ignora si la lente no lo soporta. */
+    fun setManualFocusDistance(diopters: Float) {
+        if (minFocusDistance <= 0f) return
+        manualFocus = true
+        afLocked = false
+        manualDiopters = diopters.coerceIn(0f, minFocusDistance)
+        if (::previewRequestBuilder.isInitialized) {
+            applyControls(previewRequestBuilder)
+            updatePreview()
+        }
+    }
+
+    /** Vuelve al enfoque automático continuo y quita los bloqueos. */
+    fun setAutoFocus() {
+        manualFocus = false
+        afLocked = false
+        aeLocked = false
+        lastFocusState = null
+        if (::previewRequestBuilder.isInitialized) {
+            previewRequestBuilder.set(CaptureRequest.CONTROL_AF_REGIONS, null)
+            previewRequestBuilder.set(CaptureRequest.CONTROL_AE_REGIONS, null)
+            applyControls(previewRequestBuilder)
+            updatePreview()
+        }
+    }
+
+    /** Aplica zoom, AE-lock y el modo de enfoque actual al builder. */
+    private fun applyControls(b: CaptureRequest.Builder) {
+        b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+        b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+        b.set(CaptureRequest.CONTROL_AE_LOCK, aeLocked)
+        when {
+            manualFocus -> {
+                b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+                b.set(CaptureRequest.LENS_FOCUS_DISTANCE, manualDiopters)
+            }
+            afLocked && afAvailable ->
+                b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
+            afContinuousSupported ->
+                b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+            afAvailable ->
+                b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
+            else ->
+                b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+        }
+        applyZoom(b)
+    }
+
+    private fun updatePreview() {
+        val session = captureSession ?: return
+        if (!::previewRequestBuilder.isInitialized) return
+        try {
+            session.setRepeatingRequest(previewRequestBuilder.build(), previewCallback, backgroundHandler)
+        } catch (e: Exception) {
+        }
+    }
+
+    private val previewCallback = object : CameraCaptureSession.CaptureCallback() {
+        override fun onCaptureCompleted(
+            session: CameraCaptureSession,
+            request: CaptureRequest,
+            result: TotalCaptureResult
+        ) {
+            val af = result.get(CaptureResult.CONTROL_AF_STATE) ?: return
+            val mapped = when (af) {
+                CameraMetadata.CONTROL_AF_STATE_PASSIVE_SCAN,
+                CameraMetadata.CONTROL_AF_STATE_ACTIVE_SCAN -> FocusState.SCANNING
+                CameraMetadata.CONTROL_AF_STATE_FOCUSED_LOCKED,
+                CameraMetadata.CONTROL_AF_STATE_PASSIVE_FOCUSED -> FocusState.FOCUSED
+                CameraMetadata.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED,
+                CameraMetadata.CONTROL_AF_STATE_PASSIVE_UNFOCUSED -> FocusState.NOT_FOCUSED
+                else -> FocusState.INACTIVE
+            }
+            if (mapped != lastFocusState) {
+                lastFocusState = mapped
+                activity.runOnUiThread { onFocusState?.invoke(mapped) }
+            }
+        }
+    }
+
+    private fun meteringRect(nx: Float, ny: Float): Rect? {
+        val arr = activeArray ?: return null
+        val cropW = arr.width() / zoomRatio
+        val cropH = arr.height() / zoomRatio
+        val cropLeft = arr.exactCenterX() - cropW / 2f
+        val cropTop = arr.exactCenterY() - cropH / 2f
+        val sx: Float
+        val sy: Float
+        when (sensorOrientation) {
+            90 -> { sx = ny; sy = 1f - nx }
+            180 -> { sx = 1f - nx; sy = 1f - ny }
+            270 -> { sx = 1f - ny; sy = nx }
+            else -> { sx = nx; sy = ny }
+        }
+        val cx = cropLeft + sx * cropW
+        val cy = cropTop + sy * cropH
+        val half = minOf(cropW, cropH) * 0.07f
+        var l = (cx - half).toInt()
+        var t = (cy - half).toInt()
+        var r = (cx + half).toInt()
+        var b = (cy + half).toInt()
+        l = l.coerceIn(arr.left, arr.right - 2)
+        t = t.coerceIn(arr.top, arr.bottom - 2)
+        r = r.coerceIn(l + 1, arr.right)
+        b = b.coerceIn(t + 1, arr.bottom)
+        return Rect(l, t, r, b)
     }
 
     // ---------------------------------------------------------------- Interno
@@ -233,11 +440,13 @@ class Camera2Controller(
         sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
         facingFront =
             characteristics.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_FRONT
+
         val afModes = characteristics.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES) ?: IntArray(0)
         afContinuousSupported = afModes.contains(CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
         afAvailable = afModes.any {
             it == CaptureRequest.CONTROL_AF_MODE_AUTO || it == CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
         }
+        minFocusDistance = characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
 
         activeArray = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
         val zr = characteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
@@ -266,8 +475,8 @@ class Camera2Controller(
 
         val rotatedViewWidth = if (swapped) textureView.height else textureView.width
         val rotatedViewHeight = if (swapped) textureView.width else textureView.height
-        var maxPreviewWidth = (if (swapped) displaySize.y else displaySize.x).coerceAtMost(MAX_PREVIEW_WIDTH)
-        var maxPreviewHeight = (if (swapped) displaySize.x else displaySize.y).coerceAtMost(MAX_PREVIEW_HEIGHT)
+        val maxPreviewWidth = (if (swapped) displaySize.y else displaySize.x).coerceAtMost(MAX_PREVIEW_WIDTH)
+        val maxPreviewHeight = (if (swapped) displaySize.x else displaySize.y).coerceAtMost(MAX_PREVIEW_HEIGHT)
 
         val previewChoices = map.getOutputSizes(SurfaceTexture::class.java) ?: arrayOf(Size(1920, 1080))
         previewSize = chooseOptimalSize(
@@ -308,16 +517,12 @@ class Camera2Controller(
                         if (cameraDevice == null) return
                         captureSession = session
                         try {
-                            previewRequestBuilder.set(
-                                CaptureRequest.CONTROL_AE_MODE,
-                                CaptureRequest.CONTROL_AE_MODE_ON
+                            applyControls(previewRequestBuilder)
+                            session.setRepeatingRequest(
+                                previewRequestBuilder.build(),
+                                previewCallback,
+                                backgroundHandler
                             )
-                            previewRequestBuilder.set(
-                                CaptureRequest.CONTROL_AF_MODE,
-                                if (afContinuousSupported) CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
-                                else CaptureRequest.CONTROL_AF_MODE_OFF
-                            )
-                            session.setRepeatingRequest(previewRequestBuilder.build(), null, backgroundHandler)
                             cancelWatchdog()
                             activity.runOnUiThread { onReady?.invoke() }
                         } catch (e: Exception) {
@@ -477,94 +682,6 @@ class Camera2Controller(
             notBigEnough.isNotEmpty() -> notBigEnough.maxByOrNull { it.width.toLong() * it.height }!!
             else -> choices.maxByOrNull { it.width.toLong() * it.height } ?: choices[0]
         }
-    }
-
-    // ---------------------------------------------------------------- Zoom y enfoque
-
-    private fun applyZoom(b: CaptureRequest.Builder) {
-        if (zoomRatioSupported) {
-            b.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoomRatio)
-        } else {
-            val arr = activeArray ?: return
-            val cropW = (arr.width() / zoomRatio).toInt().coerceAtLeast(1)
-            val cropH = (arr.height() / zoomRatio).toInt().coerceAtLeast(1)
-            val l = arr.left + (arr.width() - cropW) / 2
-            val t = arr.top + (arr.height() - cropH) / 2
-            b.set(CaptureRequest.SCALER_CROP_REGION, Rect(l, t, l + cropW, t + cropH))
-        }
-    }
-
-    /** Fija el nivel de zoom y devuelve el valor aplicado (acotado a [1, max]). */
-    fun setZoom(ratio: Float): Float {
-        zoomRatio = ratio.coerceIn(1f, maxZoom)
-        val session = captureSession
-        if (session != null && ::previewRequestBuilder.isInitialized) {
-            try {
-                applyZoom(previewRequestBuilder)
-                session.setRepeatingRequest(previewRequestBuilder.build(), null, backgroundHandler)
-            } catch (e: Exception) {
-            }
-        }
-        return zoomRatio
-    }
-
-    fun currentZoom(): Float = zoomRatio
-
-    /** Enfoque/medición en el punto tocado (coordenadas de la vista). */
-    fun focusAt(viewX: Float, viewY: Float, viewW: Int, viewH: Int) {
-        val session = captureSession ?: return
-        if (!::previewRequestBuilder.isInitialized || viewW == 0 || viewH == 0) return
-        val rect = meteringRect(viewX / viewW, viewY / viewH) ?: return
-        try {
-            val mr = arrayOf(MeteringRectangle(rect, MeteringRectangle.METERING_WEIGHT_MAX))
-            previewRequestBuilder.set(CaptureRequest.CONTROL_AE_REGIONS, mr)
-            if (afAvailable) {
-                previewRequestBuilder.set(CaptureRequest.CONTROL_AF_REGIONS, mr)
-                previewRequestBuilder.set(
-                    CaptureRequest.CONTROL_AF_MODE,
-                    CaptureRequest.CONTROL_AF_MODE_AUTO
-                )
-                previewRequestBuilder.set(
-                    CaptureRequest.CONTROL_AF_TRIGGER,
-                    CameraMetadata.CONTROL_AF_TRIGGER_START
-                )
-                session.capture(previewRequestBuilder.build(), null, backgroundHandler)
-                previewRequestBuilder.set(
-                    CaptureRequest.CONTROL_AF_TRIGGER,
-                    CameraMetadata.CONTROL_AF_TRIGGER_IDLE
-                )
-            }
-            session.setRepeatingRequest(previewRequestBuilder.build(), null, backgroundHandler)
-        } catch (e: Exception) {
-        }
-    }
-
-    private fun meteringRect(nx: Float, ny: Float): Rect? {
-        val arr = activeArray ?: return null
-        val cropW = arr.width() / zoomRatio
-        val cropH = arr.height() / zoomRatio
-        val cropLeft = arr.exactCenterX() - cropW / 2f
-        val cropTop = arr.exactCenterY() - cropH / 2f
-        val sx: Float
-        val sy: Float
-        when (sensorOrientation) {
-            90 -> { sx = ny; sy = 1f - nx }
-            180 -> { sx = 1f - nx; sy = 1f - ny }
-            270 -> { sx = 1f - ny; sy = nx }
-            else -> { sx = nx; sy = ny }
-        }
-        val cx = cropLeft + sx * cropW
-        val cy = cropTop + sy * cropH
-        val half = minOf(cropW, cropH) * 0.07f
-        var l = (cx - half).toInt()
-        var t = (cy - half).toInt()
-        var r = (cx + half).toInt()
-        var b = (cy + half).toInt()
-        l = l.coerceIn(arr.left, arr.right - 2)
-        t = t.coerceIn(arr.top, arr.bottom - 2)
-        r = r.coerceIn(l + 1, arr.right)
-        b = b.coerceIn(t + 1, arr.bottom)
-        return Rect(l, t, r, b)
     }
 
     companion object {

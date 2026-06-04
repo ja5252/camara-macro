@@ -15,12 +15,23 @@ android {
         versionName "1.0"
     }
 
+    signingConfigs {
+        camara {
+            storeFile file('camara.keystore')
+            storePassword 'camara123'
+            keyAlias 'camara'
+            keyPassword 'camara123'
+        }
+    }
+
     buildTypes {
+        debug {
+            // Firma con llave fija: permite actualizar sin desinstalar.
+            signingConfig signingConfigs.camara
+        }
         release {
             minifyEnabled false
-            // Firmamos el release con la llave de depuración para que se pueda
-            // instalar sin configurar un keystore propio.
-            signingConfig signingConfigs.debug
+            signingConfig signingConfigs.camara
         }
     }
 

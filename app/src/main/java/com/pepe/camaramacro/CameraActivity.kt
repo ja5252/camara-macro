@@ -147,7 +147,7 @@ class CameraActivity : AppCompatActivity() {
 
     // ---- Enfoque ----
     private fun focusAt(x: Float, y: Float) {
-        controller.focusAt(x, y, binding.gestureArea.width, binding.gestureArea.height)
+        controller.setFocusPoint(x, y, binding.gestureArea.width, binding.gestureArea.height)
         showFocusRing(x, y)
         binding.gestureArea.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
     }
