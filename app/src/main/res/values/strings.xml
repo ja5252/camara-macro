@@ -47,4 +47,8 @@
 
     <!-- Lentes -->
     <string name="lens_min_one">Debe quedar al menos una lente activa</string>
+
+    <!-- WhatsApp -->
+    <string name="share_whatsapp">Tomar foto y enviar por WhatsApp</string>
+    <string name="no_whatsapp">WhatsApp no está instalado</string>
 </resources>

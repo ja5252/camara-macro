@@ -5,12 +5,12 @@
     android:layout_height="match_parent"
     android:background="@color/black">
 
-    <!-- 1. Vista previa -->
+    <!-- 1. Vista previa (proporción real; franja inferior para controles) -->
     <com.pepe.camaramacro.AutoFitTextureView
         android:id="@+id/texture"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_gravity="center" />
+        android:layout_gravity="top|center_horizontal" />
 
     <!-- 2. Capa de gestos (tap = enfoque, pellizco = zoom) -->
     <View
@@ -113,6 +113,19 @@
             android:contentDescription="@string/cd_thumbnail"
             android:scaleType="centerCrop" />
     </com.google.android.material.card.MaterialCardView>
+
+    <!-- Botón WhatsApp: toma foto y la comparte por WhatsApp -->
+    <ImageButton
+        android:id="@+id/btn_whatsapp"
+        android:layout_width="56dp"
+        android:layout_height="56dp"
+        android:layout_gravity="bottom|end"
+        android:layout_marginEnd="22dp"
+        android:layout_marginBottom="45dp"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:contentDescription="@string/share_whatsapp"
+        android:scaleType="fitCenter"
+        android:src="@drawable/ic_whatsapp" />
 
     <!-- 9. Obturador -->
     <ImageButton

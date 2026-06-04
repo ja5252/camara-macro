@@ -640,15 +640,20 @@ class Camera2Controller(
     val currentAspect: AspectRatio get() = aspect
     val currentFull: Boolean get() = fullRes
 
-    /** Elige el tamaño JPEG según la relación de aspecto y resolución (full/media) actuales. */
-    private fun pickJpegSize(sizes: Array<Size>): Size {
-        if (sizes.isEmpty()) return Size(1920, 1080)
-        var candidates = if (aspect == AspectRatio.NATIVE) sizes.toList() else {
+    /** Tamaños que cumplen la relación de aspecto actual (o todos si NATIVE / sin coincidencias). */
+    private fun sizesForAspect(sizes: Array<Size>): List<Size> {
+        if (sizes.isEmpty()) return emptyList()
+        val candidates = if (aspect == AspectRatio.NATIVE) sizes.toList() else {
             val target = aspect.w.toFloat() / aspect.h
             sizes.filter { kotlin.math.abs(it.width.toFloat() / it.height - target) < 0.03f }
         }
-        if (candidates.isEmpty()) candidates = sizes.toList() // fallback: nunca quedar sin tamaño
-        val sorted = candidates.sortedByDescending { it.width.toLong() * it.height }
+        return if (candidates.isEmpty()) sizes.toList() else candidates
+    }
+
+    /** Elige el tamaño JPEG según la relación de aspecto y resolución (full/media) actuales. */
+    private fun pickJpegSize(sizes: Array<Size>): Size {
+        val sorted = sizesForAspect(sizes).sortedByDescending { it.width.toLong() * it.height }
+        if (sorted.isEmpty()) return Size(1920, 1080)
         return if (fullRes) sorted.first()
         else sorted.getOrNull(sorted.size / 2) ?: sorted.first()
     }
@@ -1189,11 +1194,11 @@ class Camera2Controller(
         try { nightReader?.close() } catch (e: Exception) {}
         nightReader = null
         if (nightEnabled) {
-            // Tope ~4MP: equilibra calidad y memoria (acumuladores + N buffers YUV).
-            val yuvSizes = map.getOutputSizes(ImageFormat.YUV_420_888)
-            nightSize = yuvSizes?.filter { it.width.toLong() * it.height <= 4_200_000L }
-                ?.maxByOrNull { it.width.toLong() * it.height }
-                ?: yuvSizes?.minByOrNull { it.width.toLong() * it.height }
+            // Respeta la relación de aspecto elegida; tope ~4MP (memoria: acumuladores + N buffers).
+            val yuvSizes = map.getOutputSizes(ImageFormat.YUV_420_888) ?: arrayOf(Size(1920, 1080))
+            val nightCands = sizesForAspect(yuvSizes).sortedByDescending { it.width.toLong() * it.height }
+            nightSize = nightCands.firstOrNull { it.width.toLong() * it.height <= 4_200_000L }
+                ?: nightCands.lastOrNull()
                 ?: previewSize
             nightReader = ImageReader.newInstance(
                 nightSize.width, nightSize.height, ImageFormat.YUV_420_888, NIGHT_FRAMES + 1

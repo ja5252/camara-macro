@@ -203,6 +203,7 @@ class CameraActivity : AppCompatActivity() {
         }
         binding.btnChangeLens.setOnClickListener { goToSetup() }
         binding.thumbnail.setOnClickListener { openGallery() }
+        binding.btnWhatsapp.setOnClickListener { shootAndShareWhatsApp() }
         binding.tabPhoto.setOnClickListener { setMode("photo") }
         binding.tabVideo.setOnClickListener { setMode("video") }
 
@@ -463,6 +464,49 @@ class CameraActivity : AppCompatActivity() {
 
     private fun openGallery() {
         startActivity(Intent(this, GalleryActivity::class.java))
+    }
+
+    // ---- WhatsApp: toma foto y la comparte ----
+    private fun shootAndShareWhatsApp() {
+        if (capturing) return
+        if (mode == "video") {
+            Toast.makeText(this, R.string.mode_photo, Toast.LENGTH_SHORT).show()
+            return
+        }
+        capturing = true
+        binding.btnShutter.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+        flashScreen()
+        controller.takePhoto { ok ->
+            capturing = false
+            if (ok) {
+                refreshThumbnail()
+                bounceThumbnail()
+                shareLatestToWhatsApp()
+            } else {
+                Toast.makeText(this, R.string.photo_error, Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun shareLatestToWhatsApp() {
+        val uri = latestMediaUri() ?: return
+        val base = Intent(Intent.ACTION_SEND)
+            .setType("image/jpeg")
+            .putExtra(Intent.EXTRA_STREAM, uri)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        // WhatsApp normal → WhatsApp Business → selector general.
+        for (pkg in arrayOf("com.whatsapp", "com.whatsapp.w4b")) {
+            try {
+                startActivity(Intent(base).setPackage(pkg))
+                return
+            } catch (e: Exception) {
+            }
+        }
+        try {
+            startActivity(Intent.createChooser(base, getString(R.string.share)))
+        } catch (e: Exception) {
+            Toast.makeText(this, R.string.no_whatsapp, Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun latestMediaUri(): Uri? {
