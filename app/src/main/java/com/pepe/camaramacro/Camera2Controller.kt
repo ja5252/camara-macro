@@ -7,8 +7,12 @@ import android.content.Context
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.ImageFormat
 import android.graphics.Matrix
+import android.graphics.Paint
 import android.graphics.Point
 import android.graphics.Rect
 import android.graphics.RectF
@@ -151,6 +155,7 @@ class Camera2Controller(
     // Ajustes de captura (resolución / relación de aspecto)
     private var aspect = AspectRatio.NATIVE
     private var fullRes = true
+    private var captureMatrix: ColorMatrix? = null // filtro de color aplicado a la foto
 
     // Modo noche (multi-frame). Excluyente con RAW.
     var nightEnabled = false
@@ -839,6 +844,30 @@ class Camera2Controller(
         }
     }
 
+    /** Filtro de color aplicado a la foto (null = sin filtro). */
+    fun setCaptureColorMatrix(cm: ColorMatrix?) {
+        captureMatrix = cm
+    }
+
+    /** Aplica una ColorMatrix al JPEG (decodifica, pinta con filtro, recodifica). */
+    private fun applyColorFilter(bytes: ByteArray, cm: ColorMatrix): ByteArray? {
+        return try {
+            val src = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+            val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(out)
+            val paint = Paint(Paint.FILTER_BITMAP_FLAG).apply { colorFilter = ColorMatrixColorFilter(cm) }
+            canvas.drawBitmap(src, 0f, 0f, paint)
+            src.recycle()
+            val bos = ByteArrayOutputStream()
+            out.compress(Bitmap.CompressFormat.JPEG, 95, bos)
+            out.recycle()
+            bos.toByteArray()
+        } catch (e: Exception) {
+            Log.e("CamMacro", "applyColorFilter: ${e.message}")
+            null
+        }
+    }
+
     /**
      * Modo Full: endereza el JPEG según EXIF y lo recorta (centrado) a la proporción de la
      * pantalla, para que la foto coincida EXACTO con la vista previa a pantalla completa.
@@ -893,15 +922,18 @@ class Camera2Controller(
     }
 
     /** ID de la primera lente frontal (selfie), o null. */
-    fun frontLensId(): String? {
+    fun frontLensId(): String? = frontLensIds().firstOrNull()
+
+    /** Todas las lentes frontales (incluye la de la pantalla interna del plegable). */
+    fun frontLensIds(): List<String> {
         val manager = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         return try {
-            manager.cameraIdList.firstOrNull {
+            manager.cameraIdList.filter {
                 manager.getCameraCharacteristics(it)
                     .get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_FRONT
             }
         } catch (e: Exception) {
-            null
+            emptyList()
         }
     }
 
@@ -1359,7 +1391,8 @@ class Camera2Controller(
 
     private fun saveImage(rawBytes: ByteArray): Boolean {
         // En modo Full recortamos a la proporción de la pantalla (foto = lo que se ve).
-        val bytes = if (aspect == AspectRatio.FULL) cropFullJpeg(rawBytes) ?: rawBytes else rawBytes
+        var bytes = if (aspect == AspectRatio.FULL) cropFullJpeg(rawBytes) ?: rawBytes else rawBytes
+        captureMatrix?.let { bytes = applyColorFilter(bytes, it) ?: bytes } // filtro de color
         val name = "MACRO_${System.currentTimeMillis()}.jpg"
         return try {
             val resolver = activity.contentResolver

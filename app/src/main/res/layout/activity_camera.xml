@@ -287,6 +287,7 @@
             <TextView android:id="@+id/chip_flash" style="@style/ProChip" android:text="⚡ off" />
             <TextView android:id="@+id/chip_night" style="@style/ProChip" android:text="🌙" />
             <TextView android:id="@+id/chip_raw" style="@style/ProChip" android:text="RAW" />
+            <TextView android:id="@+id/chip_filter" style="@style/ProChip" android:text="✦ Normal" />
             <TextView android:id="@+id/pro_toggle" style="@style/ProChip" android:text="PRO" />
             <TextView android:id="@+id/chip_ratio" style="@style/ProChip" android:text="4:3" />
             <TextView android:id="@+id/chip_res" style="@style/ProChip" android:text="FULL" />

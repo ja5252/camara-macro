@@ -6,12 +6,15 @@ import android.content.ContentUris
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.ColorMatrixColorFilter
+import android.graphics.RenderEffect
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.hardware.camera2.CameraMetadata
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -71,11 +74,13 @@ class CameraActivity : AppCompatActivity() {
     private var gridOn = false
     private var flashMode = 0
     private var facing = "back"
-    private val ratioLabels = arrayOf("RATIO", "4:3", "16:9", "1:1", "FULL")
+    private var camCycleIndex = 0
+    private val ratioLabels = arrayOf("RATIO", "4:3", "16:9", "1:1", "LLENA")
     private var ratioIndex = 0
     private var fullRes = true
     private var disabledLenses = HashSet<String>()
     private var nightOn = false
+    private var filterIndex = 0
     private val sensorManager by lazy { getSystemService(SENSOR_SERVICE) as SensorManager }
     private val rotationListener = object : SensorEventListener {
         private val rot = FloatArray(9)
@@ -231,6 +236,7 @@ class CameraActivity : AppCompatActivity() {
         binding.chipRatio.setOnClickListener { cycleRatio() }
         binding.chipRes.setOnClickListener { toggleRes() }
         binding.chipLenses.setOnClickListener { toggleLensPanel() }
+        binding.chipFilter.setOnClickListener { cycleFilter() }
 
         setMode(prefs.getString("mode", "photo") ?: "photo")
         restoreSettings()
@@ -271,6 +277,9 @@ class CameraActivity : AppCompatActivity() {
         )
 
         disabledLenses = HashSet(prefs.getStringSet("disabledLenses", emptySet()) ?: emptySet())
+
+        filterIndex = prefs.getInt("filter", 0).coerceIn(0, Filters.list.size - 1)
+        applyFilter()
     }
 
     override fun onResume() {
@@ -303,6 +312,8 @@ class CameraActivity : AppCompatActivity() {
         val id = prefs.getString("cameraId", null) ?: return goToSetup()
         currentZoom = 1f
         zoomRestored = false
+        camCycleIndex = 0
+        facing = "back"
         // Aplicar ajustes guardados ANTES de abrir (sin reconstruir): el primer setUpOutputs ya los usa.
         controller.presetCaptureSettings(AspectRatio.values()[ratioIndex], fullRes)
         controller.setDisabledLensIds(disabledLenses)
@@ -623,6 +634,27 @@ class CameraActivity : AppCompatActivity() {
         controller.setCaptureSettings(AspectRatio.values()[ratioIndex], fullRes)
     }
 
+    private fun cycleFilter() {
+        filterIndex = (filterIndex + 1) % Filters.list.size
+        applyFilter()
+        prefs.edit().putInt("filter", filterIndex).apply()
+    }
+
+    private fun applyFilter() {
+        val f = Filters.list[filterIndex.coerceIn(0, Filters.list.size - 1)]
+        binding.chipFilter.text = "✦ ${f.name}"
+        binding.chipFilter.setTextColor(
+            if (f.matrix == null) Color.parseColor("#CCFFFFFF") else ContextCompat.getColor(this, R.color.accent)
+        )
+        controller.setCaptureColorMatrix(f.matrix)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            binding.texture.setRenderEffect(
+                if (f.matrix == null) null
+                else RenderEffect.createColorFilterEffect(ColorMatrixColorFilter(f.matrix))
+            )
+        }
+    }
+
     private fun toggleRes() {
         if (controller.isRecording) return
         fullRes = !fullRes
@@ -693,21 +725,34 @@ class CameraActivity : AppCompatActivity() {
         buildLensChips()
     }
 
+    /** Ciclo de lentes al voltear: trasera → cada frontal (incluye la de pantalla interna) → trasera. */
+    private fun lensCycle(): List<String> {
+        val backId = prefs.getString("cameraId", "3") ?: "3"
+        return listOf(backId) + controller.frontLensIds()
+    }
+
     private fun flipCamera() {
         if (controller.isRecording) return
-        val target = if (facing == "back") controller.frontLensId() else prefs.getString("cameraId", "3")
-        if (target == null) {
+        val cycle = lensCycle()
+        if (cycle.size <= 1) {
             Toast.makeText(this, "No hay cámara frontal disponible", Toast.LENGTH_SHORT).show()
             return
         }
-        facing = if (facing == "back") "front" else "back"
+        camCycleIndex = (camCycleIndex + 1) % cycle.size
+        val target = cycle[camCycleIndex]
+        facing = if (camCycleIndex == 0) "back" else "front"
         currentZoom = 1f
         zoomRestored = true
         controller.close()
         controller.open(target)
-        binding.chipFlip.text = if (facing == "front") "⟲ frontal" else "⟲ atrás"
+        val frontCount = cycle.size - 1
+        binding.chipFlip.text = when {
+            camCycleIndex == 0 -> "⟲ atrás"
+            frontCount > 1 -> "⟲ frontal $camCycleIndex"
+            else -> "⟲ frontal"
+        }
         binding.chipFlip.setTextColor(
-            if (facing == "front") ContextCompat.getColor(this, R.color.accent) else Color.parseColor("#CCFFFFFF")
+            if (camCycleIndex == 0) Color.parseColor("#CCFFFFFF") else ContextCompat.getColor(this, R.color.accent)
         )
     }
 
