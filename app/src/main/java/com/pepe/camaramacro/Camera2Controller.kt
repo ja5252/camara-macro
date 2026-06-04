@@ -1405,6 +1405,7 @@ class Camera2Controller(
             // Con tope de tiempo: si una lente cuelga el HAL, la interfaz no se congela.
             backgroundThread?.join(1500)
         } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
         }
         backgroundThread = null
         backgroundHandler = null

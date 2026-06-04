@@ -485,14 +485,24 @@ class CameraActivity : AppCompatActivity() {
 
     private fun dp(v: Float) = v * resources.displayMetrics.density
 
+    private fun isVolumeKey(keyCode: Int) =
+        keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
-            if (::controller.isInitialized) {
+        if (isVolumeKey(keyCode) && ::controller.isInitialized) {
+            // Solo en la primera pulsación (repeatCount 0): un disparo por clic.
+            if (event == null || event.repeatCount == 0) {
                 if (mode == "video") toggleRecord() else startPhotoOrTimer()
-                return true
             }
+            return true // consume para que NO aparezca el control de volumen
         }
         return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
+        // Consumir también la liberación para suprimir el panel de volumen del sistema.
+        if (isVolumeKey(keyCode) && ::controller.isInitialized) return true
+        return super.onKeyUp(keyCode, event)
     }
 
     private fun toggleGrid() {
