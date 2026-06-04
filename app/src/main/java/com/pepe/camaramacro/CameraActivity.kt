@@ -32,7 +32,8 @@ class CameraActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        if (prefs.getString("cameraId", null) == null) {
+        val savedId = prefs.getString("cameraId", null)
+        if (savedId == null || savedId == "0") {
             startActivity(Intent(this, SetupActivity::class.java))
             finish()
             return

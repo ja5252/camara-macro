@@ -65,13 +65,15 @@ class SetupActivity : AppCompatActivity() {
     }
 
     private fun init() {
-        lenses = CameraInfoUtil.listLenses(this)
+        val all = CameraInfoUtil.listLenses(this)
+        // Excluimos la lente principal (ID 0): es la dañada y abrirla cuelga la cámara.
+        lenses = all.filter { it.cameraId != "0" }.ifEmpty { all }
         if (lenses.isEmpty()) {
             binding.lblLens.text = getString(R.string.no_cameras)
             return
         }
-        // Empezamos en la primera lente trasera SIN flash (evita la principal dañada).
-        index = lenses.indexOfFirst { it.facingBack && !it.hasFlash }.let { if (it >= 0) it else 0 }
+        // Empezamos en la primera lente trasera (suele ser gran angular / macro).
+        index = lenses.indexOfFirst { it.facingBack }.let { if (it >= 0) it else 0 }
         openCurrent()
     }
 

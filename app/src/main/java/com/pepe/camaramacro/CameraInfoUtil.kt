@@ -46,12 +46,12 @@ object CameraInfoUtil {
         return raws.map { r ->
             val type = when {
                 !r.back -> "Frontal (selfie)"
-                r.flash -> "Principal (la que suele fallarte)"
+                r.id == "0" -> "Principal (la que suele fallarte)"
                 r.focal > 0f && minFocal != null && r.focal == minFocal && minFocal != maxFocal ->
                     "Gran angular / macro (probable)"
                 r.focal > 0f && maxFocal != null && r.focal == maxFocal && minFocal != maxFocal ->
                     "Teleobjetivo / zoom (probable)"
-                else -> "Trasera"
+                else -> "Trasera (normal)"
             }
             val focalText = if (r.focal > 0f) "  ·  ${"%.1f".format(r.focal)} mm" else ""
             LensInfo(r.id, r.back, r.focal, r.flash, "$type$focalText  ·  ID ${r.id}")

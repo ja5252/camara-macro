@@ -413,7 +413,8 @@ class Camera2Controller(
     private fun stopBackgroundThread() {
         backgroundThread?.quitSafely()
         try {
-            backgroundThread?.join()
+            // Con tope de tiempo: si una lente cuelga el HAL, la interfaz no se congela.
+            backgroundThread?.join(1500)
         } catch (e: InterruptedException) {
         }
         backgroundThread = null
