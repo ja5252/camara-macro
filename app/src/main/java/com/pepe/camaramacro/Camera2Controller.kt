@@ -284,7 +284,21 @@ class Camera2Controller(
         }
     }
 
+    /**
+     * Cancela una captura pendiente liberando su callback (evita que el obturador se quede
+     * "pegado" si la sesión se cierra/reconstruye con una foto en vuelo).
+     */
+    private fun abortPendingCapture() {
+        val cb = pendingResult
+        pendingResult = null
+        try { pendingRawImage?.close() } catch (e: Exception) {}
+        pendingRawImage = null
+        pendingRawResult = null
+        if (cb != null) activity.runOnUiThread { cb.invoke(false) }
+    }
+
     fun close() {
+        abortPendingCapture()
         try {
             captureSession?.close()
         } catch (e: Exception) {
@@ -429,6 +443,7 @@ class Camera2Controller(
         chainIndex = targetIndex
         cameraId = zoomChain[targetIndex].first
         failed = false
+        abortPendingCapture()
         try { captureSession?.close() } catch (e: Exception) {}
         captureSession = null
         try { cameraDevice?.close() } catch (e: Exception) {}
@@ -571,6 +586,7 @@ class Camera2Controller(
         val h = backgroundHandler
         if (cameraDevice != null && !recording && captureSession != null && h != null) {
             h.post {
+                abortPendingCapture()
                 try { captureSession?.close() } catch (e: Exception) {}
                 captureSession = null
                 startPreview()
@@ -611,6 +627,7 @@ class Camera2Controller(
         val h = backgroundHandler
         if (cameraDevice != null && !recording && captureSession != null && h != null) {
             h.post {
+                abortPendingCapture()
                 try { captureSession?.close() } catch (e: Exception) {}
                 captureSession = null
                 try { imageReader?.close() } catch (e: Exception) {}
