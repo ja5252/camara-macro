@@ -8,6 +8,7 @@ import android.content.res.Configuration
 import android.graphics.ImageFormat
 import android.graphics.Matrix
 import android.graphics.Point
+import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCaptureSession
@@ -18,6 +19,7 @@ import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureFailure
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.TotalCaptureResult
+import android.hardware.camera2.params.MeteringRectangle
 import android.media.Image
 import android.media.ImageReader
 import android.media.MediaScannerConnection
@@ -27,6 +29,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
 import android.provider.MediaStore
+import android.util.Range
 import android.util.Size
 import android.view.OrientationEventListener
 import android.view.Surface
@@ -60,6 +63,15 @@ class Camera2Controller(
     private var facingFront = false
     private var afContinuousSupported = false
 
+    // Zoom y enfoque
+    private var zoomRatio = 1f
+    private var maxZoom = 1f
+    private var zoomRatioSupported = false
+    private var activeArray: Rect? = null
+    var afAvailable = false
+        private set
+    val maxZoomRatio: Float get() = maxZoom
+
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
     private val uiHandler = Handler(Looper.getMainLooper())
@@ -81,6 +93,7 @@ class Camera2Controller(
 
     fun open(camId: String) {
         failed = false
+        zoomRatio = 1f
         cameraId = camId
         if (backgroundThread == null) startBackgroundThread()
         if (orientationListener.canDetectOrientation()) orientationListener.enable()
@@ -109,6 +122,7 @@ class Camera2Controller(
                 if (afContinuousSupported) CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
                 else CaptureRequest.CONTROL_AF_MODE_OFF
             )
+            applyZoom(req)
             req.set(CaptureRequest.JPEG_ORIENTATION, currentJpegOrientation())
             session.capture(req.build(), object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureFailed(
@@ -221,6 +235,20 @@ class Camera2Controller(
             characteristics.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_FRONT
         val afModes = characteristics.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES) ?: IntArray(0)
         afContinuousSupported = afModes.contains(CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+        afAvailable = afModes.any {
+            it == CaptureRequest.CONTROL_AF_MODE_AUTO || it == CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+        }
+
+        activeArray = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+        val zr = characteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+        if (zr != null) {
+            zoomRatioSupported = true
+            maxZoom = zr.upper
+        } else {
+            zoomRatioSupported = false
+            maxZoom = characteristics.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1f
+        }
+        if (maxZoom < 1f) maxZoom = 1f
 
         val jpegSizes = map.getOutputSizes(ImageFormat.JPEG) ?: arrayOf(Size(1920, 1080))
         val largest = jpegSizes.maxByOrNull { it.width.toLong() * it.height } ?: Size(1920, 1080)
@@ -449,6 +477,94 @@ class Camera2Controller(
             notBigEnough.isNotEmpty() -> notBigEnough.maxByOrNull { it.width.toLong() * it.height }!!
             else -> choices.maxByOrNull { it.width.toLong() * it.height } ?: choices[0]
         }
+    }
+
+    // ---------------------------------------------------------------- Zoom y enfoque
+
+    private fun applyZoom(b: CaptureRequest.Builder) {
+        if (zoomRatioSupported) {
+            b.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoomRatio)
+        } else {
+            val arr = activeArray ?: return
+            val cropW = (arr.width() / zoomRatio).toInt().coerceAtLeast(1)
+            val cropH = (arr.height() / zoomRatio).toInt().coerceAtLeast(1)
+            val l = arr.left + (arr.width() - cropW) / 2
+            val t = arr.top + (arr.height() - cropH) / 2
+            b.set(CaptureRequest.SCALER_CROP_REGION, Rect(l, t, l + cropW, t + cropH))
+        }
+    }
+
+    /** Fija el nivel de zoom y devuelve el valor aplicado (acotado a [1, max]). */
+    fun setZoom(ratio: Float): Float {
+        zoomRatio = ratio.coerceIn(1f, maxZoom)
+        val session = captureSession
+        if (session != null && ::previewRequestBuilder.isInitialized) {
+            try {
+                applyZoom(previewRequestBuilder)
+                session.setRepeatingRequest(previewRequestBuilder.build(), null, backgroundHandler)
+            } catch (e: Exception) {
+            }
+        }
+        return zoomRatio
+    }
+
+    fun currentZoom(): Float = zoomRatio
+
+    /** Enfoque/medición en el punto tocado (coordenadas de la vista). */
+    fun focusAt(viewX: Float, viewY: Float, viewW: Int, viewH: Int) {
+        val session = captureSession ?: return
+        if (!::previewRequestBuilder.isInitialized || viewW == 0 || viewH == 0) return
+        val rect = meteringRect(viewX / viewW, viewY / viewH) ?: return
+        try {
+            val mr = arrayOf(MeteringRectangle(rect, MeteringRectangle.METERING_WEIGHT_MAX))
+            previewRequestBuilder.set(CaptureRequest.CONTROL_AE_REGIONS, mr)
+            if (afAvailable) {
+                previewRequestBuilder.set(CaptureRequest.CONTROL_AF_REGIONS, mr)
+                previewRequestBuilder.set(
+                    CaptureRequest.CONTROL_AF_MODE,
+                    CaptureRequest.CONTROL_AF_MODE_AUTO
+                )
+                previewRequestBuilder.set(
+                    CaptureRequest.CONTROL_AF_TRIGGER,
+                    CameraMetadata.CONTROL_AF_TRIGGER_START
+                )
+                session.capture(previewRequestBuilder.build(), null, backgroundHandler)
+                previewRequestBuilder.set(
+                    CaptureRequest.CONTROL_AF_TRIGGER,
+                    CameraMetadata.CONTROL_AF_TRIGGER_IDLE
+                )
+            }
+            session.setRepeatingRequest(previewRequestBuilder.build(), null, backgroundHandler)
+        } catch (e: Exception) {
+        }
+    }
+
+    private fun meteringRect(nx: Float, ny: Float): Rect? {
+        val arr = activeArray ?: return null
+        val cropW = arr.width() / zoomRatio
+        val cropH = arr.height() / zoomRatio
+        val cropLeft = arr.exactCenterX() - cropW / 2f
+        val cropTop = arr.exactCenterY() - cropH / 2f
+        val sx: Float
+        val sy: Float
+        when (sensorOrientation) {
+            90 -> { sx = ny; sy = 1f - nx }
+            180 -> { sx = 1f - nx; sy = 1f - ny }
+            270 -> { sx = 1f - ny; sy = nx }
+            else -> { sx = nx; sy = ny }
+        }
+        val cx = cropLeft + sx * cropW
+        val cy = cropTop + sy * cropH
+        val half = minOf(cropW, cropH) * 0.07f
+        var l = (cx - half).toInt()
+        var t = (cy - half).toInt()
+        var r = (cx + half).toInt()
+        var b = (cy + half).toInt()
+        l = l.coerceIn(arr.left, arr.right - 2)
+        t = t.coerceIn(arr.top, arr.bottom - 2)
+        r = r.coerceIn(l + 1, arr.right)
+        b = b.coerceIn(t + 1, arr.bottom)
+        return Rect(l, t, r, b)
     }
 
     companion object {

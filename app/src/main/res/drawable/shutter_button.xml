@@ -2,19 +2,17 @@
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
     <item>
         <shape android:shape="oval">
-            <solid android:color="#66FFFFFF" />
+            <stroke android:width="4dp" android:color="#FFFFFFFF" />
+            <solid android:color="#00000000" />
         </shape>
     </item>
     <item
-        android:bottom="8dp"
-        android:left="8dp"
-        android:right="8dp"
-        android:top="8dp">
+        android:left="9dp"
+        android:top="9dp"
+        android:right="9dp"
+        android:bottom="9dp">
         <shape android:shape="oval">
             <solid android:color="#FFFFFFFF" />
-            <stroke
-                android:width="3dp"
-                android:color="#FF222222" />
         </shape>
     </item>
 </layer-list>

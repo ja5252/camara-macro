@@ -1,30 +1,141 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/black">
 
+    <!-- 1. Vista previa -->
     <com.pepe.camaramacro.AutoFitTextureView
         android:id="@+id/texture"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="center" />
 
-    <com.google.android.material.button.MaterialButton
-        android:id="@+id/btn_change_lens"
-        style="@style/Widget.Material3.Button.TonalButton"
+    <!-- 2. Capa de gestos (tap = enfoque, pellizco = zoom) -->
+    <View
+        android:id="@+id/gesture_area"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- 3. Scrims para legibilidad -->
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="110dp"
+        android:layout_gravity="top"
+        android:background="@drawable/scrim_top"
+        android:clickable="false"
+        android:focusable="false" />
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="190dp"
+        android:layout_gravity="bottom"
+        android:background="@drawable/scrim_bottom"
+        android:clickable="false"
+        android:focusable="false" />
+
+    <!-- 4. Anillo de enfoque (se mueve al punto del tap) -->
+    <View
+        android:id="@+id/focus_ring"
+        android:layout_width="72dp"
+        android:layout_height="72dp"
+        android:background="@drawable/focus_ring"
+        android:clickable="false"
+        android:focusable="false"
+        android:visibility="invisible" />
+
+    <!-- 5. Píldora de zoom -->
+    <TextView
+        android:id="@+id/zoom_pill"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_gravity="top|end"
-        android:layout_margin="16dp"
-        android:text="@string/change_lens" />
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="156dp"
+        android:background="@drawable/zoom_pill_bg"
+        android:paddingHorizontal="16dp"
+        android:paddingVertical="7dp"
+        android:text="1.0x"
+        android:textColor="@color/white"
+        android:textSize="13sp"
+        android:fontFamily="monospace"
+        android:alpha="0"
+        android:clickable="false"
+        android:focusable="false" />
 
+    <!-- 6. Chip de lente activa -->
+    <TextView
+        android:id="@+id/lens_chip"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|start"
+        android:layout_marginStart="16dp"
+        android:layout_marginTop="44dp"
+        android:background="@drawable/chip_bg"
+        android:paddingHorizontal="10dp"
+        android:paddingVertical="5dp"
+        android:text="@string/lens_macro"
+        android:textAllCaps="true"
+        android:textColor="@color/warm_white"
+        android:textSize="12sp"
+        android:letterSpacing="0.08"
+        android:fontFamily="sans-serif-medium"
+        android:clickable="false"
+        android:focusable="false" />
+
+    <!-- 7. Cambiar lente (engrane) -->
+    <ImageButton
+        android:id="@+id/btn_change_lens"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_gravity="top|end"
+        android:layout_marginTop="40dp"
+        android:layout_marginEnd="10dp"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:contentDescription="@string/change_lens"
+        android:padding="11dp"
+        android:src="@drawable/ic_settings" />
+
+    <!-- 8. Miniatura de última foto -->
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/thumbnail"
+        android:layout_width="54dp"
+        android:layout_height="54dp"
+        android:layout_gravity="bottom|start"
+        android:layout_marginStart="24dp"
+        android:layout_marginBottom="46dp"
+        app:cardBackgroundColor="#22FFFFFF"
+        app:cardCornerRadius="12dp"
+        app:cardElevation="0dp"
+        app:strokeColor="#B3FFFFFF"
+        app:strokeWidth="1.5dp">
+
+        <ImageView
+            android:id="@+id/thumbnail_image"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:contentDescription="@string/cd_thumbnail"
+            android:scaleType="centerCrop" />
+    </com.google.android.material.card.MaterialCardView>
+
+    <!-- 9. Obturador -->
     <ImageButton
         android:id="@+id/btn_shutter"
-        android:layout_width="84dp"
-        android:layout_height="84dp"
+        android:layout_width="78dp"
+        android:layout_height="78dp"
         android:layout_gravity="bottom|center_horizontal"
-        android:layout_marginBottom="32dp"
+        android:layout_marginBottom="40dp"
         android:background="@drawable/shutter_button"
-        android:contentDescription="@string/shutter" />
+        android:contentDescription="@string/shutter"
+        android:elevation="6dp" />
+
+    <!-- 10. Destello de captura (encima de todo, no recibe toques) -->
+    <View
+        android:id="@+id/screen_flash"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@color/white"
+        android:alpha="0"
+        android:clickable="false"
+        android:focusable="false" />
 </FrameLayout>
