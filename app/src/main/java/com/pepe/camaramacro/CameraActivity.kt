@@ -40,6 +40,7 @@ class CameraActivity : AppCompatActivity() {
     private var mode = "photo"
     private var capturing = false
     private var currentZoom = 1f
+    private var zoomRestored = false
 
     private val ui = Handler(Looper.getMainLooper())
     private val prefs by lazy { getSharedPreferences("camara", MODE_PRIVATE) }
@@ -95,8 +96,11 @@ class CameraActivity : AppCompatActivity() {
             }
         }
         controller.onReady = {
-            val z = prefs.getFloat("zoom", 1f)
-            if (z > 1.01f) currentZoom = controller.setZoom(z)
+            if (!zoomRestored) {
+                zoomRestored = true
+                val z = prefs.getFloat("zoom", 1f)
+                if (z > 1.01f) currentZoom = controller.setZoom(z)
+            }
         }
         controller.onRecordingChanged = { rec -> onRecordingChanged(rec) }
 
@@ -172,6 +176,7 @@ class CameraActivity : AppCompatActivity() {
     private fun startCamera() {
         val id = prefs.getString("cameraId", null) ?: return goToSetup()
         currentZoom = 1f
+        zoomRestored = false
         controller.open(id)
     }
 

@@ -32,6 +32,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
 import android.provider.MediaStore
+import android.util.Log
 import android.util.Size
 import android.view.OrientationEventListener
 import android.view.Surface
@@ -158,6 +159,7 @@ class Camera2Controller(
         globalZoom = if (autoLens) zoomChain[chainIndex].second else 1f
         switching = false
         pendingResidual = -1f
+        Log.i("CamMacro", "open id=$camId autoLens=$autoLens chainIndex=$chainIndex chain=$zoomChain")
         if (backgroundThread == null) startBackgroundThread()
         if (orientationListener.canDetectOrientation()) orientationListener.enable()
         if (textureView.isAvailable) {
@@ -251,6 +253,7 @@ class Camera2Controller(
         var ti = 0
         for (i in zoomChain.indices) if (gg >= zoomChain[i].second - 0.01f) ti = i
         val residual = gg / zoomChain[ti].second
+        Log.i("CamMacro", "setZoom g=$g gg=$gg ti=$ti chainIndex=$chainIndex residual=$residual switch=${ti != chainIndex}")
         if (ti != chainIndex) {
             pendingResidual = residual
             globalZoom = gg
@@ -297,6 +300,7 @@ class Camera2Controller(
         if (backs.isEmpty()) return
         val minF = backs.first().second
         backs.forEach { zoomChain.add(Pair(it.first, it.second / minF)) }
+        Log.i("CamMacro", "buildZoomChain ids=${ids.toList()} mainFocal=$mainFocal chain=$zoomChain")
     }
 
     private fun switchToLens(targetIndex: Int) {
