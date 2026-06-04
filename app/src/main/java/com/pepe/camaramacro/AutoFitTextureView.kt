@@ -17,6 +17,10 @@ class AutoFitTextureView @JvmOverloads constructor(
     private var ratioWidth = 0
     private var ratioHeight = 0
 
+    /** true = llena la pantalla recortando (modo Full); false = muestra todo (FIT). */
+    var coverMode = false
+        set(v) { field = v; requestLayout() }
+
     fun setAspectRatio(width: Int, height: Int) {
         if (width < 0 || height < 0) return
         ratioWidth = width
@@ -30,6 +34,13 @@ class AutoFitTextureView @JvmOverloads constructor(
         val height = MeasureSpec.getSize(heightMeasureSpec)
         if (ratioWidth == 0 || ratioHeight == 0) {
             setMeasuredDimension(width, height)
+        } else if (coverMode) {
+            // COVER: llena la pantalla recortando el sobrante (modo Full).
+            if (width > height * ratioWidth / ratioHeight) {
+                setMeasuredDimension(width, width * ratioHeight / ratioWidth)
+            } else {
+                setMeasuredDimension(height * ratioWidth / ratioHeight, height)
+            }
         } else {
             // FIT (contiene la proporción completa = lo que ves es lo que sale; sin recortar
             // ni deformar). Deja franjas arriba/abajo donde van los controles.

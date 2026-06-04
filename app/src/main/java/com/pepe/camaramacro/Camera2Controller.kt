@@ -50,8 +50,11 @@ import java.io.FileOutputStream
 /** Estado del enfoque comunicado a la UI (mapea CONTROL_AF_STATE). */
 enum class FocusState { SCANNING, FOCUSED, NOT_FOCUSED, INACTIVE }
 
-/** Relación de aspecto de captura. NATIVE = el del sensor (máxima área). */
-enum class AspectRatio(val w: Int, val h: Int) { NATIVE(0, 0), R4_3(4, 3), R16_9(16, 9), R1_1(1, 1) }
+/**
+ * Relación de aspecto de captura. NATIVE = el del sensor (máxima área).
+ * FULL = pantalla completa: captura todo el sensor y recorta a la proporción de la pantalla.
+ */
+enum class AspectRatio(val w: Int, val h: Int) { NATIVE(0, 0), R4_3(4, 3), R16_9(16, 9), R1_1(1, 1), FULL(0, 0) }
 
 /**
  * Abre una lente concreta por su ID, muestra la vista previa en un AutoFitTextureView
@@ -643,7 +646,7 @@ class Camera2Controller(
     /** Tamaños que cumplen la relación de aspecto actual (o todos si NATIVE / sin coincidencias). */
     private fun sizesForAspect(sizes: Array<Size>): List<Size> {
         if (sizes.isEmpty()) return emptyList()
-        val candidates = if (aspect == AspectRatio.NATIVE) sizes.toList() else {
+        val candidates = if (aspect == AspectRatio.NATIVE || aspect == AspectRatio.FULL) sizes.toList() else {
             val target = aspect.w.toFloat() / aspect.h
             sizes.filter { kotlin.math.abs(it.width.toFloat() / it.height - target) < 0.03f }
         }
@@ -832,6 +835,59 @@ class Camera2Controller(
             src.recycle()
             bos.toByteArray()
         } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Modo Full: endereza el JPEG según EXIF y lo recorta (centrado) a la proporción de la
+     * pantalla, para que la foto coincida EXACTO con la vista previa a pantalla completa.
+     */
+    private fun cropFullJpeg(bytes: ByteArray): ByteArray? {
+        return try {
+            var bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+            val orient = try {
+                android.media.ExifInterface(java.io.ByteArrayInputStream(bytes))
+                    .getAttributeInt(
+                        android.media.ExifInterface.TAG_ORIENTATION,
+                        android.media.ExifInterface.ORIENTATION_NORMAL
+                    )
+            } catch (e: Exception) {
+                android.media.ExifInterface.ORIENTATION_NORMAL
+            }
+            val deg = when (orient) {
+                android.media.ExifInterface.ORIENTATION_ROTATE_90 -> 90
+                android.media.ExifInterface.ORIENTATION_ROTATE_180 -> 180
+                android.media.ExifInterface.ORIENTATION_ROTATE_270 -> 270
+                else -> 0
+            }
+            if (deg != 0) {
+                val m = Matrix().apply { postRotate(deg.toFloat()) }
+                val r = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+                if (r != bmp) bmp.recycle()
+                bmp = r
+            }
+            val dm = activity.resources.displayMetrics
+            val sw = minOf(dm.widthPixels, dm.heightPixels).toFloat()
+            val sh = maxOf(dm.widthPixels, dm.heightPixels).toFloat()
+            val target = sw / sh // proporción vertical de la pantalla (ancho/alto)
+            val w = bmp.width
+            val h = bmp.height
+            val cur = w.toFloat() / h
+            val cropped = if (cur > target) {
+                val nw = (h * target).toInt().coerceIn(1, w)
+                Bitmap.createBitmap(bmp, (w - nw) / 2, 0, nw, h)
+            } else {
+                val nh = (w / target).toInt().coerceIn(1, h)
+                Bitmap.createBitmap(bmp, 0, (h - nh) / 2, w, nh)
+            }
+            val bos = ByteArrayOutputStream()
+            cropped.compress(Bitmap.CompressFormat.JPEG, 95, bos)
+            if (cropped != bmp) cropped.recycle()
+            bmp.recycle()
+            bos.toByteArray()
+        } catch (e: Exception) {
+            Log.e("CamMacro", "cropFullJpeg: ${e.message}")
             null
         }
     }
@@ -1229,6 +1285,7 @@ class Camera2Controller(
         )
 
         activity.runOnUiThread {
+            textureView.coverMode = (aspect == AspectRatio.FULL)
             val orientation = activity.resources.configuration.orientation
             if (orientation == Configuration.ORIENTATION_LANDSCAPE) {
                 textureView.setAspectRatio(previewSize.width, previewSize.height)
@@ -1300,7 +1357,9 @@ class Camera2Controller(
         }
     }
 
-    private fun saveImage(bytes: ByteArray): Boolean {
+    private fun saveImage(rawBytes: ByteArray): Boolean {
+        // En modo Full recortamos a la proporción de la pantalla (foto = lo que se ve).
+        val bytes = if (aspect == AspectRatio.FULL) cropFullJpeg(rawBytes) ?: rawBytes else rawBytes
         val name = "MACRO_${System.currentTimeMillis()}.jpg"
         return try {
             val resolver = activity.contentResolver

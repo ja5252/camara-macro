@@ -71,7 +71,7 @@ class CameraActivity : AppCompatActivity() {
     private var gridOn = false
     private var flashMode = 0
     private var facing = "back"
-    private val ratioLabels = arrayOf("RATIO", "4:3", "16:9", "1:1")
+    private val ratioLabels = arrayOf("RATIO", "4:3", "16:9", "1:1", "FULL")
     private var ratioIndex = 0
     private var fullRes = true
     private var disabledLenses = HashSet<String>()
