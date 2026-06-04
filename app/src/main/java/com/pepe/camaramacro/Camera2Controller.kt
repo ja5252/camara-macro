@@ -45,6 +45,9 @@ import java.io.FileOutputStream
 /** Estado del enfoque comunicado a la UI (mapea CONTROL_AF_STATE). */
 enum class FocusState { SCANNING, FOCUSED, NOT_FOCUSED, INACTIVE }
 
+/** Relación de aspecto de captura. NATIVE = el del sensor (máxima área). */
+enum class AspectRatio(val w: Int, val h: Int) { NATIVE(0, 0), R4_3(4, 3), R16_9(16, 9), R1_1(1, 1) }
+
 /**
  * Abre una lente concreta por su ID, muestra la vista previa en un AutoFitTextureView
  * y permite tomar fotos. Soporta enfoque por toque (con estado AF), bloqueo AE/AF,
@@ -99,6 +102,7 @@ class Camera2Controller(
     private var switching = false
     private var pendingResidual = -1f
     private var autoLens = false
+    private var disabledLensIds: Set<String> = emptySet()
 
     // Controles PRO (exposición / WB)
     private var isoMin = 100
@@ -132,6 +136,10 @@ class Camera2Controller(
     private var pendingRawResult: TotalCaptureResult? = null
     private var pendingRawImage: Image? = null
     private var rawFallbackTried = false
+
+    // Ajustes de captura (resolución / relación de aspecto)
+    private var aspect = AspectRatio.NATIVE
+    private var fullRes = true
 
     private var aeLocked = false
     private var afLocked = false
@@ -355,11 +363,10 @@ class Camera2Controller(
         return globalZoom
     }
 
-    /** Construye la cadena de lentes para zoom: traseras que funcionan (excluye la dañada y sus duplicados). */
-    private fun buildZoomChain() {
-        zoomChain.clear()
+    /** Lentes traseras que sirven (excluye la dañada ID0 y duplicados de su focal). Para la UI. */
+    fun backLensCandidates(): List<Pair<String, Float>> {
         val manager = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        val ids = try { manager.cameraIdList } catch (e: Exception) { return }
+        val ids = try { manager.cameraIdList } catch (e: Exception) { return emptyList() }
         var mainFocal = 0f
         try {
             mainFocal = manager.getCameraCharacteristics("0")
@@ -383,10 +390,37 @@ class Camera2Controller(
             }
         }
         backs.sortBy { it.second }
-        if (backs.isEmpty()) return
+        return backs
+    }
+
+    /** Construye la cadena de zoom; respeta las lentes desactivadas por el usuario. */
+    private fun buildZoomChain() {
+        zoomChain.clear()
+        val allBacks = backLensCandidates()
+        if (allBacks.isEmpty()) return
+        // Quita las desactivadas, pero NUNCA la lente abierta ahora (garantiza preview/captura).
+        var backs = allBacks.filter { it.first == cameraId || !disabledLensIds.contains(it.first) }
+        if (backs.isEmpty()) backs = allBacks // salvaguarda: jamás dejar la cadena vacía
         val minF = backs.first().second
         backs.forEach { zoomChain.add(Pair(it.first, it.second / minF)) }
-        Log.i("CamMacro", "buildZoomChain ids=${ids.toList()} mainFocal=$mainFocal chain=$zoomChain")
+        Log.i("CamMacro", "buildZoomChain chain=$zoomChain disabled=$disabledLensIds")
+    }
+
+    /** Activa/desactiva lentes en la cadena de zoom. La lente activa nunca se quita. */
+    fun setDisabledLensIds(ids: Set<String>) {
+        disabledLensIds = HashSet(ids)
+        if (::previewRequestBuilder.isInitialized && captureSession != null) refreshZoomChain()
+    }
+
+    /** Reconstruye la cadena en caliente (sin recrear sesión: la lente activa sigue viva). */
+    private fun refreshZoomChain() {
+        val prev = cameraId
+        buildZoomChain()
+        chainIndex = zoomChain.indexOfFirst { it.first == prev }
+        autoLens = chainIndex >= 0 && zoomChain.size >= 2
+        if (chainIndex < 0) chainIndex = 0
+        globalZoom = if (autoLens) zoomChain[chainIndex].second * zoomRatio else zoomRatio
+        setZoom(globalZoom)
     }
 
     private fun switchToLens(targetIndex: Int) {
@@ -543,6 +577,54 @@ class Camera2Controller(
             }
         }
         return rawEnabled
+    }
+
+    // ---------------------------------------------------------------- Ajustes de captura
+
+    val currentAspect: AspectRatio get() = aspect
+    val currentFull: Boolean get() = fullRes
+
+    /** Elige el tamaño JPEG según la relación de aspecto y resolución (full/media) actuales. */
+    private fun pickJpegSize(sizes: Array<Size>): Size {
+        if (sizes.isEmpty()) return Size(1920, 1080)
+        var candidates = if (aspect == AspectRatio.NATIVE) sizes.toList() else {
+            val target = aspect.w.toFloat() / aspect.h
+            sizes.filter { kotlin.math.abs(it.width.toFloat() / it.height - target) < 0.03f }
+        }
+        if (candidates.isEmpty()) candidates = sizes.toList() // fallback: nunca quedar sin tamaño
+        val sorted = candidates.sortedByDescending { it.width.toLong() * it.height }
+        return if (fullRes) sorted.first()
+        else sorted.getOrNull(sorted.size / 2) ?: sorted.first()
+    }
+
+    /** Fija ajustes SIN reconstruir (para usar antes del primer open). */
+    fun presetCaptureSettings(newAspect: AspectRatio, full: Boolean) {
+        aspect = newAspect
+        fullRes = full
+    }
+
+    /** Cambia resolución/aspecto reconstruyendo la sesión (no cambia el nº de streams). */
+    fun setCaptureSettings(newAspect: AspectRatio, full: Boolean) {
+        if (newAspect == aspect && full == fullRes) return
+        aspect = newAspect
+        fullRes = full
+        val h = backgroundHandler
+        if (cameraDevice != null && !recording && captureSession != null && h != null) {
+            h.post {
+                try { captureSession?.close() } catch (e: Exception) {}
+                captureSession = null
+                try { imageReader?.close() } catch (e: Exception) {}
+                imageReader = null
+                try {
+                    val mgr = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+                    setUpOutputs(mgr)
+                    configureTransform(textureView.width, textureView.height)
+                    startPreview()
+                } catch (e: Exception) {
+                    fail("No se pudo aplicar el ajuste: ${e.message}")
+                }
+            }
+        }
     }
 
     /** ID de la primera lente frontal (selfie), o null. */
@@ -859,7 +941,8 @@ class Camera2Controller(
         flashAvailable = characteristics.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) ?: false
 
         val jpegSizes = map.getOutputSizes(ImageFormat.JPEG) ?: arrayOf(Size(1920, 1080))
-        val largest = jpegSizes.maxByOrNull { it.width.toLong() * it.height } ?: Size(1920, 1080)
+        // Tamaño según relación de aspecto y resolución elegidas; el preview adopta este aspecto.
+        val largest = pickJpegSize(jpegSizes)
 
         val recSizes = map.getOutputSizes(MediaRecorder::class.java)
         videoSize = recSizes?.firstOrNull { it.width == 1920 && it.height == 1080 }

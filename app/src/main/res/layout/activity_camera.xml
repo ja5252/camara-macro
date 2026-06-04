@@ -268,6 +268,19 @@
         </LinearLayout>
     </LinearLayout>
 
+    <!-- Panel de lentes (activar/desactivar en el ciclo de zoom) -->
+    <LinearLayout
+        android:id="@+id/lens_panel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="188dp"
+        android:background="@drawable/zoom_pill_bg"
+        android:gravity="center"
+        android:orientation="horizontal"
+        android:padding="12dp"
+        android:visibility="gone" />
+
     <!-- Chips arriba-izquierda: cuadrícula y temporizador -->
     <LinearLayout
         android:layout_width="wrap_content"
@@ -282,6 +295,9 @@
         <TextView android:id="@+id/chip_flash" style="@style/ProChip" android:layout_marginBottom="6dp" android:text="⚡ off" />
         <TextView android:id="@+id/chip_flip" style="@style/ProChip" android:layout_marginBottom="6dp" android:text="⟲ atrás" />
         <TextView android:id="@+id/chip_raw" style="@style/ProChip" android:layout_marginBottom="6dp" android:text="RAW" />
+        <TextView android:id="@+id/chip_ratio" style="@style/ProChip" android:layout_marginBottom="6dp" android:text="4:3" />
+        <TextView android:id="@+id/chip_res" style="@style/ProChip" android:layout_marginBottom="6dp" android:text="FULL" />
+        <TextView android:id="@+id/chip_lenses" style="@style/ProChip" android:text="LENTES" />
     </LinearLayout>
 
     <!-- Cuenta atrás del temporizador -->

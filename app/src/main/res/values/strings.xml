@@ -44,4 +44,7 @@
     <!-- RAW -->
     <string name="raw_save_error">No se pudo guardar el RAW</string>
     <string name="raw_unavailable">RAW no disponible en esta lente</string>
+
+    <!-- Lentes -->
+    <string name="lens_min_one">Debe quedar al menos una lente activa</string>
 </resources>

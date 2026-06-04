@@ -26,7 +26,9 @@ import android.view.View
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import android.view.animation.OvershootInterpolator
+import android.widget.LinearLayout
 import android.widget.SeekBar
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -68,6 +70,10 @@ class CameraActivity : AppCompatActivity() {
     private var gridOn = false
     private var flashMode = 0
     private var facing = "back"
+    private val ratioLabels = arrayOf("RATIO", "4:3", "16:9", "1:1")
+    private var ratioIndex = 0
+    private var fullRes = true
+    private var disabledLenses = HashSet<String>()
     private val sensorManager by lazy { getSystemService(SENSOR_SERVICE) as SensorManager }
     private val rotationListener = object : SensorEventListener {
         private val rot = FloatArray(9)
@@ -217,6 +223,9 @@ class CameraActivity : AppCompatActivity() {
         binding.chipFlash.setOnClickListener { cycleFlash() }
         binding.chipFlip.setOnClickListener { flipCamera() }
         binding.chipRaw.setOnClickListener { toggleRaw() }
+        binding.chipRatio.setOnClickListener { cycleRatio() }
+        binding.chipRes.setOnClickListener { toggleRes() }
+        binding.chipLenses.setOnClickListener { toggleLensPanel() }
 
         setMode(prefs.getString("mode", "photo") ?: "photo")
         restoreSettings()
@@ -244,6 +253,19 @@ class CameraActivity : AppCompatActivity() {
         binding.chipGrid.setTextColor(
             if (gridOn) ContextCompat.getColor(this, R.color.accent) else Color.parseColor("#CCFFFFFF")
         )
+
+        ratioIndex = prefs.getInt("capRatio", 0).coerceIn(0, ratioLabels.size - 1)
+        binding.chipRatio.text = ratioLabels[ratioIndex]
+        binding.chipRatio.setTextColor(
+            if (ratioIndex == 0) Color.parseColor("#CCFFFFFF") else ContextCompat.getColor(this, R.color.accent)
+        )
+        fullRes = prefs.getBoolean("capFull", true)
+        binding.chipRes.text = if (fullRes) "FULL" else "MED"
+        binding.chipRes.setTextColor(
+            if (fullRes) Color.parseColor("#CCFFFFFF") else ContextCompat.getColor(this, R.color.accent)
+        )
+
+        disabledLenses = HashSet(prefs.getStringSet("disabledLenses", emptySet()) ?: emptySet())
     }
 
     override fun onResume() {
@@ -276,6 +298,9 @@ class CameraActivity : AppCompatActivity() {
         val id = prefs.getString("cameraId", null) ?: return goToSetup()
         currentZoom = 1f
         zoomRestored = false
+        // Aplicar ajustes guardados ANTES de abrir (sin reconstruir): el primer setUpOutputs ya los usa.
+        controller.presetCaptureSettings(AspectRatio.values()[ratioIndex], fullRes)
+        controller.setDisabledLensIds(disabledLenses)
         controller.open(id)
     }
 
@@ -504,6 +529,87 @@ class CameraActivity : AppCompatActivity() {
         Toast.makeText(this, if (on) "RAW + JPEG" else "Solo JPEG", Toast.LENGTH_SHORT).show()
     }
 
+    private fun cycleRatio() {
+        if (controller.isRecording) return
+        ratioIndex = (ratioIndex + 1) % ratioLabels.size
+        binding.chipRatio.text = ratioLabels[ratioIndex]
+        binding.chipRatio.setTextColor(
+            if (ratioIndex == 0) Color.parseColor("#CCFFFFFF") else ContextCompat.getColor(this, R.color.accent)
+        )
+        prefs.edit().putInt("capRatio", ratioIndex).apply()
+        controller.setCaptureSettings(AspectRatio.values()[ratioIndex], fullRes)
+    }
+
+    private fun toggleRes() {
+        if (controller.isRecording) return
+        fullRes = !fullRes
+        binding.chipRes.text = if (fullRes) "FULL" else "MED"
+        binding.chipRes.setTextColor(
+            if (fullRes) Color.parseColor("#CCFFFFFF") else ContextCompat.getColor(this, R.color.accent)
+        )
+        prefs.edit().putBoolean("capFull", fullRes).apply()
+        controller.setCaptureSettings(AspectRatio.values()[ratioIndex], fullRes)
+    }
+
+    // ---- Lentes (activar/desactivar en el ciclo de zoom) ----
+    private fun toggleLensPanel() {
+        val show = binding.lensPanel.visibility != View.VISIBLE
+        if (show) {
+            if (proOn) togglePro() // no solapar paneles
+            buildLensChips()
+            binding.lensPanel.visibility = View.VISIBLE
+        } else {
+            binding.lensPanel.visibility = View.GONE
+        }
+        binding.chipLenses.setTextColor(
+            if (show) ContextCompat.getColor(this, R.color.accent) else Color.parseColor("#CCFFFFFF")
+        )
+    }
+
+    private fun buildLensChips() {
+        binding.lensPanel.removeAllViews()
+        val cands = controller.backLensCandidates()
+        if (cands.isEmpty()) return
+        val minFocal = cands.first().second
+        val maxFocal = cands.last().second
+        for ((id, focal) in cands) {
+            val label = when {
+                cands.size >= 2 && focal <= minFocal -> "GA"
+                cands.size >= 2 && focal >= maxFocal -> "TELE"
+                else -> "ID $id"
+            }
+            val chip = TextView(this, null, 0, R.style.ProChip)
+            chip.text = label
+            chip.setTextColor(
+                if (!disabledLenses.contains(id)) ContextCompat.getColor(this, R.color.accent)
+                else Color.parseColor("#66FFFFFF")
+            )
+            val lp = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            lp.marginEnd = dp(6f).toInt()
+            chip.layoutParams = lp
+            chip.setOnClickListener { onLensChipTap(id) }
+            binding.lensPanel.addView(chip)
+        }
+    }
+
+    private fun onLensChipTap(id: String) {
+        val enabledCount = controller.backLensCandidates().count { !disabledLenses.contains(it.first) }
+        if (!disabledLenses.contains(id)) {
+            if (enabledCount <= 1) {
+                Toast.makeText(this, R.string.lens_min_one, Toast.LENGTH_SHORT).show()
+                return
+            }
+            disabledLenses.add(id)
+        } else {
+            disabledLenses.remove(id)
+        }
+        prefs.edit().putStringSet("disabledLenses", HashSet(disabledLenses)).apply()
+        controller.setDisabledLensIds(disabledLenses)
+        buildLensChips()
+    }
+
     private fun flipCamera() {
         if (controller.isRecording) return
         val target = if (facing == "back") controller.frontLensId() else prefs.getString("cameraId", "3")
@@ -552,6 +658,10 @@ class CameraActivity : AppCompatActivity() {
         binding.proPanel.visibility = if (proOn) View.VISIBLE else View.GONE
         binding.proToggle.setTextColor(if (proOn) ContextCompat.getColor(this, R.color.accent) else dimWhite)
         if (proOn) {
+            if (binding.lensPanel.visibility == View.VISIBLE) {
+                binding.lensPanel.visibility = View.GONE
+                binding.chipLenses.setTextColor(Color.parseColor("#CCFFFFFF"))
+            }
             if (proIso == 0) proIso = (controller.isoRange.first + controller.isoRange.second) / 2
             if (proExpNs == 0L) proExpNs = 16_000_000L
             selectParam("ev")
