@@ -6,6 +6,7 @@ import android.content.ContentUris
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.hardware.camera2.CameraMetadata
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -20,6 +21,7 @@ import android.view.View
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import android.view.animation.OvershootInterpolator
+import android.widget.SeekBar
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -41,6 +43,21 @@ class CameraActivity : AppCompatActivity() {
     private var capturing = false
     private var currentZoom = 1f
     private var zoomRestored = false
+
+    private var proOn = false
+    private var proParam = "ev"
+    private var proIso = 0
+    private var proExpNs = 0L
+    private var wbIndex = 0
+    private val wbModes = intArrayOf(
+        CameraMetadata.CONTROL_AWB_MODE_AUTO,
+        CameraMetadata.CONTROL_AWB_MODE_INCANDESCENT,
+        CameraMetadata.CONTROL_AWB_MODE_FLUORESCENT,
+        CameraMetadata.CONTROL_AWB_MODE_DAYLIGHT,
+        CameraMetadata.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT,
+        CameraMetadata.CONTROL_AWB_MODE_SHADE
+    )
+    private val wbLabels = arrayOf("WB AUTO", "WB Incand.", "WB Fluor.", "WB Sol", "WB Nube", "WB Sombra")
 
     private val ui = Handler(Looper.getMainLooper())
     private val prefs by lazy { getSharedPreferences("camara", MODE_PRIVATE) }
@@ -147,6 +164,20 @@ class CameraActivity : AppCompatActivity() {
         binding.thumbnail.setOnClickListener { openLastPhoto() }
         binding.tabPhoto.setOnClickListener { setMode("photo") }
         binding.tabVideo.setOnClickListener { setMode("video") }
+
+        binding.proToggle.setOnClickListener { togglePro() }
+        binding.chipEv.setOnClickListener { selectParam("ev") }
+        binding.chipIso.setOnClickListener { selectParam("iso") }
+        binding.chipVel.setOnClickListener { selectParam("vel") }
+        binding.chipWb.setOnClickListener { cycleWb() }
+        binding.chipAuto.setOnClickListener { resetAuto() }
+        binding.proSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar, progress: Int, fromUser: Boolean) {
+                if (fromUser) applyParam(progress)
+            }
+            override fun onStartTrackingTouch(s: SeekBar) {}
+            override fun onStopTrackingTouch(s: SeekBar) {}
+        })
 
         setMode(prefs.getString("mode", "photo") ?: "photo")
     }
@@ -356,4 +387,111 @@ class CameraActivity : AppCompatActivity() {
     }
 
     private fun dp(v: Float) = v * resources.displayMetrics.density
+
+    // ---- PRO ----
+    private fun togglePro() {
+        proOn = !proOn
+        binding.proPanel.visibility = if (proOn) View.VISIBLE else View.GONE
+        binding.proToggle.setTextColor(if (proOn) ContextCompat.getColor(this, R.color.accent) else dimWhite)
+        if (proOn) {
+            if (proIso == 0) proIso = (controller.isoRange.first + controller.isoRange.second) / 2
+            if (proExpNs == 0L) proExpNs = 16_000_000L
+            selectParam("ev")
+        }
+    }
+
+    private fun selectParam(p: String) {
+        proParam = p
+        when (p) {
+            "ev" -> controller.setAutoExposure()
+            "iso", "vel" -> controller.setManualExposure(proIso, proExpNs)
+        }
+        binding.proSlider.progress = when (p) {
+            "iso" -> isoToProgress(proIso)
+            "vel" -> velToProgress(proExpNs)
+            else -> evToProgress(0)
+        }
+        updateProLabel()
+    }
+
+    private fun applyParam(p: Int) {
+        when (proParam) {
+            "ev" -> {
+                val r = controller.evRange
+                val steps = r.first + ((r.second - r.first) * p / 100.0).toInt()
+                controller.setEv(steps)
+                binding.proValue.text = "EV $steps"
+            }
+            "iso" -> {
+                val r = controller.isoRange
+                proIso = r.first + ((r.second - r.first) * p / 100.0).toInt()
+                controller.setManualExposure(proIso, proExpNs)
+                binding.proValue.text = "ISO $proIso"
+            }
+            "vel" -> {
+                proExpNs = progressToExp(p)
+                controller.setManualExposure(proIso, proExpNs)
+                binding.proValue.text = shutterLabel(proExpNs)
+            }
+        }
+    }
+
+    private fun cycleWb() {
+        proParam = "wb"
+        wbIndex = (wbIndex + 1) % wbModes.size
+        controller.setWhiteBalance(wbModes[wbIndex])
+        binding.proValue.text = wbLabels[wbIndex]
+    }
+
+    private fun resetAuto() {
+        controller.setAutoExposure()
+        controller.setEv(0)
+        controller.setAutoFocus()
+        wbIndex = 0
+        controller.setWhiteBalance(wbModes[0])
+        proParam = "ev"
+        binding.proSlider.progress = evToProgress(0)
+        binding.proValue.text = "AUTO"
+    }
+
+    private fun updateProLabel() {
+        binding.proValue.text = when (proParam) {
+            "iso" -> "ISO $proIso"
+            "vel" -> shutterLabel(proExpNs)
+            else -> "EV 0"
+        }
+    }
+
+    private fun isoToProgress(iso: Int): Int {
+        val r = controller.isoRange
+        if (r.second <= r.first) return 0
+        return ((iso - r.first) * 100 / (r.second - r.first)).coerceIn(0, 100)
+    }
+
+    private fun evToProgress(steps: Int): Int {
+        val r = controller.evRange
+        if (r.second <= r.first) return 50
+        return ((steps - r.first) * 100 / (r.second - r.first)).coerceIn(0, 100)
+    }
+
+    private fun velToProgress(ns: Long): Int {
+        val r = controller.shutterRangeNs
+        val lo = (if (r.first > 0) r.first else 1L).toDouble()
+        val hi = (if (r.second > lo) r.second else 100_000_000L).toDouble()
+        val v = ns.toDouble().coerceIn(lo, hi)
+        return (((Math.log(v) - Math.log(lo)) / (Math.log(hi) - Math.log(lo))) * 100).toInt().coerceIn(0, 100)
+    }
+
+    private fun progressToExp(p: Int): Long {
+        val r = controller.shutterRangeNs
+        val lo = (if (r.first > 0) r.first else 1L).toDouble()
+        val hi = (if (r.second > lo) r.second else 100_000_000L).toDouble()
+        val v = Math.exp(Math.log(lo) + (Math.log(hi) - Math.log(lo)) * p / 100.0)
+        return v.toLong().coerceIn(lo.toLong(), hi.toLong())
+    }
+
+    private fun shutterLabel(ns: Long): String {
+        val sec = ns / 1_000_000_000.0
+        return if (sec < 1.0) "1/${Math.round(1.0 / sec)}s" else String.format(Locale.US, "%.1fs", sec)
+    }
 }
