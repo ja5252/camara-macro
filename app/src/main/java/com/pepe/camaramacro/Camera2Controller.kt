@@ -108,6 +108,10 @@ class Camera2Controller(
     private var aeFpsRange: Range<Int>? = null
     private var oisAvailable = false
 
+    // Flash
+    private var flashAvailable = false
+    private var flashMode = 0 // 0 off, 1 auto, 2 on, 3 torch
+
     private var aeLocked = false
     private var afLocked = false
     private var manualFocus = false
@@ -199,6 +203,21 @@ class Camera2Controller(
             val req = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
             req.addTarget(reader.surface)
             applyControls(req)
+            if (flashAvailable) {
+                when (flashMode) {
+                    1 -> if (!manualExposure) req.set(
+                        CaptureRequest.CONTROL_AE_MODE,
+                        CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH
+                    )
+                    2 -> {
+                        if (!manualExposure) req.set(
+                            CaptureRequest.CONTROL_AE_MODE,
+                            CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH
+                        ) else req.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_SINGLE)
+                    }
+                    3 -> req.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_TORCH)
+                }
+            }
             req.set(CaptureRequest.JPEG_ORIENTATION, currentJpegOrientation())
             session.capture(req.build(), object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureFailed(
@@ -349,16 +368,20 @@ class Camera2Controller(
         val rect = meteringRect(x / viewW, y / viewH) ?: return
         val mr = arrayOf(MeteringRectangle(rect, MeteringRectangle.METERING_WEIGHT_MAX))
         manualFocus = false
-        afLocked = afAvailable // tras un toque, mantenemos el enfoque fijado
+        afLocked = false // enfoque continuo rápido, sigue rastreando
         lastFocusState = null
         try {
             previewRequestBuilder.set(CaptureRequest.CONTROL_AE_REGIONS, mr)
             if (afAvailable) {
                 previewRequestBuilder.set(CaptureRequest.CONTROL_AF_REGIONS, mr)
-                previewRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
+                previewRequestBuilder.set(
+                    CaptureRequest.CONTROL_AF_MODE,
+                    if (afContinuousSupported) CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+                    else CaptureRequest.CONTROL_AF_MODE_AUTO
+                )
                 previewRequestBuilder.set(
                     CaptureRequest.CONTROL_AF_TRIGGER,
-                    CameraMetadata.CONTROL_AF_TRIGGER_START
+                    CameraMetadata.CONTROL_AF_TRIGGER_CANCEL
                 )
                 session.capture(previewRequestBuilder.build(), previewCallback, backgroundHandler)
                 previewRequestBuilder.set(
@@ -443,6 +466,26 @@ class Camera2Controller(
         applyAndUpdate()
     }
 
+    val hasFlash: Boolean get() = flashAvailable
+
+    fun setFlashMode(m: Int) {
+        flashMode = m
+        applyAndUpdate()
+    }
+
+    /** ID de la primera lente frontal (selfie), o null. */
+    fun frontLensId(): String? {
+        val manager = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        return try {
+            manager.cameraIdList.firstOrNull {
+                manager.getCameraCharacteristics(it)
+                    .get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_FRONT
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     private fun applyAndUpdate() {
         if (::previewRequestBuilder.isInitialized) {
             applyControls(previewRequestBuilder)
@@ -468,6 +511,12 @@ class Camera2Controller(
             b.set(
                 CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
                 CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON
+            )
+        }
+        if (flashAvailable) {
+            b.set(
+                CaptureRequest.FLASH_MODE,
+                if (flashMode == 3) CameraMetadata.FLASH_MODE_TORCH else CameraMetadata.FLASH_MODE_OFF
             )
         }
         when {
@@ -651,6 +700,7 @@ class Camera2Controller(
             ?: fpsRanges?.maxByOrNull { it.lower }
         val ois = characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION) ?: IntArray(0)
         oisAvailable = ois.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)
+        flashAvailable = characteristics.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) ?: false
 
         val jpegSizes = map.getOutputSizes(ImageFormat.JPEG) ?: arrayOf(Size(1920, 1080))
         val largest = jpegSizes.maxByOrNull { it.width.toLong() * it.height } ?: Size(1920, 1080)

@@ -275,10 +275,12 @@
         android:layout_gravity="top|start"
         android:layout_marginStart="12dp"
         android:layout_marginTop="44dp"
-        android:orientation="horizontal">
+        android:orientation="vertical">
 
-        <TextView android:id="@+id/chip_grid" style="@style/ProChip" android:text="⊞" />
-        <TextView android:id="@+id/chip_timer" style="@style/ProChip" android:text="⏱ off" />
+        <TextView android:id="@+id/chip_grid" style="@style/ProChip" android:layout_marginBottom="6dp" android:text="⊞" />
+        <TextView android:id="@+id/chip_timer" style="@style/ProChip" android:layout_marginBottom="6dp" android:text="⏱ off" />
+        <TextView android:id="@+id/chip_flash" style="@style/ProChip" android:layout_marginBottom="6dp" android:text="⚡ off" />
+        <TextView android:id="@+id/chip_flip" style="@style/ProChip" android:layout_marginBottom="6dp" android:text="⟲ atrás" />
     </LinearLayout>
 
     <!-- Cuenta atrás del temporizador -->

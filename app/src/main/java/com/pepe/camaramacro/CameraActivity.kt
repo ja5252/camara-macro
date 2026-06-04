@@ -66,6 +66,8 @@ class CameraActivity : AppCompatActivity() {
 
     private var timerSec = 0
     private var gridOn = false
+    private var flashMode = 0
+    private var facing = "back"
     private val sensorManager by lazy { getSystemService(SENSOR_SERVICE) as SensorManager }
     private val rotationListener = object : SensorEventListener {
         private val rot = FloatArray(9)
@@ -201,6 +203,8 @@ class CameraActivity : AppCompatActivity() {
 
         binding.chipGrid.setOnClickListener { toggleGrid() }
         binding.chipTimer.setOnClickListener { cycleTimer() }
+        binding.chipFlash.setOnClickListener { cycleFlash() }
+        binding.chipFlip.setOnClickListener { flipCamera() }
 
         setMode(prefs.getString("mode", "photo") ?: "photo")
     }
@@ -443,6 +447,33 @@ class CameraActivity : AppCompatActivity() {
         binding.chipTimer.text = if (timerSec == 0) "⏱ off" else "⏱ ${timerSec}s"
         binding.chipTimer.setTextColor(
             if (timerSec == 0) Color.parseColor("#CCFFFFFF") else ContextCompat.getColor(this, R.color.accent)
+        )
+    }
+
+    private fun cycleFlash() {
+        flashMode = (flashMode + 1) % 4
+        controller.setFlashMode(flashMode)
+        binding.chipFlash.text = arrayOf("⚡ off", "⚡ auto", "⚡ on", "🔦")[flashMode]
+        binding.chipFlash.setTextColor(
+            if (flashMode == 0) Color.parseColor("#CCFFFFFF") else ContextCompat.getColor(this, R.color.accent)
+        )
+    }
+
+    private fun flipCamera() {
+        if (controller.isRecording) return
+        val target = if (facing == "back") controller.frontLensId() else prefs.getString("cameraId", "3")
+        if (target == null) {
+            Toast.makeText(this, "No hay cámara frontal disponible", Toast.LENGTH_SHORT).show()
+            return
+        }
+        facing = if (facing == "back") "front" else "back"
+        currentZoom = 1f
+        zoomRestored = true
+        controller.close()
+        controller.open(target)
+        binding.chipFlip.text = if (facing == "front") "⟲ frontal" else "⟲ atrás"
+        binding.chipFlip.setTextColor(
+            if (facing == "front") ContextCompat.getColor(this, R.color.accent) else Color.parseColor("#CCFFFFFF")
         )
     }
 
