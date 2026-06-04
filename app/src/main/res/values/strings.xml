@@ -31,4 +31,12 @@
     <string name="mode_photo">FOTO</string>
     <string name="mode_video">VIDEO</string>
     <string name="cd_record">Grabar video</string>
+
+    <!-- Galería -->
+    <string name="play">Reproducir</string>
+    <string name="share">Compartir</string>
+    <string name="delete">Borrar</string>
+    <string name="no_media">Aún no hay fotos ni videos</string>
+    <string name="deleted">Borrado</string>
+    <string name="delete_error">No se pudo borrar</string>
 </resources>

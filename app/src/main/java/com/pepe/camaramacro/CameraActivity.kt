@@ -183,7 +183,7 @@ class CameraActivity : AppCompatActivity() {
             if (mode == "video") toggleRecord() else startPhotoOrTimer()
         }
         binding.btnChangeLens.setOnClickListener { goToSetup() }
-        binding.thumbnail.setOnClickListener { openLastPhoto() }
+        binding.thumbnail.setOnClickListener { openGallery() }
         binding.tabPhoto.setOnClickListener { setMode("photo") }
         binding.tabVideo.setOnClickListener { setMode("video") }
 
@@ -388,16 +388,8 @@ class CameraActivity : AppCompatActivity() {
         if (uri != null) binding.thumbnailImage.load(uri)
     }
 
-    private fun openLastPhoto() {
-        val uri = latestMediaUri() ?: return
-        try {
-            startActivity(
-                Intent(Intent.ACTION_VIEW)
-                    .setDataAndType(uri, "image/*")
-                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            )
-        } catch (e: Exception) {
-        }
+    private fun openGallery() {
+        startActivity(Intent(this, GalleryActivity::class.java))
     }
 
     private fun latestMediaUri(): Uri? {
