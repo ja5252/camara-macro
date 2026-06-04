@@ -69,8 +69,8 @@ class CameraActivity : AppCompatActivity() {
         }
 
     private val requestAudio =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            startRec(granted)
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+            // Permiso pre-concedido al entrar a modo video; grabar es una acción aparte.
         }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -191,6 +191,12 @@ class CameraActivity : AppCompatActivity() {
         binding.tabVideo.setTextColor(if (photo) dimWhite else accent)
         binding.shutterIcon.visibility = if (photo) View.GONE else View.VISIBLE
         binding.shutterIcon.setBackgroundResource(R.drawable.rec_dot)
+        if (!photo &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestAudio.launch(Manifest.permission.RECORD_AUDIO)
+        }
     }
 
     // ---- Enfoque ----
@@ -271,13 +277,9 @@ class CameraActivity : AppCompatActivity() {
             controller.stopVideo()
             return
         }
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-            == PackageManager.PERMISSION_GRANTED
-        ) {
-            startRec(true)
-        } else {
-            requestAudio.launch(Manifest.permission.RECORD_AUDIO)
-        }
+        val withAudio = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        startRec(withAudio)
     }
 
     private fun startRec(withAudio: Boolean) {
