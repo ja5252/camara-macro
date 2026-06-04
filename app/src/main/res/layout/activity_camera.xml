@@ -43,6 +43,29 @@
         android:clickable="false"
         android:focusable="false" />
 
+    <!-- Lupa de enfoque (aparece al tocar para enfocar) -->
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/magnifier_card"
+        android:layout_width="120dp"
+        android:layout_height="120dp"
+        android:layout_gravity="top|end"
+        android:layout_marginTop="120dp"
+        android:layout_marginEnd="16dp"
+        android:visibility="gone"
+        app:cardBackgroundColor="@color/black"
+        app:cardCornerRadius="60dp"
+        app:cardElevation="0dp"
+        app:strokeColor="#CCFF9E00"
+        app:strokeWidth="2dp">
+
+        <ImageView
+            android:id="@+id/magnifier"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:contentDescription="@string/cd_thumbnail"
+            android:scaleType="centerCrop" />
+    </com.google.android.material.card.MaterialCardView>
+
     <!-- 4. Anillo de enfoque (se mueve al punto del tap) -->
     <View
         android:id="@+id/focus_ring"

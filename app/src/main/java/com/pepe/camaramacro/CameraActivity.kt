@@ -380,7 +380,36 @@ class CameraActivity : AppCompatActivity() {
     private fun focusAt(x: Float, y: Float) {
         controller.setFocusPoint(x, y, binding.gestureArea.width, binding.gestureArea.height)
         showFocusRing(x, y)
+        showMagnifier(x, y)
         binding.gestureArea.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+    }
+
+    private val hideMagnifier = Runnable { binding.magnifierCard.visibility = View.GONE }
+
+    /** Lupa: muestra una zona ampliada del punto enfocado para confirmar nitidez. */
+    private fun showMagnifier(x: Float, y: Float) {
+        val tw = binding.texture.width
+        val th = binding.texture.height
+        if (tw == 0 || th == 0) return
+        try {
+            val bmp = binding.texture.getBitmap(tw, th) ?: return
+            val crop = (tw * 0.12f).toInt().coerceAtLeast(40)
+            // El texture está alineado arriba y ocupa el ancho: el mapeo es directo.
+            val cx = x.toInt().coerceIn(crop / 2, (tw - crop / 2).coerceAtLeast(crop / 2))
+            val cy = y.toInt().coerceIn(crop / 2, (th - crop / 2).coerceAtLeast(crop / 2))
+            val left = (cx - crop / 2).coerceIn(0, (tw - crop).coerceAtLeast(0))
+            val top = (cy - crop / 2).coerceIn(0, (th - crop).coerceAtLeast(0))
+            val w = crop.coerceAtMost(tw - left)
+            val h = crop.coerceAtMost(th - top)
+            if (w <= 0 || h <= 0) { bmp.recycle(); return }
+            val region = android.graphics.Bitmap.createBitmap(bmp, left, top, w, h)
+            binding.magnifier.setImageBitmap(region)
+            binding.magnifierCard.visibility = View.VISIBLE
+            ui.removeCallbacks(hideMagnifier)
+            ui.postDelayed(hideMagnifier, 1800)
+            bmp.recycle()
+        } catch (e: Exception) {
+        }
     }
 
     private fun showFocusRing(x: Float, y: Float) {
