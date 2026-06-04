@@ -81,6 +81,14 @@ class Camera2Controller(
     private var maxZoom = 1f
     private var zoomRatioSupported = false
 
+    // Auto-cambio de lente al zoom (solo lentes que funcionan)
+    private val zoomChain = mutableListOf<Pair<String, Float>>() // (id, baseZoom) asc por focal
+    private var chainIndex = 0
+    private var globalZoom = 1f
+    private var switching = false
+    private var pendingResidual = -1f
+    private var autoLens = false
+
     private var aeLocked = false
     private var afLocked = false
     private var manualFocus = false
@@ -116,11 +124,13 @@ class Camera2Controller(
 
     // -------------------------------------------------------- Capacidades públicas
 
-    /** Rango de zoom (mín, máx). Mín siempre 1.0. */
-    val zoomRange: Pair<Float, Float> get() = Pair(1f, maxZoom)
+    /** Rango de zoom (mín, máx) considerando toda la cadena de lentes. */
+    val zoomRange: Pair<Float, Float>
+        get() = Pair(1f, if (autoLens && zoomChain.isNotEmpty()) zoomChain.last().second * 4f else maxZoom)
 
-    /** Compatibilidad: máximo de zoom. */
-    val maxZoomRatio: Float get() = maxZoom
+    /** Máximo de zoom global. */
+    val maxZoomRatio: Float
+        get() = if (autoLens && zoomChain.isNotEmpty()) zoomChain.last().second * 4f else maxZoom
 
     /** ¿La lente permite enfoque manual por distancia? */
     val hasManualFocus: Boolean get() = minFocusDistance > 0f
@@ -141,6 +151,13 @@ class Camera2Controller(
         manualDiopters = 0f
         lastFocusState = null
         cameraId = camId
+        buildZoomChain()
+        chainIndex = zoomChain.indexOfFirst { it.first == camId }
+        autoLens = chainIndex >= 0 && zoomChain.size >= 2
+        if (chainIndex < 0) chainIndex = 0
+        globalZoom = if (autoLens) zoomChain[chainIndex].second else 1f
+        switching = false
+        pendingResidual = -1f
         if (backgroundThread == null) startBackgroundThread()
         if (orientationListener.canDetectOrientation()) orientationListener.enable()
         if (textureView.isAvailable) {
@@ -215,14 +232,90 @@ class Camera2Controller(
         }
     }
 
-    /** Fija el nivel de zoom y devuelve el valor aplicado (acotado a [1, max]). */
-    fun setZoom(ratio: Float): Float {
-        zoomRatio = ratio.coerceIn(1f, maxZoom)
-        if (::previewRequestBuilder.isInitialized) {
-            applyZoom(previewRequestBuilder)
-            updatePreview()
+    /**
+     * Fija el zoom GLOBAL (across lentes). Cambia de lente física automáticamente al
+     * cruzar el umbral óptico, y hace zoom digital dentro de cada lente. Devuelve el zoom global aplicado.
+     */
+    fun setZoom(g: Float): Float {
+        if (!autoLens) {
+            zoomRatio = g.coerceIn(1f, maxZoom)
+            globalZoom = zoomRatio
+            if (::previewRequestBuilder.isInitialized) {
+                applyZoom(previewRequestBuilder)
+                updatePreview()
+            }
+            return globalZoom
         }
-        return zoomRatio
+        val gmax = zoomChain.last().second * 4f
+        val gg = g.coerceIn(1f, gmax)
+        var ti = 0
+        for (i in zoomChain.indices) if (gg >= zoomChain[i].second - 0.01f) ti = i
+        val residual = gg / zoomChain[ti].second
+        if (ti != chainIndex) {
+            pendingResidual = residual
+            globalZoom = gg
+            switchToLens(ti)
+        } else {
+            zoomRatio = residual.coerceIn(1f, maxZoom)
+            globalZoom = zoomChain[chainIndex].second * zoomRatio
+            if (::previewRequestBuilder.isInitialized) {
+                applyZoom(previewRequestBuilder)
+                updatePreview()
+            }
+        }
+        return globalZoom
+    }
+
+    /** Construye la cadena de lentes para zoom: traseras que funcionan (excluye la dañada y sus duplicados). */
+    private fun buildZoomChain() {
+        zoomChain.clear()
+        val manager = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val ids = try { manager.cameraIdList } catch (e: Exception) { return }
+        var mainFocal = 0f
+        try {
+            mainFocal = manager.getCameraCharacteristics("0")
+                .get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: 0f
+        } catch (e: Exception) {
+        }
+        val backs = mutableListOf<Pair<String, Float>>()
+        for (id in ids) {
+            if (id == "0") continue
+            try {
+                val c = manager.getCameraCharacteristics(id)
+                if (c.get(CameraCharacteristics.LENS_FACING) != CameraCharacteristics.LENS_FACING_BACK) continue
+                val caps = c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: IntArray(0)
+                if (!caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_BACKWARD_COMPATIBLE)) continue
+                val focal = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: 0f
+                if (focal <= 0f) continue
+                // Excluye la principal dañada y cualquier duplicado con su misma focal.
+                if (mainFocal > 0f && focal > mainFocal - 0.3f && focal < mainFocal + 0.3f) continue
+                backs.add(Pair(id, focal))
+            } catch (e: Exception) {
+            }
+        }
+        backs.sortBy { it.second }
+        if (backs.isEmpty()) return
+        val minF = backs.first().second
+        backs.forEach { zoomChain.add(Pair(it.first, it.second / minF)) }
+    }
+
+    private fun switchToLens(targetIndex: Int) {
+        if (switching) return
+        switching = true
+        chainIndex = targetIndex
+        cameraId = zoomChain[targetIndex].first
+        failed = false
+        try { captureSession?.close() } catch (e: Exception) {}
+        captureSession = null
+        try { cameraDevice?.close() } catch (e: Exception) {}
+        cameraDevice = null
+        try { imageReader?.close() } catch (e: Exception) {}
+        imageReader = null
+        if (textureView.isAvailable) {
+            openCamera()
+        } else {
+            switching = false
+        }
     }
 
     // ---------------------------------------------------------------- Enfoque
@@ -534,6 +627,11 @@ class Camera2Controller(
                     override fun onConfigured(session: CameraCaptureSession) {
                         if (cameraDevice == null) return
                         captureSession = session
+                        if (pendingResidual >= 0f) {
+                            zoomRatio = pendingResidual.coerceIn(1f, maxZoom)
+                            pendingResidual = -1f
+                        }
+                        switching = false
                         try {
                             applyControls(previewRequestBuilder)
                             session.setRepeatingRequest(
@@ -652,6 +750,7 @@ class Camera2Controller(
     private fun fail(msg: String) {
         if (failed) return
         failed = true
+        switching = false
         cancelWatchdog()
         activity.runOnUiThread { onError?.invoke(msg) }
     }
