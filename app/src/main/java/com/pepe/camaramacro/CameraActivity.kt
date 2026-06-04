@@ -208,6 +208,31 @@ class CameraActivity : AppCompatActivity() {
         binding.chipRaw.setOnClickListener { toggleRaw() }
 
         setMode(prefs.getString("mode", "photo") ?: "photo")
+        restoreSettings()
+    }
+
+    /** Reabre con los últimos ajustes (flash, temporizador, cuadrícula). */
+    private fun restoreSettings() {
+        // Flash: el modo linterna (3) no se restaura para no encender la luz al abrir.
+        flashMode = prefs.getInt("flash", 0).let { if (it == 3) 0 else it }
+        controller.setFlashMode(flashMode)
+        binding.chipFlash.text = arrayOf("⚡ off", "⚡ auto", "⚡ on", "🔦")[flashMode]
+        binding.chipFlash.setTextColor(
+            if (flashMode == 0) Color.parseColor("#CCFFFFFF") else ContextCompat.getColor(this, R.color.accent)
+        )
+
+        timerSec = prefs.getInt("timer", 0)
+        binding.chipTimer.text = if (timerSec == 0) "⏱ off" else "⏱ ${timerSec}s"
+        binding.chipTimer.setTextColor(
+            if (timerSec == 0) Color.parseColor("#CCFFFFFF") else ContextCompat.getColor(this, R.color.accent)
+        )
+
+        gridOn = prefs.getBoolean("grid", false)
+        binding.gridOverlay.showGrid = gridOn
+        binding.gridOverlay.showLevel = gridOn
+        binding.chipGrid.setTextColor(
+            if (gridOn) ContextCompat.getColor(this, R.color.accent) else Color.parseColor("#CCFFFFFF")
+        )
     }
 
     override fun onResume() {
@@ -429,6 +454,7 @@ class CameraActivity : AppCompatActivity() {
         binding.chipGrid.setTextColor(
             if (gridOn) ContextCompat.getColor(this, R.color.accent) else Color.parseColor("#CCFFFFFF")
         )
+        prefs.edit().putBoolean("grid", gridOn).apply()
     }
 
     private fun cycleTimer() {
@@ -441,6 +467,7 @@ class CameraActivity : AppCompatActivity() {
         binding.chipTimer.setTextColor(
             if (timerSec == 0) Color.parseColor("#CCFFFFFF") else ContextCompat.getColor(this, R.color.accent)
         )
+        prefs.edit().putInt("timer", timerSec).apply()
     }
 
     private fun cycleFlash() {
@@ -450,6 +477,7 @@ class CameraActivity : AppCompatActivity() {
         binding.chipFlash.setTextColor(
             if (flashMode == 0) Color.parseColor("#CCFFFFFF") else ContextCompat.getColor(this, R.color.accent)
         )
+        prefs.edit().putInt("flash", flashMode).apply()
     }
 
     private fun toggleRaw() {
