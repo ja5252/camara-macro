@@ -5,16 +5,19 @@ import android.annotation.SuppressLint
 import android.content.ContentUris
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.view.GestureDetector
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
+import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import android.view.animation.OvershootInterpolator
 import android.widget.Toast
@@ -26,14 +29,15 @@ import com.pepe.camaramacro.databinding.ActivityCameraBinding
 import java.util.Locale
 
 /**
- * Pantalla principal de uso diario: abre directo la lente guardada con un viewfinder
- * premium. Tap = enfoque, pellizco = zoom, obturador con feedback inmediato, y
- * miniatura de la última foto.
+ * Pantalla principal: viewfinder premium con la lente que funciona.
+ * Tap = enfoque, pellizco = zoom, FOTO/VIDEO, y recuerda el último modo y zoom.
  */
 class CameraActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityCameraBinding
     private lateinit var controller: Camera2Controller
+
+    private var mode = "photo"
     private var capturing = false
     private var currentZoom = 1f
 
@@ -43,6 +47,17 @@ class CameraActivity : AppCompatActivity() {
     private lateinit var scaleDetector: ScaleGestureDetector
     private lateinit var gestureDetector: GestureDetector
 
+    private val dimWhite = Color.parseColor("#99FFFFFF")
+
+    private var recStart = 0L
+    private val tick = object : Runnable {
+        override fun run() {
+            val s = ((SystemClock.elapsedRealtime() - recStart) / 1000).toInt()
+            binding.recIndicator.text = String.format(Locale.US, "%d:%02d", s / 60, s % 60)
+            ui.postDelayed(this, 500)
+        }
+    }
+
     private val hideZoom = Runnable {
         binding.zoomPill.animate().alpha(0f).setDuration(200).start()
     }
@@ -51,6 +66,11 @@ class CameraActivity : AppCompatActivity() {
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             if (granted) startCamera()
             else Toast.makeText(this, R.string.need_camera_permission, Toast.LENGTH_LONG).show()
+        }
+
+    private val requestAudio =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            startRec(granted)
         }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -74,6 +94,11 @@ class CameraActivity : AppCompatActivity() {
                 binding.btnChangeLens.setColorFilter(ContextCompat.getColor(this, R.color.accent))
             }
         }
+        controller.onReady = {
+            val z = prefs.getFloat("zoom", 1f)
+            if (z > 1.01f) currentZoom = controller.setZoom(z)
+        }
+        controller.onRecordingChanged = { rec -> onRecordingChanged(rec) }
 
         scaleDetector = ScaleGestureDetector(
             this,
@@ -111,9 +136,15 @@ class CameraActivity : AppCompatActivity() {
             true
         }
 
-        binding.btnShutter.setOnClickListener { takePhoto() }
+        binding.btnShutter.setOnClickListener {
+            if (mode == "video") toggleRecord() else takePhoto()
+        }
         binding.btnChangeLens.setOnClickListener { goToSetup() }
         binding.thumbnail.setOnClickListener { openLastPhoto() }
+        binding.tabPhoto.setOnClickListener { setMode("photo") }
+        binding.tabVideo.setOnClickListener { setMode("video") }
+
+        setMode(prefs.getString("mode", "photo") ?: "photo")
     }
 
     override fun onResume() {
@@ -130,7 +161,11 @@ class CameraActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
-        if (::controller.isInitialized) controller.close()
+        if (::controller.isInitialized) {
+            if (controller.isRecording) controller.stopVideo()
+            prefs.edit().putFloat("zoom", currentZoom).putString("mode", mode).apply()
+            controller.close()
+        }
         super.onPause()
     }
 
@@ -143,6 +178,19 @@ class CameraActivity : AppCompatActivity() {
     private fun goToSetup() {
         startActivity(Intent(this, SetupActivity::class.java))
         finish()
+    }
+
+    // ---- Modo ----
+    private fun setMode(m: String) {
+        if (controller.isRecording) return
+        mode = m
+        prefs.edit().putString("mode", m).apply()
+        val photo = m == "photo"
+        val accent = ContextCompat.getColor(this, R.color.accent)
+        binding.tabPhoto.setTextColor(if (photo) accent else dimWhite)
+        binding.tabVideo.setTextColor(if (photo) dimWhite else accent)
+        binding.shutterIcon.visibility = if (photo) View.GONE else View.VISIBLE
+        binding.shutterIcon.setBackgroundResource(R.drawable.rec_dot)
     }
 
     // ---- Enfoque ----
@@ -178,7 +226,7 @@ class CameraActivity : AppCompatActivity() {
         ui.postDelayed(hideZoom, 1200)
     }
 
-    // ---- Captura ----
+    // ---- Foto ----
     private fun takePhoto() {
         if (capturing) return
         capturing = true
@@ -217,14 +265,61 @@ class CameraActivity : AppCompatActivity() {
             .setInterpolator(OvershootInterpolator()).start()
     }
 
+    // ---- Video ----
+    private fun toggleRecord() {
+        if (controller.isRecording) {
+            controller.stopVideo()
+            return
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            == PackageManager.PERMISSION_GRANTED
+        ) {
+            startRec(true)
+        } else {
+            requestAudio.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    private fun startRec(withAudio: Boolean) {
+        binding.btnShutter.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+        if (!controller.startVideo(withAudio)) {
+            Toast.makeText(this, R.string.photo_error, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun onRecordingChanged(rec: Boolean) {
+        runOnUiThread {
+            if (rec) {
+                binding.shutterIcon.setBackgroundResource(R.drawable.rec_stop)
+                binding.recIndicator.text = "0:00"
+                binding.recIndicator.visibility = View.VISIBLE
+                recStart = SystemClock.elapsedRealtime()
+                ui.post(tick)
+                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                binding.modeToggle.alpha = 0.4f
+                binding.tabPhoto.isEnabled = false
+                binding.tabVideo.isEnabled = false
+            } else {
+                binding.shutterIcon.setBackgroundResource(R.drawable.rec_dot)
+                binding.recIndicator.visibility = View.GONE
+                ui.removeCallbacks(tick)
+                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                binding.modeToggle.alpha = 1f
+                binding.tabPhoto.isEnabled = true
+                binding.tabVideo.isEnabled = true
+                refreshThumbnail()
+            }
+        }
+    }
+
     // ---- Miniatura / galería ----
     private fun refreshThumbnail() {
-        val uri = latestPhotoUri()
+        val uri = latestMediaUri()
         if (uri != null) binding.thumbnailImage.load(uri)
     }
 
     private fun openLastPhoto() {
-        val uri = latestPhotoUri() ?: return
+        val uri = latestMediaUri() ?: return
         try {
             startActivity(
                 Intent(Intent.ACTION_VIEW)
@@ -235,7 +330,7 @@ class CameraActivity : AppCompatActivity() {
         }
     }
 
-    private fun latestPhotoUri(): Uri? {
+    private fun latestMediaUri(): Uri? {
         val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
         val projection = arrayOf(MediaStore.Images.Media._ID)
         val selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"

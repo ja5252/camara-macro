@@ -23,7 +23,9 @@ import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.MeteringRectangle
 import android.media.Image
 import android.media.ImageReader
+import android.media.MediaRecorder
 import android.media.MediaScannerConnection
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.os.Handler
@@ -84,6 +86,16 @@ class Camera2Controller(
     private var manualFocus = false
     private var manualDiopters = 0f
     private var lastFocusState: FocusState? = null
+
+    // Video
+    private var videoSize = Size(1920, 1080)
+    private var mediaRecorder: MediaRecorder? = null
+    private var recording = false
+    private var videoUri: Uri? = null
+    private var videoPfd: android.os.ParcelFileDescriptor? = null
+    private var videoFos: FileOutputStream? = null
+    private var videoFile: File? = null
+    var onRecordingChanged: ((Boolean) -> Unit)? = null
 
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
@@ -461,6 +473,12 @@ class Camera2Controller(
 
         val jpegSizes = map.getOutputSizes(ImageFormat.JPEG) ?: arrayOf(Size(1920, 1080))
         val largest = jpegSizes.maxByOrNull { it.width.toLong() * it.height } ?: Size(1920, 1080)
+
+        val recSizes = map.getOutputSizes(MediaRecorder::class.java)
+        videoSize = recSizes?.firstOrNull { it.width == 1920 && it.height == 1080 }
+            ?: recSizes?.filter { it.width <= 1920 }?.maxByOrNull { it.width.toLong() * it.height }
+            ?: recSizes?.maxByOrNull { it.width.toLong() * it.height }
+            ?: Size(1920, 1080)
         imageReader = ImageReader.newInstance(largest.width, largest.height, ImageFormat.JPEG, 2).apply {
             setOnImageAvailableListener(onImageAvailableListener, backgroundHandler)
         }
@@ -682,6 +700,154 @@ class Camera2Controller(
             notBigEnough.isNotEmpty() -> notBigEnough.maxByOrNull { it.width.toLong() * it.height }!!
             else -> choices.maxByOrNull { it.width.toLong() * it.height } ?: choices[0]
         }
+    }
+
+    // ---------------------------------------------------------------- Video
+
+    val isRecording: Boolean get() = recording
+
+    fun startVideo(withAudio: Boolean): Boolean {
+        val device = cameraDevice ?: return false
+        if (recording) return false
+        try {
+            val texture = textureView.surfaceTexture ?: return false
+            texture.setDefaultBufferSize(previewSize.width, previewSize.height)
+            val previewSurface = Surface(texture)
+
+            val recorder = createRecorder(withAudio) ?: return false
+            mediaRecorder = recorder
+            val recorderSurface = recorder.surface
+
+            val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
+            builder.addTarget(previewSurface)
+            builder.addTarget(recorderSurface)
+            previewRequestBuilder = builder
+            applyControls(builder)
+
+            try { captureSession?.close() } catch (e: Exception) {}
+            captureSession = null
+
+            @Suppress("DEPRECATION")
+            device.createCaptureSession(
+                listOf(previewSurface, recorderSurface),
+                object : CameraCaptureSession.StateCallback() {
+                    override fun onConfigured(session: CameraCaptureSession) {
+                        if (cameraDevice == null) return
+                        captureSession = session
+                        try {
+                            session.setRepeatingRequest(builder.build(), previewCallback, backgroundHandler)
+                            recorder.start()
+                            recording = true
+                            activity.runOnUiThread { onRecordingChanged?.invoke(true) }
+                        } catch (e: Exception) {
+                            fail("No se pudo iniciar el video: ${e.message}")
+                        }
+                    }
+
+                    override fun onConfigureFailed(session: CameraCaptureSession) {
+                        fail("No se pudo configurar el video.")
+                    }
+                },
+                backgroundHandler
+            )
+            return true
+        } catch (e: Exception) {
+            fail("Error al iniciar video: ${e.message}")
+            return false
+        }
+    }
+
+    fun stopVideo() {
+        if (!recording) return
+        recording = false
+        try { captureSession?.stopRepeating() } catch (e: Exception) {}
+        try { mediaRecorder?.stop() } catch (e: Exception) {}
+        try {
+            mediaRecorder?.reset()
+            mediaRecorder?.release()
+        } catch (e: Exception) {
+        }
+        mediaRecorder = null
+        finalizeVideo()
+        activity.runOnUiThread { onRecordingChanged?.invoke(false) }
+        startPreview()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun createRecorder(withAudio: Boolean): MediaRecorder? {
+        return try {
+            val recorder = MediaRecorder()
+            val out = openVideoOutput() ?: return null
+            videoUri = out.second
+            if (withAudio) recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
+            recorder.setVideoSource(MediaRecorder.VideoSource.SURFACE)
+            recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            recorder.setOutputFile(out.first)
+            recorder.setVideoEncodingBitRate(12_000_000)
+            recorder.setVideoFrameRate(30)
+            recorder.setVideoSize(videoSize.width, videoSize.height)
+            recorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
+            if (withAudio) recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            recorder.setOrientationHint(currentJpegOrientation())
+            recorder.prepare()
+            recorder
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun openVideoOutput(): Pair<java.io.FileDescriptor, Uri>? {
+        return try {
+            val name = "VID_${System.currentTimeMillis()}.mp4"
+            val resolver = activity.contentResolver
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Video.Media.DISPLAY_NAME, name)
+                    put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                    put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/CamaraMacro")
+                    put(MediaStore.Video.Media.IS_PENDING, 1)
+                }
+                val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+                    ?: return null
+                val pfd = resolver.openFileDescriptor(uri, "w") ?: return null
+                videoPfd = pfd
+                Pair(pfd.fileDescriptor, uri)
+            } else {
+                val movies = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES)
+                val dir = File(movies, "CamaraMacro").apply { if (!exists()) mkdirs() }
+                val file = File(dir, name)
+                videoFile = file
+                val fos = FileOutputStream(file)
+                videoFos = fos
+                Pair(fos.fd, Uri.fromFile(file))
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun finalizeVideo() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                videoPfd?.close()
+                videoUri?.let {
+                    val v = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
+                    activity.contentResolver.update(it, v, null, null)
+                }
+            } else {
+                videoFos?.close()
+                videoFile?.let {
+                    MediaScannerConnection.scanFile(
+                        activity, arrayOf(it.absolutePath), arrayOf("video/mp4"), null
+                    )
+                }
+            }
+        } catch (e: Exception) {
+        }
+        videoPfd = null
+        videoFos = null
+        videoFile = null
     }
 
     companion object {

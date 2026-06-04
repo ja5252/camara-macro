@@ -129,6 +129,73 @@
         android:contentDescription="@string/shutter"
         android:elevation="6dp" />
 
+    <!-- Selector de modo FOTO / VIDEO -->
+    <LinearLayout
+        android:id="@+id/mode_toggle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="134dp"
+        android:background="@drawable/zoom_pill_bg"
+        android:orientation="horizontal"
+        android:padding="4dp">
+
+        <TextView
+            android:id="@+id/tab_photo"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:paddingHorizontal="16dp"
+            android:paddingVertical="6dp"
+            android:text="@string/mode_photo"
+            android:textColor="@color/accent"
+            android:textSize="13sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.08" />
+
+        <TextView
+            android:id="@+id/tab_video"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:paddingHorizontal="16dp"
+            android:paddingVertical="6dp"
+            android:text="@string/mode_video"
+            android:textColor="#99FFFFFF"
+            android:textSize="13sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.08" />
+    </LinearLayout>
+
+    <!-- Indicador de grabación -->
+    <TextView
+        android:id="@+id/rec_indicator"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|center_horizontal"
+        android:layout_marginTop="54dp"
+        android:background="@drawable/zoom_pill_bg"
+        android:drawableStart="@drawable/rec_dot"
+        android:drawablePadding="8dp"
+        android:gravity="center_vertical"
+        android:paddingHorizontal="14dp"
+        android:paddingVertical="6dp"
+        android:text="0:00"
+        android:textColor="@color/white"
+        android:textSize="14sp"
+        android:fontFamily="monospace"
+        android:visibility="gone" />
+
+    <!-- Punto/cuadro de video sobre el obturador -->
+    <View
+        android:id="@+id/shutter_icon"
+        android:layout_width="30dp"
+        android:layout_height="30dp"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="64dp"
+        android:background="@drawable/rec_dot"
+        android:clickable="false"
+        android:focusable="false"
+        android:visibility="gone" />
+
     <!-- 10. Destello de captura (encima de todo, no recibe toques) -->
     <View
         android:id="@+id/screen_flash"

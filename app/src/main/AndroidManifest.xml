@@ -4,6 +4,7 @@
     <uses-feature android:name="android.hardware.camera.any" android:required="true" />
 
     <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- Solo se usa en Android 9 o anterior; en Android 10+ no hace falta para guardar en la galería -->
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"

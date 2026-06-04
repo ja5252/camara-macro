@@ -28,4 +28,7 @@
     <string name="lens_macro">MACRO</string>
     <string name="lens_back">CÁMARA</string>
     <string name="close">Cerrar</string>
+    <string name="mode_photo">FOTO</string>
+    <string name="mode_video">VIDEO</string>
+    <string name="cd_record">Grabar video</string>
 </resources>
