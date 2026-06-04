@@ -51,6 +51,7 @@ class CameraActivity : AppCompatActivity() {
 
     private var mode = "photo"
     private var capturing = false
+    private var burstRemaining = 0
     private var currentZoom = 1f
     private var zoomRestored = false
 
@@ -215,6 +216,7 @@ class CameraActivity : AppCompatActivity() {
         binding.btnShutter.setOnClickListener {
             if (mode == "video") toggleRecord() else startPhotoOrTimer()
         }
+        binding.btnShutter.setOnLongClickListener { startBurst(); true }
         binding.btnChangeLens.setOnClickListener { goToSetup() }
         binding.thumbnail.setOnClickListener { openGallery() }
         binding.btnWhatsapp.setOnClickListener { shootAndShareWhatsApp() }
@@ -434,6 +436,28 @@ class CameraActivity : AppCompatActivity() {
         } else {
             flashScreen()
             controller.takePhoto(cb)
+        }
+    }
+
+    // ---- Ráfaga (mantener pulsado el obturador) ----
+    private fun startBurst() {
+        if (mode != "photo" || nightOn || capturing || burstRemaining > 0) return
+        burstRemaining = 7
+        binding.btnShutter.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+        Toast.makeText(this, "Ráfaga", Toast.LENGTH_SHORT).show()
+        burstNext()
+    }
+
+    private fun burstNext() {
+        if (burstRemaining <= 0) return
+        if (capturing) { ui.postDelayed({ burstNext() }, 50); return }
+        capturing = true
+        flashScreen()
+        controller.takePhoto { ok ->
+            capturing = false
+            burstRemaining--
+            if (ok) refreshThumbnail()
+            if (burstRemaining > 0) ui.postDelayed({ burstNext() }, 60) else bounceThumbnail()
         }
     }
 
