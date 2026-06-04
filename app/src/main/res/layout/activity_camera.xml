@@ -265,6 +265,25 @@
         android:padding="12dp"
         android:visibility="gone" />
 
+    <!-- Panel de ajustes de video -->
+    <LinearLayout
+        android:id="@+id/video_panel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="240dp"
+        android:background="@drawable/zoom_pill_bg"
+        android:gravity="center"
+        android:orientation="horizontal"
+        android:padding="12dp"
+        android:visibility="gone">
+
+        <TextView android:id="@+id/chip_vres" style="@style/ProChip" android:text="1080p" />
+        <TextView android:id="@+id/chip_vfps" style="@style/ProChip" android:text="30fps" />
+        <TextView android:id="@+id/chip_vcodec" style="@style/ProChip" android:text="H264" />
+        <TextView android:id="@+id/chip_tl" style="@style/ProChip" android:text="⏱ TL" />
+    </LinearLayout>
+
     <!-- Barra de opciones desplazable (horizontal), encima de FOTO/VIDEO -->
     <HorizontalScrollView
         android:id="@+id/options_bar"
@@ -292,6 +311,7 @@
             <TextView android:id="@+id/chip_ratio" style="@style/ProChip" android:text="4:3" />
             <TextView android:id="@+id/chip_res" style="@style/ProChip" android:text="FULL" />
             <TextView android:id="@+id/chip_lenses" style="@style/ProChip" android:text="LENTES" />
+            <TextView android:id="@+id/chip_vid" style="@style/ProChip" android:text="🎬 HD" android:visibility="gone" />
             <TextView android:id="@+id/chip_flip" style="@style/ProChip" android:text="⟲ atrás" />
 
             <ImageButton

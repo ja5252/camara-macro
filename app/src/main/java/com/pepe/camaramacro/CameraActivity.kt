@@ -81,6 +81,12 @@ class CameraActivity : AppCompatActivity() {
     private var disabledLenses = HashSet<String>()
     private var nightOn = false
     private var filterIndex = 0
+    private val vresList = intArrayOf(1080, 2160, 720)
+    private val vresLabels = arrayOf("1080p", "4K", "720p")
+    private var vresIndex = 0
+    private var vfps = 30
+    private var vhevc = false
+    private var tlOn = false
     private val sensorManager by lazy { getSystemService(SENSOR_SERVICE) as SensorManager }
     private val rotationListener = object : SensorEventListener {
         private val rot = FloatArray(9)
@@ -237,6 +243,11 @@ class CameraActivity : AppCompatActivity() {
         binding.chipRes.setOnClickListener { toggleRes() }
         binding.chipLenses.setOnClickListener { toggleLensPanel() }
         binding.chipFilter.setOnClickListener { cycleFilter() }
+        binding.chipVid.setOnClickListener { toggleVideoPanel() }
+        binding.chipVres.setOnClickListener { cycleVres() }
+        binding.chipVfps.setOnClickListener { toggleVfps() }
+        binding.chipVcodec.setOnClickListener { toggleVcodec() }
+        binding.chipTl.setOnClickListener { toggleTl() }
 
         setMode(prefs.getString("mode", "photo") ?: "photo")
         restoreSettings()
@@ -280,6 +291,12 @@ class CameraActivity : AppCompatActivity() {
 
         filterIndex = prefs.getInt("filter", 0).coerceIn(0, Filters.list.size - 1)
         applyFilter()
+
+        vresIndex = prefs.getInt("vres", 0).coerceIn(0, vresList.size - 1)
+        vfps = prefs.getInt("vfps", 30)
+        vhevc = prefs.getBoolean("vhevc", false)
+        tlOn = prefs.getBoolean("tl", false)
+        applyVideoSettings()
     }
 
     override fun onResume() {
@@ -336,6 +353,12 @@ class CameraActivity : AppCompatActivity() {
         binding.tabVideo.setTextColor(if (photo) dimWhite else accent)
         binding.shutterIcon.visibility = if (photo) View.GONE else View.VISIBLE
         binding.shutterIcon.setBackgroundResource(R.drawable.rec_dot)
+        // El chip de ajustes de video solo aparece en modo video.
+        binding.chipVid.visibility = if (photo) View.GONE else View.VISIBLE
+        if (photo) {
+            binding.videoPanel.visibility = View.GONE
+            binding.chipVid.setTextColor(chipColor(false))
+        }
         if (!photo &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED
@@ -671,6 +694,10 @@ class CameraActivity : AppCompatActivity() {
         val show = binding.lensPanel.visibility != View.VISIBLE
         if (show) {
             if (proOn) togglePro() // no solapar paneles
+            if (binding.videoPanel.visibility == View.VISIBLE) {
+                binding.videoPanel.visibility = View.GONE
+                binding.chipVid.setTextColor(chipColor(false))
+            }
             buildLensChips()
             binding.lensPanel.visibility = View.VISIBLE
         } else {
@@ -723,6 +750,70 @@ class CameraActivity : AppCompatActivity() {
         prefs.edit().putStringSet("disabledLenses", HashSet(disabledLenses)).apply()
         controller.setDisabledLensIds(disabledLenses)
         buildLensChips()
+    }
+
+    private fun chipColor(active: Boolean) =
+        if (active) ContextCompat.getColor(this, R.color.accent) else Color.parseColor("#CCFFFFFF")
+
+    // ---- Ajustes de video ----
+    private fun toggleVideoPanel() {
+        val show = binding.videoPanel.visibility != View.VISIBLE
+        if (show) {
+            if (proOn) togglePro()
+            if (binding.lensPanel.visibility == View.VISIBLE) {
+                binding.lensPanel.visibility = View.GONE
+                binding.chipLenses.setTextColor(chipColor(false))
+            }
+            binding.videoPanel.visibility = View.VISIBLE
+        } else {
+            binding.videoPanel.visibility = View.GONE
+        }
+        binding.chipVid.setTextColor(chipColor(show))
+    }
+
+    private fun cycleVres() {
+        vresIndex = (vresIndex + 1) % vresList.size
+        if (vresList[vresIndex] == 2160 && !controller.supports4kVideo) {
+            vresIndex = (vresIndex + 1) % vresList.size
+        }
+        controller.setVideoTargetHeight(vresList[vresIndex])
+        prefs.edit().putInt("vres", vresIndex).apply()
+        applyVideoSettings()
+    }
+
+    private fun toggleVfps() {
+        vfps = if (vfps == 30) 60 else 30
+        controller.setVideoFps(vfps)
+        prefs.edit().putInt("vfps", vfps).apply()
+        applyVideoSettings()
+    }
+
+    private fun toggleVcodec() {
+        vhevc = !vhevc
+        controller.setVideoHevc(vhevc)
+        prefs.edit().putBoolean("vhevc", vhevc).apply()
+        applyVideoSettings()
+    }
+
+    private fun toggleTl() {
+        tlOn = !tlOn
+        controller.setTimeLapse(tlOn)
+        prefs.edit().putBoolean("tl", tlOn).apply()
+        applyVideoSettings()
+    }
+
+    private fun applyVideoSettings() {
+        binding.chipVres.text = vresLabels[vresIndex]
+        binding.chipVres.setTextColor(chipColor(vresIndex != 0))
+        binding.chipVfps.text = "${vfps}fps"
+        binding.chipVfps.setTextColor(chipColor(vfps == 60))
+        binding.chipVcodec.text = if (vhevc) "HEVC" else "H264"
+        binding.chipVcodec.setTextColor(chipColor(vhevc))
+        binding.chipTl.setTextColor(chipColor(tlOn))
+        controller.setVideoTargetHeight(vresList[vresIndex])
+        controller.setVideoFps(vfps)
+        controller.setVideoHevc(vhevc)
+        controller.setTimeLapse(tlOn)
     }
 
     /** Ciclo de lentes al voltear: trasera → cada frontal (incluye la de pantalla interna) → trasera. */
@@ -789,6 +880,10 @@ class CameraActivity : AppCompatActivity() {
             if (binding.lensPanel.visibility == View.VISIBLE) {
                 binding.lensPanel.visibility = View.GONE
                 binding.chipLenses.setTextColor(Color.parseColor("#CCFFFFFF"))
+            }
+            if (binding.videoPanel.visibility == View.VISIBLE) {
+                binding.videoPanel.visibility = View.GONE
+                binding.chipVid.setTextColor(Color.parseColor("#CCFFFFFF"))
             }
             if (proIso == 0) proIso = (controller.isoRange.first + controller.isoRange.second) / 2
             if (proExpNs == 0L) proExpNs = 16_000_000L

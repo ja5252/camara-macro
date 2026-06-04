@@ -178,6 +178,11 @@ class Camera2Controller(
 
     // Video
     private var videoSize = Size(1920, 1080)
+    private var availableVideoSizes: List<Size> = emptyList()
+    private var videoTargetH = 1080   // 2160 / 1080 / 720
+    private var videoFps = 30         // 30 / 60
+    private var videoHevc = false
+    private var timeLapse = false
     private var mediaRecorder: MediaRecorder? = null
     private var recording = false
     private var videoUri: Uri? = null
@@ -1253,6 +1258,7 @@ class Camera2Controller(
         val largest = pickJpegSize(jpegSizes)
 
         val recSizes = map.getOutputSizes(MediaRecorder::class.java)
+        availableVideoSizes = recSizes?.toList() ?: emptyList()
         videoSize = recSizes?.firstOrNull { it.width == 1920 && it.height == 1080 }
             ?: recSizes?.filter { it.width <= 1920 }?.maxByOrNull { it.width.toLong() * it.height }
             ?: recSizes?.maxByOrNull { it.width.toLong() * it.height }
@@ -1542,15 +1548,37 @@ class Camera2Controller(
 
     val isRecording: Boolean get() = recording
 
+    // --- Ajustes de video ---
+    val supports4kVideo: Boolean get() = availableVideoSizes.any { it.height >= 2100 }
+    fun setVideoTargetHeight(h: Int) { videoTargetH = h }
+    fun setVideoFps(f: Int) { videoFps = f }
+    fun setVideoHevc(on: Boolean) { videoHevc = on }
+    fun setTimeLapse(on: Boolean) { timeLapse = on }
+    val isTimeLapse: Boolean get() = timeLapse
+
+    /** Elige el tamaño de grabación 16:9 más cercano a la altura objetivo. */
+    private fun pickVideoSize(): Size {
+        if (availableVideoSizes.isEmpty()) return Size(1920, 1080)
+        val wide = availableVideoSizes.filter {
+            kotlin.math.abs(it.width.toFloat() / it.height - 16f / 9f) < 0.06f
+        }
+        val pool = if (wide.isNotEmpty()) wide else availableVideoSizes
+        return pool.minByOrNull { kotlin.math.abs(it.height - videoTargetH) }
+            ?: pool.maxByOrNull { it.width.toLong() * it.height }
+            ?: Size(1920, 1080)
+    }
+
     fun startVideo(withAudio: Boolean): Boolean {
         val device = cameraDevice ?: return false
         if (recording) return false
         try {
+            videoSize = pickVideoSize()
             val texture = textureView.surfaceTexture ?: return false
             texture.setDefaultBufferSize(previewSize.width, previewSize.height)
             val previewSurface = Surface(texture)
 
-            val recorder = createRecorder(withAudio) ?: return false
+            // En time-lapse no se graba audio.
+            val recorder = createRecorder(withAudio && !timeLapse) ?: return false
             mediaRecorder = recorder
             val recorderSurface = recorder.surface
 
@@ -1559,6 +1587,10 @@ class Camera2Controller(
             builder.addTarget(recorderSurface)
             previewRequestBuilder = builder
             applyControls(builder)
+            // 60 fps: pide el rango de FPS al sensor (si la lente lo soporta).
+            if (videoFps >= 60) {
+                builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(60, 60))
+            }
 
             try { captureSession?.close() } catch (e: Exception) {}
             captureSession = null
@@ -1619,11 +1651,20 @@ class Camera2Controller(
             recorder.setVideoSource(MediaRecorder.VideoSource.SURFACE)
             recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             recorder.setOutputFile(out.first)
-            recorder.setVideoEncodingBitRate(12_000_000)
-            recorder.setVideoFrameRate(30)
+            val bitrate = when {
+                videoSize.height >= 2000 -> 42_000_000
+                videoSize.height >= 1080 -> if (videoFps >= 60) 24_000_000 else 17_000_000
+                else -> 9_000_000
+            }
+            recorder.setVideoEncodingBitRate(bitrate)
+            recorder.setVideoFrameRate(videoFps)
             recorder.setVideoSize(videoSize.width, videoSize.height)
-            recorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
+            recorder.setVideoEncoder(
+                if (videoHevc) MediaRecorder.VideoEncoder.HEVC else MediaRecorder.VideoEncoder.H264
+            )
             if (withAudio) recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            // Time-lapse: captura ~2 fps y reproduce a videoFps (acelerado).
+            if (timeLapse) recorder.setCaptureRate(2.0)
             recorder.setOrientationHint(currentJpegOrientation())
             recorder.prepare()
             recorder
