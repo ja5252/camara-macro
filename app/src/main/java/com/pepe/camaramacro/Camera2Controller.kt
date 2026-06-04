@@ -5,12 +5,15 @@ import android.app.Activity
 import android.content.ContentValues
 import android.content.Context
 import android.content.res.Configuration
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.ImageFormat
 import android.graphics.Matrix
 import android.graphics.Point
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.SurfaceTexture
+import android.graphics.YuvImage
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
@@ -40,6 +43,7 @@ import android.util.Size
 import android.view.OrientationEventListener
 import android.view.Surface
 import android.view.TextureView
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 
@@ -144,6 +148,19 @@ class Camera2Controller(
     // Ajustes de captura (resolución / relación de aspecto)
     private var aspect = AspectRatio.NATIVE
     private var fullRes = true
+
+    // Modo noche (multi-frame). Excluyente con RAW.
+    var nightEnabled = false
+        private set
+    private var nightReader: ImageReader? = null
+    private var nightSize = Size(1920, 1080)
+    private var nightStacker: NightStacker? = null
+    private var nightCapturing = false
+    private var nightCount = 0
+    private var nightTarget = 0
+    private var lastAeIso = 800
+    private var lastAeExpNs = 33_000_000L
+    private var nightWatchdog: Runnable? = null
 
     private var aeLocked = false
     private var afLocked = false
@@ -326,6 +343,13 @@ class Camera2Controller(
         try { pendingRawImage?.close() } catch (e: Exception) {}
         pendingRawImage = null
         pendingRawResult = null
+        nightCapturing = false
+        nightWatchdog?.let { uiHandler.removeCallbacks(it) }
+        nightWatchdog = null
+        nightStacker?.release()
+        nightStacker = null
+        try { nightReader?.close() } catch (e: Exception) {}
+        nightReader = null
         cancelWatchdog()
         orientationListener.disable()
         stopBackgroundThread()
@@ -603,18 +627,11 @@ class Camera2Controller(
         val target = enabled && rawSupported
         if (target == rawEnabled) return rawEnabled
         rawEnabled = target
-        if (target) rawFallbackTried = false // permite el fallback seguro otra vez
-        // La reconstrucción de sesión va al hilo de cámara (mismo donde corre onConfigured),
-        // para no tocar previewRequestBuilder/captureSession desde el hilo de UI.
-        val h = backgroundHandler
-        if (cameraDevice != null && !recording && captureSession != null && h != null) {
-            h.post {
-                abortPendingCapture()
-                try { captureSession?.close() } catch (e: Exception) {}
-                captureSession = null
-                startPreview()
-            }
+        if (target) {
+            rawFallbackTried = false // permite el fallback seguro otra vez
+            nightEnabled = false     // RAW y noche son excluyentes (máx 3 streams)
         }
+        postRebuildSession()
         return rawEnabled
     }
 
@@ -647,6 +664,11 @@ class Camera2Controller(
         if (newAspect == aspect && full == fullRes) return
         aspect = newAspect
         fullRes = full
+        postRebuildSession()
+    }
+
+    /** Reconstruye toda la sesión (recrea ImageReaders según los flags actuales). */
+    private fun postRebuildSession() {
         val h = backgroundHandler
         if (cameraDevice != null && !recording && captureSession != null && h != null) {
             h.post {
@@ -664,6 +686,148 @@ class Camera2Controller(
                     fail("No se pudo aplicar el ajuste: ${e.message}")
                 }
             }
+        }
+    }
+
+    // ---------------------------------------------------------------- Modo noche
+
+    val hasNight: Boolean get() = true // YUV_420_888 es universal en Camera2
+
+    /** Activa/desactiva modo noche. Excluyente con RAW (nunca más de 3 streams). */
+    fun setNightEnabled(enabled: Boolean): Boolean {
+        if (enabled == nightEnabled) return nightEnabled
+        if (enabled) rawEnabled = false
+        nightEnabled = enabled
+        postRebuildSession()
+        return nightEnabled
+    }
+
+    /**
+     * Captura una ráfaga de N frames con exposición bloqueada y los apila (denoise nocturno).
+     * Si no es posible, cae a una foto JPEG normal.
+     */
+    fun takeNightPhoto(onResult: (Boolean) -> Unit) {
+        val device = cameraDevice
+        val session = captureSession
+        val reader = nightReader
+        if (device == null || session == null || reader == null || nightCapturing) {
+            takePhoto(onResult); return
+        }
+        try {
+            pendingResult = onResult
+            nightCapturing = true
+            nightCount = 0
+            nightTarget = NIGHT_FRAMES
+            nightStacker = NightStacker(nightSize.width, nightSize.height)
+
+            // Exposición a bloquear: manual si está activa, si no la última auto medida.
+            val iso = if (manualExposure) manualIso else lastAeIso
+            val expNs = if (manualExposure) manualExpNs
+                else lastAeExpNs.coerceAtMost(125_000_000L) // tope 1/8s por frame contra movimiento
+
+            val requests = ArrayList<CaptureRequest>(NIGHT_FRAMES)
+            for (n in 0 until NIGHT_FRAMES) {
+                val b = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
+                b.addTarget(reader.surface)
+                b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                b.set(CaptureRequest.SENSOR_SENSITIVITY, iso)
+                b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, expNs)
+                if (manualWb && awbOffSupported) {
+                    b.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF)
+                    b.set(CaptureRequest.COLOR_CORRECTION_MODE, CameraMetadata.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX)
+                    b.set(CaptureRequest.COLOR_CORRECTION_GAINS, kelvinToRggb(wbKelvin))
+                } else {
+                    b.set(CaptureRequest.CONTROL_AWB_MODE, awbMode)
+                }
+                // AF estable durante la ráfaga (no reenfocar entre frames).
+                b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+                if (manualFocus) b.set(CaptureRequest.LENS_FOCUS_DISTANCE, manualDiopters)
+                if (oisAvailable) b.set(
+                    CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                    CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON
+                )
+                applyZoom(b)
+                requests.add(b.build())
+            }
+            session.captureBurst(requests, object : CameraCaptureSession.CaptureCallback() {}, backgroundHandler)
+            nightWatchdog = Runnable { abortNight() }
+            uiHandler.postDelayed(nightWatchdog!!, 8000)
+        } catch (e: Exception) {
+            nightCapturing = false
+            nightStacker = null
+            val cb = pendingResult; pendingResult = null
+            activity.runOnUiThread { cb?.invoke(false) }
+        }
+    }
+
+    private val onNightImage = ImageReader.OnImageAvailableListener { reader ->
+        var image: Image? = null
+        try {
+            image = reader.acquireNextImage()
+            if (nightCapturing && image != null) nightStacker?.addFrame(image)
+        } catch (e: Exception) {
+            Log.e("CamMacro", "onNightImage: ${e.message}")
+        } finally {
+            image?.close()
+        }
+        if (nightCapturing) {
+            nightCount++
+            if (nightCount >= nightTarget) finishNightStack()
+        }
+    }
+
+    private fun finishNightStack() {
+        if (!nightCapturing) return
+        nightCapturing = false
+        nightWatchdog?.let { uiHandler.removeCallbacks(it) }
+        nightWatchdog = null
+        val stacker = nightStacker
+        nightStacker = null
+        val ok = try {
+            val nv21 = stacker?.result()
+            if (nv21 != null) {
+                val yuv = YuvImage(nv21, ImageFormat.NV21, nightSize.width, nightSize.height, null)
+                val bos = ByteArrayOutputStream()
+                yuv.compressToJpeg(Rect(0, 0, nightSize.width, nightSize.height), 95, bos)
+                var bytes = bos.toByteArray()
+                val rot = currentJpegOrientation()
+                if (rot != 0) bytes = rotateJpeg(bytes, rot) ?: bytes
+                saveImage(bytes)
+            } else false
+        } catch (e: Exception) {
+            Log.e("CamMacro", "finishNightStack: ${e.message}")
+            false
+        }
+        stacker?.release()
+        val cb = pendingResult; pendingResult = null
+        activity.runOnUiThread { cb?.invoke(ok) }
+    }
+
+    private fun abortNight() {
+        if (!nightCapturing) return
+        nightCapturing = false
+        nightWatchdog?.let { uiHandler.removeCallbacks(it) }
+        nightWatchdog = null
+        try { captureSession?.let { /* no abortCaptures: deja terminar */ } } catch (e: Exception) {}
+        nightStacker?.release()
+        nightStacker = null
+        val cb = pendingResult; pendingResult = null
+        activity.runOnUiThread { cb?.invoke(false) }
+    }
+
+    /** Rota un JPEG horneando la rotación en píxeles (YuvImage no escribe orientación EXIF). */
+    private fun rotateJpeg(bytes: ByteArray, degrees: Int): ByteArray? {
+        return try {
+            val src = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+            val m = Matrix().apply { postRotate(degrees.toFloat()) }
+            val rotated = Bitmap.createBitmap(src, 0, 0, src.width, src.height, m, true)
+            val bos = ByteArrayOutputStream()
+            rotated.compress(Bitmap.CompressFormat.JPEG, 95, bos)
+            if (rotated != src) rotated.recycle()
+            src.recycle()
+            bos.toByteArray()
+        } catch (e: Exception) {
+            null
         }
     }
 
@@ -751,6 +915,9 @@ class Camera2Controller(
             request: CaptureRequest,
             result: TotalCaptureResult
         ) {
+            // Cachear la exposición auto medida para bloquearla en el modo noche.
+            result.get(CaptureResult.SENSOR_SENSITIVITY)?.let { lastAeIso = it }
+            result.get(CaptureResult.SENSOR_EXPOSURE_TIME)?.let { lastAeExpNs = it }
             val af = result.get(CaptureResult.CONTROL_AF_STATE) ?: return
             val mapped = when (af) {
                 CameraMetadata.CONTROL_AF_STATE_PASSIVE_SCAN,
@@ -1018,6 +1185,21 @@ class Camera2Controller(
             }
         }
 
+        // Modo noche: stream YUV de tamaño moderado, solo cuando está activo.
+        try { nightReader?.close() } catch (e: Exception) {}
+        nightReader = null
+        if (nightEnabled) {
+            // Tope ~4MP: equilibra calidad y memoria (acumuladores + N buffers YUV).
+            val yuvSizes = map.getOutputSizes(ImageFormat.YUV_420_888)
+            nightSize = yuvSizes?.filter { it.width.toLong() * it.height <= 4_200_000L }
+                ?.maxByOrNull { it.width.toLong() * it.height }
+                ?: yuvSizes?.minByOrNull { it.width.toLong() * it.height }
+                ?: previewSize
+            nightReader = ImageReader.newInstance(
+                nightSize.width, nightSize.height, ImageFormat.YUV_420_888, NIGHT_FRAMES + 1
+            ).apply { setOnImageAvailableListener(onNightImage, backgroundHandler) }
+        }
+
         @Suppress("DEPRECATION")
         val displayRotation = activity.windowManager.defaultDisplay.rotation
         val swapped = areDimensionsSwapped(displayRotation)
@@ -1064,6 +1246,7 @@ class Camera2Controller(
 
             val outputs = mutableListOf(surface, reader.surface)
             if (rawEnabled) rawReader?.let { outputs.add(it.surface) }
+            if (nightEnabled) nightReader?.let { outputs.add(it.surface) }
             @Suppress("DEPRECATION")
             device.createCaptureSession(
                 outputs,
@@ -1409,5 +1592,6 @@ class Camera2Controller(
         private const val MAX_PREVIEW_WIDTH = 1920
         private const val MAX_PREVIEW_HEIGHT = 1080
         private const val OPEN_TIMEOUT_MS = 5000L
+        private const val NIGHT_FRAMES = 7
     }
 }

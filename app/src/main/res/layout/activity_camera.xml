@@ -296,6 +296,7 @@
         <TextView android:id="@+id/chip_flash" style="@style/ProChip" android:layout_marginBottom="6dp" android:text="⚡ off" />
         <TextView android:id="@+id/chip_flip" style="@style/ProChip" android:layout_marginBottom="6dp" android:text="⟲ atrás" />
         <TextView android:id="@+id/chip_raw" style="@style/ProChip" android:layout_marginBottom="6dp" android:text="RAW" />
+        <TextView android:id="@+id/chip_night" style="@style/ProChip" android:layout_marginBottom="6dp" android:text="🌙" />
         <TextView android:id="@+id/chip_ratio" style="@style/ProChip" android:layout_marginBottom="6dp" android:text="4:3" />
         <TextView android:id="@+id/chip_res" style="@style/ProChip" android:layout_marginBottom="6dp" android:text="FULL" />
         <TextView android:id="@+id/chip_lenses" style="@style/ProChip" android:text="LENTES" />
@@ -313,6 +314,23 @@
         android:textStyle="bold"
         android:shadowColor="#B3000000"
         android:shadowRadius="12"
+        android:visibility="gone" />
+
+    <!-- Indicador de procesado del modo noche -->
+    <TextView
+        android:id="@+id/night_label"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:background="@drawable/zoom_pill_bg"
+        android:paddingHorizontal="20dp"
+        android:paddingVertical="12dp"
+        android:text="🌙 Apilando…"
+        android:textColor="@color/white"
+        android:textSize="16sp"
+        android:fontFamily="sans-serif-medium"
+        android:clickable="false"
+        android:focusable="false"
         android:visibility="gone" />
 
     <!-- 10. Destello de captura (encima de todo, no recibe toques) -->

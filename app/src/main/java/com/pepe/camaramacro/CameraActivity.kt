@@ -75,6 +75,7 @@ class CameraActivity : AppCompatActivity() {
     private var ratioIndex = 0
     private var fullRes = true
     private var disabledLenses = HashSet<String>()
+    private var nightOn = false
     private val sensorManager by lazy { getSystemService(SENSOR_SERVICE) as SensorManager }
     private val rotationListener = object : SensorEventListener {
         private val rot = FloatArray(9)
@@ -225,6 +226,7 @@ class CameraActivity : AppCompatActivity() {
         binding.chipFlash.setOnClickListener { cycleFlash() }
         binding.chipFlip.setOnClickListener { flipCamera() }
         binding.chipRaw.setOnClickListener { toggleRaw() }
+        binding.chipNight.setOnClickListener { toggleNight() }
         binding.chipRatio.setOnClickListener { cycleRatio() }
         binding.chipRes.setOnClickListener { toggleRes() }
         binding.chipLenses.setOnClickListener { toggleLensPanel() }
@@ -368,20 +370,28 @@ class CameraActivity : AppCompatActivity() {
         if (capturing) return
         capturing = true
         binding.btnShutter.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-        flashScreen()
         binding.btnShutter.animate().scaleX(0.88f).scaleY(0.88f).setDuration(80)
             .withEndAction {
                 binding.btnShutter.animate().scaleX(1f).scaleY(1f).setDuration(120)
                     .setInterpolator(OvershootInterpolator()).start()
             }.start()
-        controller.takePhoto { ok ->
+        val cb: (Boolean) -> Unit = { ok ->
             capturing = false
+            binding.nightLabel.visibility = View.GONE
             if (ok) {
                 refreshThumbnail()
                 bounceThumbnail()
             } else {
                 Toast.makeText(this, R.string.photo_error, Toast.LENGTH_SHORT).show()
             }
+        }
+        if (nightOn) {
+            // Apilado multi-frame: sin destello, con indicador de procesado.
+            binding.nightLabel.visibility = View.VISIBLE
+            controller.takeNightPhoto(cb)
+        } else {
+            flashScreen()
+            controller.takePhoto(cb)
         }
     }
 
@@ -528,7 +538,24 @@ class CameraActivity : AppCompatActivity() {
             if (on) ContextCompat.getColor(this, R.color.accent)
             else Color.parseColor("#CCFFFFFF")
         )
+        if (on && nightOn) { // RAW y noche son excluyentes
+            nightOn = false
+            binding.chipNight.setTextColor(Color.parseColor("#CCFFFFFF"))
+        }
         Toast.makeText(this, if (on) "RAW + JPEG" else "Solo JPEG", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun toggleNight() {
+        if (controller.isRecording) return
+        val on = controller.setNightEnabled(!nightOn)
+        nightOn = on
+        binding.chipNight.setTextColor(
+            if (on) ContextCompat.getColor(this, R.color.accent) else Color.parseColor("#CCFFFFFF")
+        )
+        if (on) { // noche apaga RAW (excluyente); reflejarlo en el chip
+            binding.chipRaw.setTextColor(Color.parseColor("#CCFFFFFF"))
+        }
+        Toast.makeText(this, if (on) "Modo noche ON" else "Modo noche OFF", Toast.LENGTH_SHORT).show()
     }
 
     private fun cycleRatio() {
