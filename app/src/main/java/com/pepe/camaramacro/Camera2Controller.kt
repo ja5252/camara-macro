@@ -90,6 +90,19 @@ class Camera2Controller(
     private var pendingResidual = -1f
     private var autoLens = false
 
+    // Controles PRO (exposición / WB)
+    private var isoMin = 100
+    private var isoMax = 100
+    private var expMinNs = 0L
+    private var expMaxNs = 0L
+    private var evMin = 0
+    private var evMax = 0
+    private var manualExposure = false
+    private var manualIso = 100
+    private var manualExpNs = 8_000_000L
+    private var evSteps = 0
+    private var awbMode = CaptureRequest.CONTROL_AWB_MODE_AUTO
+
     private var aeLocked = false
     private var afLocked = false
     private var manualFocus = false
@@ -395,11 +408,56 @@ class Camera2Controller(
         }
     }
 
+    // ---------------------------------------------------------------- Controles PRO
+
+    fun supportsManualExposure(): Boolean = isoMax > isoMin && expMaxNs > expMinNs
+    val isoRange: Pair<Int, Int> get() = Pair(isoMin, isoMax)
+    val shutterRangeNs: Pair<Long, Long> get() = Pair(expMinNs, expMaxNs)
+    val evRange: Pair<Int, Int> get() = Pair(evMin, evMax)
+    val isManualExposure: Boolean get() = manualExposure
+
+    fun setManualExposure(iso: Int, expNs: Long) {
+        manualExposure = true
+        manualIso = iso.coerceIn(isoMin, isoMax)
+        manualExpNs = expNs.coerceIn(if (expMinNs > 0) expMinNs else 1L, if (expMaxNs > 0) expMaxNs else 100_000_000L)
+        applyAndUpdate()
+    }
+
+    fun setAutoExposure() {
+        manualExposure = false
+        applyAndUpdate()
+    }
+
+    fun setEv(steps: Int) {
+        evSteps = steps.coerceIn(evMin, evMax)
+        applyAndUpdate()
+    }
+
+    fun setWhiteBalance(mode: Int) {
+        awbMode = mode
+        applyAndUpdate()
+    }
+
+    private fun applyAndUpdate() {
+        if (::previewRequestBuilder.isInitialized) {
+            applyControls(previewRequestBuilder)
+            updatePreview()
+        }
+    }
+
     /** Aplica zoom, AE-lock y el modo de enfoque actual al builder. */
     private fun applyControls(b: CaptureRequest.Builder) {
         b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
-        b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-        b.set(CaptureRequest.CONTROL_AE_LOCK, aeLocked)
+        if (manualExposure) {
+            b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+            b.set(CaptureRequest.SENSOR_SENSITIVITY, manualIso)
+            b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, manualExpNs)
+        } else {
+            b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+            b.set(CaptureRequest.CONTROL_AE_LOCK, aeLocked)
+            b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, evSteps)
+        }
+        b.set(CaptureRequest.CONTROL_AWB_MODE, awbMode)
         when {
             manualFocus -> {
                 b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
@@ -567,6 +625,13 @@ class Camera2Controller(
             maxZoom = characteristics.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1f
         }
         if (maxZoom < 1f) maxZoom = 1f
+
+        val isoR = characteristics.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
+        if (isoR != null) { isoMin = isoR.lower; isoMax = isoR.upper }
+        val expR = characteristics.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+        if (expR != null) { expMinNs = expR.lower; expMaxNs = expR.upper }
+        val evR = characteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
+        if (evR != null) { evMin = evR.lower; evMax = evR.upper }
 
         val jpegSizes = map.getOutputSizes(ImageFormat.JPEG) ?: arrayOf(Size(1920, 1080))
         val largest = jpegSizes.maxByOrNull { it.width.toLong() * it.height } ?: Size(1920, 1080)
