@@ -21,11 +21,13 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import androidx.viewpager2.widget.ViewPager2
 import coil.load
 import com.pepe.camaramacro.databinding.ActivityGalleryBinding
 import com.pepe.camaramacro.databinding.ItemGalleryBinding
+import com.pepe.camaramacro.databinding.ItemGalleryGridBinding
 import java.util.concurrent.Executors
 
 /**
@@ -72,6 +74,7 @@ class GalleryActivity : AppCompatActivity() {
         binding.btnClose.setOnClickListener { finish() }
         binding.btnShare.setOnClickListener { shareCurrent() }
         binding.btnDelete.setOnClickListener { deleteCurrent() }
+        binding.btnGrid.setOnClickListener { toggleGrid() }
 
         requestMediaPermsThenLoad()
     }
@@ -99,8 +102,36 @@ class GalleryActivity : AppCompatActivity() {
     private fun loadAndShow() {
         loadMedia()
         binding.pager.adapter = Adapter()
+        binding.grid.layoutManager = GridLayoutManager(this, 3)
+        binding.grid.adapter = GridAdapter()
         val start = intent.getIntExtra(EXTRA_INDEX, 0).coerceIn(0, (items.size - 1).coerceAtLeast(0))
         if (items.isNotEmpty()) binding.pager.setCurrentItem(start, false)
+        applyEmptyState()
+        updateCounter()
+    }
+
+    private var gridShown = false
+
+    private fun toggleGrid() {
+        if (items.isEmpty()) return
+        gridShown = !gridShown
+        binding.grid.visibility = if (gridShown) View.VISIBLE else View.GONE
+        binding.pager.visibility = if (gridShown) View.GONE else View.VISIBLE
+        binding.bottomBar.visibility = if (gridShown || !chromeVisible) View.GONE else View.VISIBLE
+        binding.counter.visibility = if (gridShown) View.INVISIBLE else View.VISIBLE
+        if (gridShown) {
+            binding.grid.adapter?.notifyDataSetChanged()
+            binding.grid.scrollToPosition(binding.pager.currentItem)
+        }
+    }
+
+    private fun openAt(index: Int) {
+        gridShown = false
+        binding.grid.visibility = View.GONE
+        binding.pager.visibility = View.VISIBLE
+        binding.counter.visibility = View.VISIBLE
+        chromeVisible = true
+        binding.pager.setCurrentItem(index, false)
         applyEmptyState()
         updateCounter()
     }
@@ -277,7 +308,8 @@ class GalleryActivity : AppCompatActivity() {
         override fun onBindViewHolder(holder: VH, position: Int) {
             val item = items[position]
             holder.b.pageImage.setImageDrawable(null)
-            holder.b.pageImage.setOnClickListener { toggleChrome() }
+            holder.b.pageImage.onTap = { toggleChrome() }
+            holder.b.pageImage.onZoomChanged = { z -> binding.pager.isUserInputEnabled = !z }
             if (item.isVideo) {
                 holder.b.playBadge.visibility = View.VISIBLE
                 holder.b.playBadge.setOnClickListener { openExternally(item) }
@@ -294,10 +326,47 @@ class GalleryActivity : AppCompatActivity() {
             // Evita arrastrar la miniatura del item anterior al reciclar.
             holder.b.pageImage.tag = null
             holder.b.pageImage.setImageDrawable(null)
+            binding.pager.isUserInputEnabled = true
         }
     }
 
     private inner class VH(val b: ItemGalleryBinding) : RecyclerView.ViewHolder(b.root)
+
+    // ---------------------------------------------------------------- Carrete (grid)
+
+    private inner class GridAdapter : RecyclerView.Adapter<GVH>() {
+        private val cell = resources.displayMetrics.widthPixels / 3
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): GVH {
+            val b = ItemGalleryGridBinding.inflate(LayoutInflater.from(parent.context), parent, false)
+            b.root.layoutParams = b.root.layoutParams.apply { height = cell }
+            return GVH(b)
+        }
+
+        override fun getItemCount() = items.size
+
+        override fun onBindViewHolder(holder: GVH, position: Int) {
+            val item = items[position]
+            holder.b.cellPlay.visibility = if (item.isVideo) View.VISIBLE else View.GONE
+            holder.b.cellImage.tag = null
+            if (item.isVideo) {
+                loadVideoThumb(item.uri, holder.b.cellImage)
+            } else {
+                holder.b.cellImage.load(item.uri)
+            }
+            holder.b.root.setOnClickListener {
+                val p = holder.bindingAdapterPosition
+                if (p != RecyclerView.NO_POSITION) openAt(p)
+            }
+        }
+    }
+
+    private inner class GVH(val b: ItemGalleryGridBinding) : RecyclerView.ViewHolder(b.root)
+
+    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+    override fun onBackPressed() {
+        if (gridShown) toggleGrid() else super.onBackPressed()
+    }
 
     override fun onDestroy() {
         bg.shutdownNow()

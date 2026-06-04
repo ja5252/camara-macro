@@ -10,6 +10,16 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
+    <!-- Carrete (cuadrícula de todas las fotos/videos) -->
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/grid"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@color/black"
+        android:clipToPadding="false"
+        android:paddingTop="92dp"
+        android:visibility="gone" />
+
     <!-- Barra superior -->
     <LinearLayout
         android:id="@+id/top_bar"
@@ -43,9 +53,14 @@
             android:textSize="15sp"
             android:fontFamily="sans-serif-medium" />
 
-        <Space
+        <ImageButton
+            android:id="@+id/btn_grid"
             android:layout_width="44dp"
-            android:layout_height="44dp" />
+            android:layout_height="44dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/cd_recents"
+            android:padding="10dp"
+            android:src="@drawable/ic_grid" />
     </LinearLayout>
 
     <!-- Barra inferior -->

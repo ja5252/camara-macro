@@ -4,12 +4,11 @@
     android:layout_height="match_parent"
     android:background="@color/black">
 
-    <ImageView
+    <com.pepe.camaramacro.ZoomableImageView
         android:id="@+id/page_image"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:contentDescription="@string/cd_thumbnail"
-        android:scaleType="fitCenter" />
+        android:contentDescription="@string/cd_thumbnail" />
 
     <FrameLayout
         android:id="@+id/play_badge"
