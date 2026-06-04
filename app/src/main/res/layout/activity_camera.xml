@@ -18,6 +18,14 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
+    <!-- Cuadrícula + nivel (no recibe toques) -->
+    <com.pepe.camaramacro.GridOverlayView
+        android:id="@+id/grid_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:clickable="false"
+        android:focusable="false" />
+
     <!-- 3. Scrims para legibilidad -->
     <View
         android:layout_width="match_parent"
@@ -259,6 +267,33 @@
             <TextView android:id="@+id/chip_auto" style="@style/ProChip" android:text="AUTO" />
         </LinearLayout>
     </LinearLayout>
+
+    <!-- Chips arriba-izquierda: cuadrícula y temporizador -->
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|start"
+        android:layout_marginStart="12dp"
+        android:layout_marginTop="44dp"
+        android:orientation="horizontal">
+
+        <TextView android:id="@+id/chip_grid" style="@style/ProChip" android:text="⊞" />
+        <TextView android:id="@+id/chip_timer" style="@style/ProChip" android:text="⏱ off" />
+    </LinearLayout>
+
+    <!-- Cuenta atrás del temporizador -->
+    <TextView
+        android:id="@+id/countdown"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:text=""
+        android:textColor="@color/white"
+        android:textSize="96sp"
+        android:textStyle="bold"
+        android:shadowColor="#B3000000"
+        android:shadowRadius="12"
+        android:visibility="gone" />
 
     <!-- 10. Destello de captura (encima de todo, no recibe toques) -->
     <View

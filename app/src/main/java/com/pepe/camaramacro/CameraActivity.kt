@@ -6,6 +6,10 @@ import android.content.ContentUris
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.hardware.camera2.CameraMetadata
 import android.net.Uri
 import android.os.Bundle
@@ -15,6 +19,7 @@ import android.os.SystemClock
 import android.provider.MediaStore
 import android.view.GestureDetector
 import android.view.HapticFeedbackConstants
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
@@ -58,6 +63,21 @@ class CameraActivity : AppCompatActivity() {
         CameraMetadata.CONTROL_AWB_MODE_SHADE
     )
     private val wbLabels = arrayOf("WB AUTO", "WB Incand.", "WB Fluor.", "WB Sol", "WB Nube", "WB Sombra")
+
+    private var timerSec = 0
+    private var gridOn = false
+    private val sensorManager by lazy { getSystemService(SENSOR_SERVICE) as SensorManager }
+    private val rotationListener = object : SensorEventListener {
+        private val rot = FloatArray(9)
+        private val orient = FloatArray(3)
+        override fun onSensorChanged(e: SensorEvent) {
+            if (e.sensor.type != Sensor.TYPE_ROTATION_VECTOR) return
+            SensorManager.getRotationMatrixFromVector(rot, e.values)
+            SensorManager.getOrientation(rot, orient)
+            binding.gridOverlay.setRoll(Math.toDegrees(orient[2].toDouble()).toFloat())
+        }
+        override fun onAccuracyChanged(s: Sensor?, a: Int) {}
+    }
 
     private val ui = Handler(Looper.getMainLooper())
     private val prefs by lazy { getSharedPreferences("camara", MODE_PRIVATE) }
@@ -158,7 +178,7 @@ class CameraActivity : AppCompatActivity() {
         }
 
         binding.btnShutter.setOnClickListener {
-            if (mode == "video") toggleRecord() else takePhoto()
+            if (mode == "video") toggleRecord() else startPhotoOrTimer()
         }
         binding.btnChangeLens.setOnClickListener { goToSetup() }
         binding.thumbnail.setOnClickListener { openLastPhoto() }
@@ -179,6 +199,9 @@ class CameraActivity : AppCompatActivity() {
             override fun onStopTrackingTouch(s: SeekBar) {}
         })
 
+        binding.chipGrid.setOnClickListener { toggleGrid() }
+        binding.chipTimer.setOnClickListener { cycleTimer() }
+
         setMode(prefs.getString("mode", "photo") ?: "photo")
     }
 
@@ -186,6 +209,9 @@ class CameraActivity : AppCompatActivity() {
         super.onResume()
         if (!::controller.isInitialized) return
         refreshThumbnail()
+        sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)?.let {
+            sensorManager.registerListener(rotationListener, it, SensorManager.SENSOR_DELAY_UI)
+        }
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
             == PackageManager.PERMISSION_GRANTED
         ) {
@@ -196,6 +222,7 @@ class CameraActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
+        sensorManager.unregisterListener(rotationListener)
         if (::controller.isInitialized) {
             if (controller.isRecording) controller.stopVideo()
             prefs.edit().putFloat("zoom", currentZoom).putString("mode", mode).apply()
@@ -387,6 +414,61 @@ class CameraActivity : AppCompatActivity() {
     }
 
     private fun dp(v: Float) = v * resources.displayMetrics.density
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
+            if (::controller.isInitialized) {
+                if (mode == "video") toggleRecord() else startPhotoOrTimer()
+                return true
+            }
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    private fun toggleGrid() {
+        gridOn = !gridOn
+        binding.gridOverlay.showGrid = gridOn
+        binding.gridOverlay.showLevel = gridOn
+        binding.chipGrid.setTextColor(
+            if (gridOn) ContextCompat.getColor(this, R.color.accent) else Color.parseColor("#CCFFFFFF")
+        )
+    }
+
+    private fun cycleTimer() {
+        timerSec = when (timerSec) {
+            0 -> 3
+            3 -> 10
+            else -> 0
+        }
+        binding.chipTimer.text = if (timerSec == 0) "⏱ off" else "⏱ ${timerSec}s"
+        binding.chipTimer.setTextColor(
+            if (timerSec == 0) Color.parseColor("#CCFFFFFF") else ContextCompat.getColor(this, R.color.accent)
+        )
+    }
+
+    private fun startPhotoOrTimer() {
+        if (capturing) return
+        if (timerSec <= 0) {
+            takePhoto()
+            return
+        }
+        var remaining = timerSec
+        binding.countdown.visibility = View.VISIBLE
+        binding.countdown.text = remaining.toString()
+        val r = object : Runnable {
+            override fun run() {
+                remaining--
+                if (remaining <= 0) {
+                    binding.countdown.visibility = View.GONE
+                    takePhoto()
+                } else {
+                    binding.countdown.text = remaining.toString()
+                    ui.postDelayed(this, 1000)
+                }
+            }
+        }
+        ui.postDelayed(r, 1000)
+    }
 
     // ---- PRO ----
     private fun togglePro() {
