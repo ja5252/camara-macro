@@ -47,6 +47,9 @@ import android.util.Size
 import android.view.OrientationEventListener
 import android.view.Surface
 import android.view.TextureView
+import com.google.mlkit.vision.barcode.BarcodeScanner
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.common.InputImage
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -169,6 +172,14 @@ class Camera2Controller(
     private var lastAeIso = 800
     private var lastAeExpNs = 33_000_000L
     private var nightWatchdog: Runnable? = null
+
+    // QR / código de barras (ML Kit). Excluyente con RAW y noche.
+    var qrEnabled = false
+        private set
+    private var qrReader: ImageReader? = null
+    private var qrScanner: BarcodeScanner? = null
+    @Volatile private var qrBusy = false
+    var onQrDetected: ((String) -> Unit)? = null
 
     private var aeLocked = false
     private var afLocked = false
@@ -363,6 +374,11 @@ class Camera2Controller(
         nightStacker = null
         try { nightReader?.close() } catch (e: Exception) {}
         nightReader = null
+        try { qrReader?.close() } catch (e: Exception) {}
+        qrReader = null
+        try { qrScanner?.close() } catch (e: Exception) {}
+        qrScanner = null
+        qrBusy = false
         cancelWatchdog()
         orientationListener.disable()
         stopBackgroundThread()
@@ -642,7 +658,8 @@ class Camera2Controller(
         rawEnabled = target
         if (target) {
             rawFallbackTried = false // permite el fallback seguro otra vez
-            nightEnabled = false     // RAW y noche son excluyentes (máx 3 streams)
+            nightEnabled = false     // RAW, noche y QR son excluyentes (máx 3 streams)
+            if (qrEnabled) setQrEnabledInternal(false)
         }
         postRebuildSession()
         return rawEnabled
@@ -714,10 +731,56 @@ class Camera2Controller(
     /** Activa/desactiva modo noche. Excluyente con RAW (nunca más de 3 streams). */
     fun setNightEnabled(enabled: Boolean): Boolean {
         if (enabled == nightEnabled) return nightEnabled
-        if (enabled) rawEnabled = false
+        if (enabled) { rawEnabled = false; if (qrEnabled) setQrEnabledInternal(false) }
         nightEnabled = enabled
         postRebuildSession()
         return nightEnabled
+    }
+
+    // ---------------------------------------------------------------- QR / códigos
+
+    val hasQr: Boolean get() = true
+
+    fun setQrEnabled(enabled: Boolean): Boolean {
+        if (enabled == qrEnabled) return qrEnabled
+        if (enabled) { rawEnabled = false; nightEnabled = false }
+        setQrEnabledInternal(enabled)
+        postRebuildSession()
+        return qrEnabled
+    }
+
+    private fun setQrEnabledInternal(enabled: Boolean) {
+        qrEnabled = enabled
+        if (enabled) {
+            if (qrScanner == null) qrScanner = BarcodeScanning.getClient()
+        } else {
+            try { qrScanner?.close() } catch (e: Exception) {}
+            qrScanner = null
+            qrBusy = false
+        }
+    }
+
+    private val onQrImage = ImageReader.OnImageAvailableListener { reader ->
+        val image = try { reader.acquireLatestImage() } catch (e: Exception) { null }
+        if (image == null) return@OnImageAvailableListener
+        val scanner = qrScanner
+        if (qrBusy || scanner == null) { image.close(); return@OnImageAvailableListener }
+        qrBusy = true
+        try {
+            val input = InputImage.fromMediaImage(image, sensorOrientation)
+            scanner.process(input)
+                .addOnSuccessListener { barcodes ->
+                    val v = barcodes.firstOrNull()?.rawValue
+                    if (!v.isNullOrEmpty()) activity.runOnUiThread { onQrDetected?.invoke(v) }
+                }
+                .addOnCompleteListener {
+                    image.close()
+                    qrBusy = false
+                }
+        } catch (e: Exception) {
+            image.close()
+            qrBusy = false
+        }
     }
 
     /**
@@ -1299,6 +1362,19 @@ class Camera2Controller(
             ).apply { setOnImageAvailableListener(onNightImage, backgroundHandler) }
         }
 
+        // QR: stream YUV continuo de baja resolución solo cuando está activo.
+        try { qrReader?.close() } catch (e: Exception) {}
+        qrReader = null
+        if (qrEnabled) {
+            val yuvSizes = map.getOutputSizes(ImageFormat.YUV_420_888)
+            val qrSize = yuvSizes?.filter { it.width <= 1280 }?.maxByOrNull { it.width.toLong() * it.height }
+                ?: yuvSizes?.minByOrNull { it.width.toLong() * it.height }
+                ?: Size(1280, 720)
+            qrReader = ImageReader.newInstance(qrSize.width, qrSize.height, ImageFormat.YUV_420_888, 2).apply {
+                setOnImageAvailableListener(onQrImage, backgroundHandler)
+            }
+        }
+
         @Suppress("DEPRECATION")
         val displayRotation = activity.windowManager.defaultDisplay.rotation
         val swapped = areDimensionsSwapped(displayRotation)
@@ -1343,10 +1419,12 @@ class Camera2Controller(
 
             previewRequestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
             previewRequestBuilder.addTarget(surface)
+            if (qrEnabled) qrReader?.let { previewRequestBuilder.addTarget(it.surface) }
 
             val outputs = mutableListOf(surface, reader.surface)
             if (rawEnabled) rawReader?.let { outputs.add(it.surface) }
             if (nightEnabled) nightReader?.let { outputs.add(it.surface) }
+            if (qrEnabled) qrReader?.let { outputs.add(it.surface) }
             @Suppress("DEPRECATION")
             device.createCaptureSession(
                 outputs,

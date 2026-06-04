@@ -80,6 +80,8 @@ class CameraActivity : AppCompatActivity() {
     private var fullRes = true
     private var disabledLenses = HashSet<String>()
     private var nightOn = false
+    private var qrOn = false
+    private var qrValue: String? = null
     private var filterIndex = 0
     private val vresList = intArrayOf(1080, 2160, 720)
     private val vresLabels = arrayOf("1080p", "4K", "720p")
@@ -172,6 +174,7 @@ class CameraActivity : AppCompatActivity() {
                 binding.chipRaw.setTextColor(Color.parseColor("#CCFFFFFF"))
             }
         }
+        controller.onQrDetected = { value -> runOnUiThread { showQrResult(value) } }
 
         scaleDetector = ScaleGestureDetector(
             this,
@@ -239,6 +242,10 @@ class CameraActivity : AppCompatActivity() {
         binding.chipFlip.setOnClickListener { flipCamera() }
         binding.chipRaw.setOnClickListener { toggleRaw() }
         binding.chipNight.setOnClickListener { toggleNight() }
+        binding.chipQr.setOnClickListener { toggleQr() }
+        binding.btnQrOpen.setOnClickListener { openQr() }
+        binding.btnQrCopy.setOnClickListener { copyQr() }
+        binding.btnQrClose.setOnClickListener { binding.qrCard.visibility = View.GONE }
         binding.chipRatio.setOnClickListener { cycleRatio() }
         binding.chipRes.setOnClickListener { toggleRes() }
         binding.chipLenses.setOnClickListener { toggleLensPanel() }
@@ -626,9 +633,12 @@ class CameraActivity : AppCompatActivity() {
             if (on) ContextCompat.getColor(this, R.color.accent)
             else Color.parseColor("#CCFFFFFF")
         )
-        if (on && nightOn) { // RAW y noche son excluyentes
+        if (on) { // RAW, noche y QR son excluyentes
             nightOn = false
             binding.chipNight.setTextColor(Color.parseColor("#CCFFFFFF"))
+            qrOn = false
+            binding.chipQr.setTextColor(Color.parseColor("#CCFFFFFF"))
+            binding.qrCard.visibility = View.GONE
         }
         Toast.makeText(this, if (on) "RAW + JPEG" else "Solo JPEG", Toast.LENGTH_SHORT).show()
     }
@@ -640,10 +650,56 @@ class CameraActivity : AppCompatActivity() {
         binding.chipNight.setTextColor(
             if (on) ContextCompat.getColor(this, R.color.accent) else Color.parseColor("#CCFFFFFF")
         )
-        if (on) { // noche apaga RAW (excluyente); reflejarlo en el chip
+        if (on) { // noche apaga RAW y QR (excluyentes); reflejarlo en los chips
             binding.chipRaw.setTextColor(Color.parseColor("#CCFFFFFF"))
+            binding.chipQr.setTextColor(Color.parseColor("#CCFFFFFF"))
+            qrOn = false
+            binding.qrCard.visibility = View.GONE
         }
         Toast.makeText(this, if (on) "Modo noche ON" else "Modo noche OFF", Toast.LENGTH_SHORT).show()
+    }
+
+    // ---- QR / código de barras ----
+    private fun toggleQr() {
+        if (controller.isRecording) return
+        val on = controller.setQrEnabled(!qrOn)
+        qrOn = on
+        binding.chipQr.setTextColor(chipColor(on))
+        if (on) {
+            // QR apaga RAW y noche (excluyentes)
+            binding.chipRaw.setTextColor(Color.parseColor("#CCFFFFFF"))
+            binding.chipNight.setTextColor(Color.parseColor("#CCFFFFFF"))
+            nightOn = false
+            Toast.makeText(this, "Apunta a un código QR", Toast.LENGTH_SHORT).show()
+        } else {
+            binding.qrCard.visibility = View.GONE
+        }
+    }
+
+    private fun showQrResult(value: String) {
+        if (binding.qrCard.visibility == View.VISIBLE && qrValue == value) return // ya mostrado
+        qrValue = value
+        binding.qrText.text = value
+        binding.qrCard.visibility = View.VISIBLE
+        binding.btnQrOpen.visibility =
+            if (value.startsWith("http://") || value.startsWith("https://")) View.VISIBLE else View.GONE
+    }
+
+    private fun openQr() {
+        val v = qrValue ?: return
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(v)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (e: Exception) {
+            Toast.makeText(this, R.string.no_player, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun copyQr() {
+        val v = qrValue ?: return
+        val cb = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        cb.setPrimaryClip(android.content.ClipData.newPlainText("QR", v))
+        Toast.makeText(this, "Copiado", Toast.LENGTH_SHORT).show()
+        binding.qrCard.visibility = View.GONE
     }
 
     private fun cycleRatio() {
