@@ -62,12 +62,20 @@ class Camera2Controller(
     var onReady: (() -> Unit)? = null
     var onError: ((String) -> Unit)? = null
     var onFocusState: ((FocusState) -> Unit)? = null
+    /** Resultado de guardar el DNG (RAW). true = guardado, false = fallo. */
+    var onRawSaved: ((Boolean) -> Unit)? = null
+    /** Se llama si RAW no se pudo activar (la lente no admite 3 streams) y se cayó a JPEG. */
+    var onRawUnavailable: (() -> Unit)? = null
 
     private var cameraId: String = "0"
-    private var cameraDevice: CameraDevice? = null
-    private var captureSession: CameraCaptureSession? = null
+    @Volatile private var cameraDevice: CameraDevice? = null
+    @Volatile private var captureSession: CameraCaptureSession? = null
     private var imageReader: ImageReader? = null
     private lateinit var previewRequestBuilder: CaptureRequest.Builder
+
+    // Token de generación de apertura: descarta callbacks de una lente anterior
+    // (p.ej. tras flip/switch) para que no muestren error en la lente nueva.
+    private var cameraGen = 0
 
     private var previewSize: Size = Size(1920, 1080)
     private var sensorOrientation = 0
@@ -119,7 +127,11 @@ class Camera2Controller(
     private var rawReader: ImageReader? = null
     var rawEnabled = false
         private set
+    // Emparejamiento Imagen RAW + metadata: ambos llegan por canales independientes y
+    // sin orden garantizado; se escribe el DNG solo cuando AMBOS están presentes.
     private var pendingRawResult: TotalCaptureResult? = null
+    private var pendingRawImage: Image? = null
+    private var rawFallbackTried = false
 
     private var aeLocked = false
     private var afLocked = false
@@ -209,9 +221,16 @@ class Camera2Controller(
         }
         try {
             pendingResult = onResult
+            val wantRaw = rawEnabled && rawSupported && rawReader != null
+            if (wantRaw) {
+                // Descarta cualquier mitad colgante de un disparo previo.
+                try { pendingRawImage?.close() } catch (e: Exception) {}
+                pendingRawImage = null
+                pendingRawResult = null
+            }
             val req = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
             req.addTarget(reader.surface)
-            if (rawEnabled && rawSupported) rawReader?.let { req.addTarget(it.surface) }
+            if (wantRaw) rawReader?.let { req.addTarget(it.surface) }
             applyControls(req)
             if (flashAvailable) {
                 when (flashMode) {
@@ -235,7 +254,11 @@ class Camera2Controller(
                     request: CaptureRequest,
                     result: TotalCaptureResult
                 ) {
-                    pendingRawResult = result
+                    // Solo emparejar metadata si ESTE disparo pidió RAW.
+                    if (wantRaw) {
+                        pendingRawResult = result
+                        tryFlushDng()
+                    }
                 }
 
                 override fun onCaptureFailed(
@@ -274,6 +297,9 @@ class Camera2Controller(
         } catch (e: Exception) {
         }
         rawReader = null
+        try { pendingRawImage?.close() } catch (e: Exception) {}
+        pendingRawImage = null
+        pendingRawResult = null
         cancelWatchdog()
         orientationListener.disable()
         stopBackgroundThread()
@@ -282,7 +308,7 @@ class Camera2Controller(
     // ---------------------------------------------------------------- Zoom
 
     private fun applyZoom(b: CaptureRequest.Builder) {
-        if (zoomRatioSupported) {
+        if (zoomRatioSupported && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             b.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoomRatio)
         } else {
             val arr = activeArray ?: return
@@ -505,10 +531,16 @@ class Camera2Controller(
         val target = enabled && rawSupported
         if (target == rawEnabled) return rawEnabled
         rawEnabled = target
-        if (cameraDevice != null && !recording && captureSession != null) {
-            try { captureSession?.close() } catch (e: Exception) {}
-            captureSession = null
-            startPreview()
+        if (target) rawFallbackTried = false // permite el fallback seguro otra vez
+        // La reconstrucción de sesión va al hilo de cámara (mismo donde corre onConfigured),
+        // para no tocar previewRequestBuilder/captureSession desde el hilo de UI.
+        val h = backgroundHandler
+        if (cameraDevice != null && !recording && captureSession != null && h != null) {
+            h.post {
+                try { captureSession?.close() } catch (e: Exception) {}
+                captureSession = null
+                startPreview()
+            }
         }
         return rawEnabled
     }
@@ -674,21 +706,34 @@ class Camera2Controller(
     val hasRaw: Boolean get() = rawSupported
 
     private val onRawAvailable = ImageReader.OnImageAvailableListener { reader ->
-        var image: Image? = null
         try {
-            image = reader.acquireNextImage()
-            val result = pendingRawResult
-            val chars = camChars
-            if (image != null && result != null && chars != null) {
-                saveDng(image, result, chars)
-            }
+            // No depender del orden: guardamos la imagen y emparejamos con la metadata.
+            pendingRawImage = reader.acquireNextImage()
+            tryFlushDng()
         } catch (e: Exception) {
+            Log.e("CamMacro", "onRawAvailable: ${e.message}")
         }
-        image?.close()
     }
 
-    private fun saveDng(image: Image, result: TotalCaptureResult, chars: CameraCharacteristics) {
-        try {
+    /**
+     * Escribe el DNG solo cuando la Imagen RAW y su TotalCaptureResult están AMBOS presentes.
+     * Se llama desde onRawAvailable y desde onCaptureCompleted (ambos en backgroundHandler,
+     * por lo que están serializados: no hay carrera de datos).
+     */
+    private fun tryFlushDng() {
+        val image = pendingRawImage
+        val result = pendingRawResult
+        val chars = camChars
+        if (image == null || result == null || chars == null) return
+        pendingRawImage = null
+        pendingRawResult = null
+        val ok = saveDng(image, result, chars)
+        try { image.close() } catch (e: Exception) {}
+        activity.runOnUiThread { onRawSaved?.invoke(ok) }
+    }
+
+    private fun saveDng(image: Image, result: TotalCaptureResult, chars: CameraCharacteristics): Boolean {
+        return try {
             val name = "MACRO_${System.currentTimeMillis()}.dng"
             val resolver = activity.contentResolver
             val dng = DngCreator(chars, result)
@@ -703,7 +748,8 @@ class Camera2Controller(
                 val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
                 if (uri == null) {
                     dng.close()
-                    return
+                    Log.e("CamMacro", "saveDng: insert devolvió null")
+                    return false
                 }
                 resolver.openOutputStream(uri)?.use { dng.writeImage(it, image) }
                 values.clear()
@@ -720,7 +766,10 @@ class Camera2Controller(
                 )
             }
             dng.close()
+            true
         } catch (e: Exception) {
+            Log.e("CamMacro", "saveDng falló: ${e.message}")
+            false
         }
     }
 
@@ -736,23 +785,26 @@ class Camera2Controller(
     @SuppressLint("MissingPermission")
     private fun openCamera() {
         val manager = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val gen = ++cameraGen
         try {
             setUpOutputs(manager)
             configureTransform(textureView.width, textureView.height)
-            startWatchdog()
+            startWatchdog(gen)
             manager.openCamera(cameraId, object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) {
+                    if (gen != cameraGen) { try { camera.close() } catch (e: Exception) {}; return }
                     cameraDevice = camera
                     startPreview()
                 }
 
                 override fun onDisconnected(camera: CameraDevice) {
                     camera.close()
-                    cameraDevice = null
+                    if (gen == cameraGen) cameraDevice = null
                 }
 
                 override fun onError(camera: CameraDevice, error: Int) {
                     camera.close()
+                    if (gen != cameraGen) return
                     cameraDevice = null
                     fail("Esta lente no se pudo abrir (error $error). Prueba otra.")
                 }
@@ -779,7 +831,9 @@ class Camera2Controller(
         minFocusDistance = characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
 
         activeArray = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
-        val zr = characteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+        // CONTROL_ZOOM_RATIO_RANGE es API 30; en versiones previas usamos SCALER_CROP_REGION.
+        val zr = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
+            characteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE) else null
         if (zr != null) {
             zoomRatioSupported = true
             maxZoom = zr.upper
@@ -906,6 +960,17 @@ class Camera2Controller(
                     }
 
                     override fun onConfigureFailed(session: CameraCaptureSession) {
+                        // Si falló con RAW (3 streams), degradar a 2 streams en vez de matar la cámara.
+                        if (rawEnabled && !rawFallbackTried) {
+                            rawFallbackTried = true
+                            rawEnabled = false
+                            try { rawReader?.close() } catch (e: Exception) {}
+                            rawReader = null
+                            Log.e("CamMacro", "RAW no soportado en 3 streams; cayendo a JPEG")
+                            activity.runOnUiThread { onRawUnavailable?.invoke() }
+                            startPreview()
+                            return
+                        }
                         fail("No se pudo configurar esta lente. Prueba otra.")
                     }
                 },
@@ -993,10 +1058,11 @@ class Camera2Controller(
 
     // ---------------------------------------------------------------- Watchdog / hilos
 
-    private fun startWatchdog() {
+    private fun startWatchdog(gen: Int) {
         cancelWatchdog()
         watchdog = Runnable {
-            fail("Esta lente no respondió (puede ser la dañada). Prueba otra.")
+            // Solo falla si seguimos en la misma apertura (no tras un flip/switch).
+            if (gen == cameraGen) fail("Esta lente no respondió (puede ser la dañada). Prueba otra.")
         }
         uiHandler.postDelayed(watchdog!!, OPEN_TIMEOUT_MS)
     }

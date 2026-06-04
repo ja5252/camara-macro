@@ -142,6 +142,17 @@ class CameraActivity : AppCompatActivity() {
             }
         }
         controller.onRecordingChanged = { rec -> onRecordingChanged(rec) }
+        controller.onRawSaved = { ok ->
+            if (!ok) runOnUiThread {
+                Toast.makeText(this, R.string.raw_save_error, Toast.LENGTH_SHORT).show()
+            }
+        }
+        controller.onRawUnavailable = {
+            runOnUiThread {
+                Toast.makeText(this, R.string.raw_unavailable, Toast.LENGTH_LONG).show()
+                binding.chipRaw.setTextColor(Color.parseColor("#CCFFFFFF"))
+            }
+        }
 
         scaleDetector = ScaleGestureDetector(
             this,

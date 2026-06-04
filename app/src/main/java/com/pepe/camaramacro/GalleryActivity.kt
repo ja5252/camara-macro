@@ -1,14 +1,17 @@
 package com.pepe.camaramacro
 
+import android.Manifest
 import android.app.RecoverableSecurityException
 import android.content.ContentUris
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
+import android.util.Log
 import android.util.Size
 import android.view.LayoutInflater
 import android.view.View
@@ -17,6 +20,7 @@ import android.widget.Toast
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.RecyclerView
 import androidx.viewpager2.widget.ViewPager2
 import coil.load
@@ -34,7 +38,7 @@ class GalleryActivity : AppCompatActivity() {
     private val items = ArrayList<GalleryItem>()
     private val bg = Executors.newSingleThreadExecutor()
     private var chromeVisible = true
-    private var pendingDeletePos: Int? = null
+    private var pendingDeleteUri: Uri? = null
 
     data class GalleryItem(
         val id: Long,
@@ -46,8 +50,13 @@ class GalleryActivity : AppCompatActivity() {
 
     private val deleteLauncher =
         registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
-            if (result.resultCode == RESULT_OK) pendingDeletePos?.let { onDeleted(it) }
-            pendingDeletePos = null
+            if (result.resultCode == RESULT_OK) pendingDeleteUri?.let { onDeletedByUri(it) }
+            pendingDeleteUri = null
+        }
+
+    private val permLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+            loadAndShow()
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -55,34 +64,62 @@ class GalleryActivity : AppCompatActivity() {
         binding = ActivityGalleryBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        loadMedia()
-        if (items.isEmpty()) {
-            binding.emptyLabel.visibility = View.VISIBLE
-            binding.bottomBar.visibility = View.GONE
-        }
+        pendingDeleteUri = savedInstanceState?.getString(KEY_PENDING_DELETE)?.let { Uri.parse(it) }
 
-        binding.pager.adapter = Adapter()
         binding.pager.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
             override fun onPageSelected(position: Int) = updateCounter()
         })
-        val start = intent.getIntExtra(EXTRA_INDEX, 0).coerceIn(0, (items.size - 1).coerceAtLeast(0))
-        binding.pager.setCurrentItem(start, false)
-        updateCounter()
-
         binding.btnClose.setOnClickListener { finish() }
         binding.btnShare.setOnClickListener { shareCurrent() }
         binding.btnDelete.setOnClickListener { deleteCurrent() }
+
+        requestMediaPermsThenLoad()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        pendingDeleteUri?.let { outState.putString(KEY_PENDING_DELETE, it.toString()) }
+    }
+
+    // ---------------------------------------------------------------- Permisos
+
+    private fun readPerms(): Array<String> =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+            arrayOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO)
+        else
+            arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+
+    private fun requestMediaPermsThenLoad() {
+        val missing = readPerms().filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isEmpty()) loadAndShow() else permLauncher.launch(missing.toTypedArray())
+    }
+
+    private fun loadAndShow() {
+        loadMedia()
+        binding.pager.adapter = Adapter()
+        val start = intent.getIntExtra(EXTRA_INDEX, 0).coerceIn(0, (items.size - 1).coerceAtLeast(0))
+        if (items.isNotEmpty()) binding.pager.setCurrentItem(start, false)
+        applyEmptyState()
+        updateCounter()
+    }
+
+    private fun applyEmptyState() {
+        val empty = items.isEmpty()
+        binding.emptyLabel.visibility = if (empty) View.VISIBLE else View.GONE
+        binding.bottomBar.visibility = if (empty || !chromeVisible) View.GONE else View.VISIBLE
     }
 
     private fun updateCounter() {
-        binding.counter.text = if (items.isEmpty()) "" else "${binding.pager.currentItem + 1} / ${items.size}"
+        binding.counter.text =
+            if (items.isEmpty()) "" else "${binding.pager.currentItem + 1} / ${items.size}"
     }
 
     private fun toggleChrome() {
         chromeVisible = !chromeVisible
-        val v = if (chromeVisible) View.VISIBLE else View.GONE
-        binding.topBar.visibility = v
-        if (items.isNotEmpty()) binding.bottomBar.visibility = v
+        binding.topBar.visibility = if (chromeVisible) View.VISIBLE else View.GONE
+        applyEmptyState()
     }
 
     // ---------------------------------------------------------------- Datos
@@ -102,12 +139,13 @@ class GalleryActivity : AppCompatActivity() {
         val selection: String
         val args: Array<String>
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // Anclado al inicio: no atrapa "CamaraMacro2" ni otras carpetas.
             selection = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
-            args = arrayOf("%$relPath%")
+            args = arrayOf("$relPath/%")
         } else {
             @Suppress("DEPRECATION")
             selection = "${MediaStore.MediaColumns.DATA} LIKE ?"
-            args = arrayOf("%$relPath%")
+            args = arrayOf("%/$relPath/%")
         }
         try {
             contentResolver.query(collection, projection, selection, args, "$dateCol DESC")?.use { c ->
@@ -128,6 +166,7 @@ class GalleryActivity : AppCompatActivity() {
                 }
             }
         } catch (e: Exception) {
+            Log.e("CamMacro", "Galería query falló: ${e.message}")
         }
     }
 
@@ -142,6 +181,7 @@ class GalleryActivity : AppCompatActivity() {
                 .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             startActivity(Intent.createChooser(send, getString(R.string.share)))
         } catch (e: Exception) {
+            Toast.makeText(this, R.string.delete_error, Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -153,29 +193,34 @@ class GalleryActivity : AppCompatActivity() {
                     .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             )
         } catch (e: Exception) {
+            Toast.makeText(this, R.string.no_player, Toast.LENGTH_SHORT).show()
         }
     }
 
     private fun deleteCurrent() {
-        val pos = binding.pager.currentItem
-        val item = items.getOrNull(pos) ?: return
+        val item = items.getOrNull(binding.pager.currentItem) ?: return
         try {
             val rows = contentResolver.delete(item.uri, null, null)
-            if (rows > 0) onDeleted(pos)
+            if (rows > 0) onDeletedByUri(item.uri)
             else Toast.makeText(this, R.string.delete_error, Toast.LENGTH_SHORT).show()
         } catch (e: SecurityException) {
             // Android 10+: el sistema pide confirmación del usuario para borrar.
-            val sender = when {
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.R ->
-                    MediaStore.createDeleteRequest(contentResolver, listOf(item.uri)).intentSender
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && e is RecoverableSecurityException ->
-                    e.userAction.actionIntent.intentSender
-                else -> null
-            }
-            if (sender != null) {
-                pendingDeletePos = pos
-                deleteLauncher.launch(IntentSenderRequest.Builder(sender).build())
-            } else {
+            try {
+                val sender = when {
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.R ->
+                        MediaStore.createDeleteRequest(contentResolver, listOf(item.uri)).intentSender
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && e is RecoverableSecurityException ->
+                        e.userAction.actionIntent.intentSender
+                    else -> null
+                }
+                if (sender != null) {
+                    pendingDeleteUri = item.uri
+                    deleteLauncher.launch(IntentSenderRequest.Builder(sender).build())
+                } else {
+                    Toast.makeText(this, R.string.delete_error, Toast.LENGTH_SHORT).show()
+                }
+            } catch (e2: Exception) {
+                pendingDeleteUri = null
                 Toast.makeText(this, R.string.delete_error, Toast.LENGTH_SHORT).show()
             }
         } catch (e: Exception) {
@@ -183,15 +228,18 @@ class GalleryActivity : AppCompatActivity() {
         }
     }
 
-    private fun onDeleted(pos: Int) {
-        if (pos < 0 || pos >= items.size) return
-        items.removeAt(pos)
-        binding.pager.adapter?.notifyItemRemoved(pos)
+    /** Borra por URI (no por índice): siempre quita lo que el sistema confirmó. */
+    private fun onDeletedByUri(uri: Uri) {
+        val i = items.indexOfFirst { it.uri == uri }
         Toast.makeText(this, R.string.deleted, Toast.LENGTH_SHORT).show()
-        if (items.isEmpty()) {
-            binding.emptyLabel.visibility = View.VISIBLE
-            binding.bottomBar.visibility = View.GONE
+        if (i < 0) return
+        items.removeAt(i)
+        binding.pager.adapter?.notifyItemRemoved(i)
+        if (items.isNotEmpty()) {
+            val newPos = i.coerceIn(0, items.size - 1)
+            binding.pager.setCurrentItem(newPos, false)
         }
+        applyEmptyState()
         updateCounter()
     }
 
@@ -228,6 +276,7 @@ class GalleryActivity : AppCompatActivity() {
 
         override fun onBindViewHolder(holder: VH, position: Int) {
             val item = items[position]
+            holder.b.pageImage.setImageDrawable(null)
             holder.b.pageImage.setOnClickListener { toggleChrome() }
             if (item.isVideo) {
                 holder.b.playBadge.visibility = View.VISIBLE
@@ -235,9 +284,16 @@ class GalleryActivity : AppCompatActivity() {
                 loadVideoThumb(item.uri, holder.b.pageImage)
             } else {
                 holder.b.playBadge.visibility = View.GONE
+                holder.b.playBadge.setOnClickListener(null)
                 holder.b.pageImage.tag = null
                 holder.b.pageImage.load(item.uri)
             }
+        }
+
+        override fun onViewRecycled(holder: VH) {
+            // Evita arrastrar la miniatura del item anterior al reciclar.
+            holder.b.pageImage.tag = null
+            holder.b.pageImage.setImageDrawable(null)
         }
     }
 
@@ -250,5 +306,6 @@ class GalleryActivity : AppCompatActivity() {
 
     companion object {
         const val EXTRA_INDEX = "index"
+        private const val KEY_PENDING_DELETE = "pendingDeleteUri"
     }
 }

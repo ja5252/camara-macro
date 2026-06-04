@@ -39,4 +39,9 @@
     <string name="no_media">Aún no hay fotos ni videos</string>
     <string name="deleted">Borrado</string>
     <string name="delete_error">No se pudo borrar</string>
+    <string name="no_player">No hay app para abrir esto</string>
+
+    <!-- RAW -->
+    <string name="raw_save_error">No se pudo guardar el RAW</string>
+    <string name="raw_unavailable">RAW no disponible en esta lente</string>
 </resources>
