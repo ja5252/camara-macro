@@ -19,6 +19,7 @@ import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureFailure
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.DngCreator
 import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.MeteringRectangle
 import android.media.Image
@@ -112,6 +113,14 @@ class Camera2Controller(
     private var flashAvailable = false
     private var flashMode = 0 // 0 off, 1 auto, 2 on, 3 torch
 
+    // RAW / DNG
+    private var camChars: CameraCharacteristics? = null
+    private var rawSupported = false
+    private var rawReader: ImageReader? = null
+    var rawEnabled = false
+        private set
+    private var pendingRawResult: TotalCaptureResult? = null
+
     private var aeLocked = false
     private var afLocked = false
     private var manualFocus = false
@@ -202,6 +211,7 @@ class Camera2Controller(
             pendingResult = onResult
             val req = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
             req.addTarget(reader.surface)
+            if (rawEnabled && rawSupported) rawReader?.let { req.addTarget(it.surface) }
             applyControls(req)
             if (flashAvailable) {
                 when (flashMode) {
@@ -220,6 +230,14 @@ class Camera2Controller(
             }
             req.set(CaptureRequest.JPEG_ORIENTATION, currentJpegOrientation())
             session.capture(req.build(), object : CameraCaptureSession.CaptureCallback() {
+                override fun onCaptureCompleted(
+                    s: CameraCaptureSession,
+                    request: CaptureRequest,
+                    result: TotalCaptureResult
+                ) {
+                    pendingRawResult = result
+                }
+
                 override fun onCaptureFailed(
                     s: CameraCaptureSession,
                     request: CaptureRequest,
@@ -251,6 +269,11 @@ class Camera2Controller(
         } catch (e: Exception) {
         }
         imageReader = null
+        try {
+            rawReader?.close()
+        } catch (e: Exception) {
+        }
+        rawReader = null
         cancelWatchdog()
         orientationListener.disable()
         stopBackgroundThread()
@@ -473,6 +496,23 @@ class Camera2Controller(
         applyAndUpdate()
     }
 
+    /**
+     * Activa/desactiva RAW. Reconstruye la sesión para añadir/quitar el stream RAW, de modo
+     * que la vista previa por defecto (sin RAW) use la combinación de 2 streams ya probada.
+     * Devuelve el estado real (false si la lente no soporta RAW).
+     */
+    fun setRawEnabled(enabled: Boolean): Boolean {
+        val target = enabled && rawSupported
+        if (target == rawEnabled) return rawEnabled
+        rawEnabled = target
+        if (cameraDevice != null && !recording && captureSession != null) {
+            try { captureSession?.close() } catch (e: Exception) {}
+            captureSession = null
+            startPreview()
+        }
+        return rawEnabled
+    }
+
     /** ID de la primera lente frontal (selfie), o null. */
     fun frontLensId(): String? {
         val manager = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -631,6 +671,68 @@ class Camera2Controller(
         activity.runOnUiThread { cb?.invoke(ok) }
     }
 
+    val hasRaw: Boolean get() = rawSupported
+
+    private val onRawAvailable = ImageReader.OnImageAvailableListener { reader ->
+        var image: Image? = null
+        try {
+            image = reader.acquireNextImage()
+            val result = pendingRawResult
+            val chars = camChars
+            if (image != null && result != null && chars != null) {
+                saveDng(image, result, chars)
+            }
+        } catch (e: Exception) {
+        }
+        image?.close()
+    }
+
+    private fun saveDng(image: Image, result: TotalCaptureResult, chars: CameraCharacteristics) {
+        try {
+            val name = "MACRO_${System.currentTimeMillis()}.dng"
+            val resolver = activity.contentResolver
+            val dng = DngCreator(chars, result)
+            dng.setOrientation(exifOrientation())
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, name)
+                    put(MediaStore.Images.Media.MIME_TYPE, "image/x-adobe-dng")
+                    put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/CamaraMacro")
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                }
+                val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                if (uri == null) {
+                    dng.close()
+                    return
+                }
+                resolver.openOutputStream(uri)?.use { dng.writeImage(it, image) }
+                values.clear()
+                values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+            } else {
+                @Suppress("DEPRECATION")
+                val pics = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
+                val dir = File(pics, "CamaraMacro").apply { if (!exists()) mkdirs() }
+                val file = File(dir, name)
+                FileOutputStream(file).use { dng.writeImage(it, image) }
+                MediaScannerConnection.scanFile(
+                    activity, arrayOf(file.absolutePath), arrayOf("image/x-adobe-dng"), null
+                )
+            }
+            dng.close()
+        } catch (e: Exception) {
+        }
+    }
+
+    private fun exifOrientation(): Int {
+        return when (currentJpegOrientation()) {
+            90 -> android.media.ExifInterface.ORIENTATION_ROTATE_90
+            180 -> android.media.ExifInterface.ORIENTATION_ROTATE_180
+            270 -> android.media.ExifInterface.ORIENTATION_ROTATE_270
+            else -> android.media.ExifInterface.ORIENTATION_NORMAL
+        }
+    }
+
     @SuppressLint("MissingPermission")
     private fun openCamera() {
         val manager = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -714,6 +816,23 @@ class Camera2Controller(
             setOnImageAvailableListener(onImageAvailableListener, backgroundHandler)
         }
 
+        camChars = characteristics
+        val rawCaps = characteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: IntArray(0)
+        rawSupported = rawCaps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_RAW)
+        try { rawReader?.close() } catch (e: Exception) {}
+        rawReader = null
+        if (rawSupported) {
+            val rawSizes = map.getOutputSizes(ImageFormat.RAW_SENSOR)
+            val largestRaw = rawSizes?.maxByOrNull { it.width.toLong() * it.height }
+            if (largestRaw != null) {
+                rawReader = ImageReader.newInstance(largestRaw.width, largestRaw.height, ImageFormat.RAW_SENSOR, 2).apply {
+                    setOnImageAvailableListener(onRawAvailable, backgroundHandler)
+                }
+            } else {
+                rawSupported = false
+            }
+        }
+
         @Suppress("DEPRECATION")
         val displayRotation = activity.windowManager.defaultDisplay.rotation
         val swapped = areDimensionsSwapped(displayRotation)
@@ -758,9 +877,11 @@ class Camera2Controller(
             previewRequestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
             previewRequestBuilder.addTarget(surface)
 
+            val outputs = mutableListOf(surface, reader.surface)
+            if (rawEnabled) rawReader?.let { outputs.add(it.surface) }
             @Suppress("DEPRECATION")
             device.createCaptureSession(
-                listOf(surface, reader.surface),
+                outputs,
                 object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(session: CameraCaptureSession) {
                         if (cameraDevice == null) return

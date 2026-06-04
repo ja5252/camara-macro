@@ -205,6 +205,7 @@ class CameraActivity : AppCompatActivity() {
         binding.chipTimer.setOnClickListener { cycleTimer() }
         binding.chipFlash.setOnClickListener { cycleFlash() }
         binding.chipFlip.setOnClickListener { flipCamera() }
+        binding.chipRaw.setOnClickListener { toggleRaw() }
 
         setMode(prefs.getString("mode", "photo") ?: "photo")
     }
@@ -457,6 +458,19 @@ class CameraActivity : AppCompatActivity() {
         binding.chipFlash.setTextColor(
             if (flashMode == 0) Color.parseColor("#CCFFFFFF") else ContextCompat.getColor(this, R.color.accent)
         )
+    }
+
+    private fun toggleRaw() {
+        if (!controller.hasRaw) {
+            Toast.makeText(this, "Esta lente no soporta RAW", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val on = controller.setRawEnabled(!controller.rawEnabled)
+        binding.chipRaw.setTextColor(
+            if (on) ContextCompat.getColor(this, R.color.accent)
+            else Color.parseColor("#CCFFFFFF")
+        )
+        Toast.makeText(this, if (on) "RAW + JPEG" else "Solo JPEG", Toast.LENGTH_SHORT).show()
     }
 
     private fun flipCamera() {

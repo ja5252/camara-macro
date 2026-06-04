@@ -281,6 +281,7 @@
         <TextView android:id="@+id/chip_timer" style="@style/ProChip" android:layout_marginBottom="6dp" android:text="⏱ off" />
         <TextView android:id="@+id/chip_flash" style="@style/ProChip" android:layout_marginBottom="6dp" android:text="⚡ off" />
         <TextView android:id="@+id/chip_flip" style="@style/ProChip" android:layout_marginBottom="6dp" android:text="⟲ atrás" />
+        <TextView android:id="@+id/chip_raw" style="@style/ProChip" android:layout_marginBottom="6dp" android:text="RAW" />
     </LinearLayout>
 
     <!-- Cuenta atrás del temporizador -->
