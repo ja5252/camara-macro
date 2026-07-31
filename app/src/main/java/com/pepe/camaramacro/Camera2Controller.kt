@@ -99,6 +99,7 @@ class Camera2Controller(
     private var sensorOrientation = 0
     private var facingFront = false
     private var afContinuousSupported = false
+    private var afVideoSupported = false
 
     // Capacidades / estado de control
     var afAvailable = false
@@ -138,6 +139,9 @@ class Camera2Controller(
     // Anti-blur / estabilización
     private var aeFpsRange: Range<Int>? = null
     private var oisAvailable = false
+    private var eisAvailable = false          // estabilización electrónica (solo video)
+    private var videoSessionActive = false    // true mientras la sesión es de grabación
+    private var refocusRelease: Runnable? = null // vuelve a enfoque continuo tras un toque
 
     // Flash
     private var flashAvailable = false
@@ -379,6 +383,9 @@ class Camera2Controller(
         try { qrScanner?.close() } catch (e: Exception) {}
         qrScanner = null
         qrBusy = false
+        videoSessionActive = false
+        refocusRelease?.let { uiHandler.removeCallbacks(it) }
+        refocusRelease = null
         cancelWatchdog()
         orientationListener.disable()
         stopBackgroundThread()
@@ -523,26 +530,38 @@ class Camera2Controller(
         val rect = meteringRect(x / viewW, y / viewH) ?: return
         val mr = arrayOf(MeteringRectangle(rect, MeteringRectangle.METERING_WEIGHT_MAX))
         manualFocus = false
-        afLocked = false // enfoque continuo rápido, sigue rastreando
         lastFocusState = null
         try {
             previewRequestBuilder.set(CaptureRequest.CONTROL_AE_REGIONS, mr)
             if (afAvailable) {
                 previewRequestBuilder.set(CaptureRequest.CONTROL_AF_REGIONS, mr)
-                previewRequestBuilder.set(
-                    CaptureRequest.CONTROL_AF_MODE,
-                    if (afContinuousSupported) CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
-                    else CaptureRequest.CONTROL_AF_MODE_AUTO
-                )
+                // Secuencia CORRECTA de tap-to-focus en Camera2:
+                // 1) CANCEL para abortar el barrido pasivo en curso,
+                // 2) modo AUTO (un disparo) para poder dirigir el enfoque a la región,
+                // 3) START para lanzar de verdad el barrido hacia el punto tocado.
+                // Antes solo se mandaba CANCEL→IDLE: se cancelaba el enfoque y nunca
+                // se pedía uno nuevo, por eso el enfoque táctil era lento e impreciso.
                 previewRequestBuilder.set(
                     CaptureRequest.CONTROL_AF_TRIGGER,
                     CameraMetadata.CONTROL_AF_TRIGGER_CANCEL
+                )
+                session.capture(previewRequestBuilder.build(), null, backgroundHandler)
+
+                afLocked = true // applyControls mantiene AF_MODE_AUTO (foco fijado en el punto)
+                previewRequestBuilder.set(
+                    CaptureRequest.CONTROL_AF_MODE,
+                    CaptureRequest.CONTROL_AF_MODE_AUTO
+                )
+                previewRequestBuilder.set(
+                    CaptureRequest.CONTROL_AF_TRIGGER,
+                    CameraMetadata.CONTROL_AF_TRIGGER_START
                 )
                 session.capture(previewRequestBuilder.build(), previewCallback, backgroundHandler)
                 previewRequestBuilder.set(
                     CaptureRequest.CONTROL_AF_TRIGGER,
                     CameraMetadata.CONTROL_AF_TRIGGER_IDLE
                 )
+                scheduleRefocusRelease()
             } else {
                 // Sin AF: solo fijamos exposición/medición en el punto.
                 activity.runOnUiThread { onFocusState?.invoke(FocusState.FOCUSED) }
@@ -550,6 +569,27 @@ class Camera2Controller(
             updatePreview()
         } catch (e: Exception) {
         }
+    }
+
+    /**
+     * Tras unos segundos con el foco fijado por toque, vuelve al enfoque continuo
+     * para que la cámara siga funcionando si el usuario se mueve (como las nativas).
+     */
+    private fun scheduleRefocusRelease() {
+        refocusRelease?.let { uiHandler.removeCallbacks(it) }
+        val r = Runnable {
+            if (!manualFocus && afLocked) {
+                afLocked = false
+                if (::previewRequestBuilder.isInitialized) {
+                    previewRequestBuilder.set(CaptureRequest.CONTROL_AF_REGIONS, null)
+                    previewRequestBuilder.set(CaptureRequest.CONTROL_AE_REGIONS, null)
+                    applyControls(previewRequestBuilder)
+                    updatePreview()
+                }
+            }
+        }
+        refocusRelease = r
+        uiHandler.postDelayed(r, TAP_FOCUS_HOLD_MS)
     }
 
     /** Bloquea/desbloquea exposición y enfoque. Al desbloquear, vuelve a enfoque continuo. */
@@ -1032,12 +1072,20 @@ class Camera2Controller(
         } else {
             b.set(CaptureRequest.CONTROL_AWB_MODE, awbMode)
         }
-        if (oisAvailable) {
+        // Estabilización: OIS siempre; EIS solo en video (en foto recorta y no aporta).
+        // OIS y EIS a la vez pueden pelearse: si hay EIS en video, dejamos que mande EIS.
+        val useEis = videoSessionActive && eisAvailable
+        if (oisAvailable && !useEis) {
             b.set(
                 CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
                 CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON
             )
         }
+        b.set(
+            CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+            if (useEis) CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON
+            else CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF
+        )
         if (flashAvailable) {
             b.set(
                 CaptureRequest.FLASH_MODE,
@@ -1051,6 +1099,9 @@ class Camera2Controller(
             }
             afLocked && afAvailable ->
                 b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
+            // En video el modo correcto es CONTINUOUS_VIDEO (enfoque suave, sin "cazar" foco).
+            videoSessionActive && afVideoSupported ->
+                b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
             afContinuousSupported ->
                 b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
             afAvailable ->
@@ -1281,6 +1332,7 @@ class Camera2Controller(
 
         val afModes = characteristics.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES) ?: IntArray(0)
         afContinuousSupported = afModes.contains(CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+        afVideoSupported = afModes.contains(CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
         afAvailable = afModes.any {
             it == CaptureRequest.CONTROL_AF_MODE_AUTO || it == CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
         }
@@ -1312,6 +1364,8 @@ class Camera2Controller(
             ?: fpsRanges?.maxByOrNull { it.lower }
         val ois = characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION) ?: IntArray(0)
         oisAvailable = ois.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)
+        val eis = characteristics.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES) ?: IntArray(0)
+        eisAvailable = eis.contains(CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON)
         flashAvailable = characteristics.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) ?: false
         val awbModes = characteristics.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES) ?: IntArray(0)
         awbOffSupported = awbModes.contains(CameraMetadata.CONTROL_AWB_MODE_OFF)
@@ -1664,6 +1718,8 @@ class Camera2Controller(
             builder.addTarget(previewSurface)
             builder.addTarget(recorderSurface)
             previewRequestBuilder = builder
+            // Activa EIS + enfoque continuo de video ANTES de aplicar los controles.
+            videoSessionActive = true
             applyControls(builder)
             // 60 fps: pide el rango de FPS al sensor (si la lente lo soporta).
             if (videoFps >= 60) {
@@ -1698,6 +1754,7 @@ class Camera2Controller(
             )
             return true
         } catch (e: Exception) {
+            videoSessionActive = false
             fail("Error al iniciar video: ${e.message}")
             return false
         }
@@ -1714,6 +1771,7 @@ class Camera2Controller(
         } catch (e: Exception) {
         }
         mediaRecorder = null
+        videoSessionActive = false // vuelve a OIS + enfoque de foto
         finalizeVideo()
         activity.runOnUiThread { onRecordingChanged?.invoke(false) }
         startPreview()
@@ -1809,6 +1867,8 @@ class Camera2Controller(
         private const val MAX_PREVIEW_WIDTH = 1920
         private const val MAX_PREVIEW_HEIGHT = 1080
         private const val OPEN_TIMEOUT_MS = 5000L
+        /** Cuánto se mantiene el foco fijado tras tocar, antes de volver a continuo. */
+        private const val TAP_FOCUS_HOLD_MS = 5000L
         private const val NIGHT_FRAMES = 7
     }
 }
