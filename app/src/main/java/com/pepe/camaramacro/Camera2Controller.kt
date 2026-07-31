@@ -150,6 +150,7 @@ class Camera2Controller(
     private var afWaitAction: (() -> Unit)? = null
     private var afWaitTimeout: Runnable? = null
     private var lastAeState = -1
+    private var lastSavedUri: Uri? = null
     private var aeWaitAction: (() -> Unit)? = null
     private var aeWaitTimeout: Runnable? = null
     private var activeFocalMm = 0f
@@ -1053,7 +1054,10 @@ class Camera2Controller(
                 var bytes = bos.toByteArray()
                 val rot = currentJpegOrientation()
                 if (rot != 0) bytes = rotateJpeg(bytes, rot) ?: bytes
-                saveImage(bytes)
+                val ok = saveImage(bytes)
+                // YuvImage no escribe EXIF: la foto de noche salía SIN metadatos.
+                if (ok) writeNightExif(lastSavedUri)
+                ok
             } else false
         } catch (e: Exception) {
             Log.e("CamMacro", "finishNightStack: ${e.message}")
@@ -1678,12 +1682,17 @@ class Camera2Controller(
         try { nightReader?.close() } catch (e: Exception) {}
         nightReader = null
         if (nightEnabled) {
-            // Respeta la relación de aspecto elegida; tope ~4MP (memoria: acumuladores + N buffers).
+            // El tope fijo de 4 MP que había aquí degradaba la foto de noche a 3.7 MP frente
+            // a los 12.6 MP del modo normal: el modo EMPEORABA la imagen. Ahora se apila a la
+            // máxima resolución que quepa de verdad en el heap (acumuladores ~4.25 B/px con
+            // Short/Byte, más los buffers YUV en vuelo y el NV21 de salida).
             val yuvSizes = map.getOutputSizes(ImageFormat.YUV_420_888) ?: arrayOf(Size(1920, 1080))
             val nightCands = sizesForAspect(yuvSizes).sortedByDescending { it.width.toLong() * it.height }
-            nightSize = nightCands.firstOrNull { it.width.toLong() * it.height <= 4_200_000L }
+            val budget = Runtime.getRuntime().maxMemory() / 3 // margen para el resto de la app
+            nightSize = nightCands.firstOrNull { it.width.toLong() * it.height * 11L <= budget }
                 ?: nightCands.lastOrNull()
                 ?: previewSize
+            Log.i("CamMacro", "nightSize=$nightSize budget=${budget / 1048576}MB")
             nightReader = ImageReader.newInstance(
                 nightSize.width, nightSize.height, ImageFormat.YUV_420_888, NIGHT_FRAMES + 1
             ).apply { setOnImageAvailableListener(onNightImage, backgroundHandler) }
@@ -1804,6 +1813,45 @@ class Camera2Controller(
         }
     }
 
+    /**
+     * Escribe los EXIF de la foto de noche. YuvImage.compressToJpeg no conserva ninguno,
+     * así que el archivo salía sin ISO, exposición, focal ni apertura.
+     */
+    private fun writeNightExif(uri: Uri?) {
+        if (uri == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        try {
+            activity.contentResolver.openFileDescriptor(uri, "rw")?.use { pfd ->
+                val ex = android.media.ExifInterface(pfd.fileDescriptor)
+                val iso = if (manualExposure) manualIso else lastAeIso
+                val expNs = if (manualExposure) manualExpNs else lastAeExpNs
+                ex.setAttribute(android.media.ExifInterface.TAG_ISO_SPEED_RATINGS, iso.toString())
+                ex.setAttribute(
+                    android.media.ExifInterface.TAG_EXPOSURE_TIME,
+                    (expNs / 1_000_000_000.0).toString()
+                )
+                if (activeFocalMm > 0f) ex.setAttribute(
+                    android.media.ExifInterface.TAG_FOCAL_LENGTH,
+                    "${(activeFocalMm * 100).toInt()}/100"
+                )
+                camChars?.get(CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES)
+                    ?.firstOrNull()?.let {
+                        ex.setAttribute(
+                            android.media.ExifInterface.TAG_F_NUMBER,
+                            "${(it * 100).toInt()}/100"
+                        )
+                    }
+                ex.setAttribute(android.media.ExifInterface.TAG_SOFTWARE, "Camara · modo noche")
+                ex.setAttribute(
+                    android.media.ExifInterface.TAG_IMAGE_DESCRIPTION,
+                    "Apilado multi-frame de $NIGHT_FRAMES fotogramas (lente ID$cameraId)"
+                )
+                ex.saveAttributes()
+            }
+        } catch (e: Exception) {
+            Log.e("CamMacro", "writeNightExif: ${e.message}")
+        }
+    }
+
     private fun saveImage(rawBytes: ByteArray): Boolean {
         // En modo Full recortamos a la proporción de la pantalla (foto = lo que se ve).
         var bytes = if (aspect == AspectRatio.FULL) cropFullJpeg(rawBytes) ?: rawBytes else rawBytes
@@ -1820,6 +1868,7 @@ class Camera2Controller(
                 }
                 val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
                     ?: return false
+                lastSavedUri = uri
                 resolver.openOutputStream(uri)?.use { it.write(bytes) } ?: return false
                 values.clear()
                 values.put(MediaStore.Images.Media.IS_PENDING, 0)

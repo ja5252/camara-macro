@@ -15,13 +15,16 @@ import kotlin.math.abs
  */
 class NightStacker(private val width: Int, private val height: Int) {
 
-    private val accY = IntArray(width * height)
-    private val cntY = IntArray(width * height)
+    // Acumuladores en Short/Byte en vez de Int: 7 frames x 255 = 1785, cabe de sobra en
+    // Short, y el conteo (<=7) en Byte. Baja la memoria de ~17 a ~4.25 bytes por píxel,
+    // que es lo que permite apilar a RESOLUCIÓN COMPLETA en vez de recortar a 3.7 MP.
+    private val accY = ShortArray(width * height)
+    private val cntY = ByteArray(width * height)
     private val cw = width / 2
     private val ch = height / 2
-    private val accU = IntArray(cw * ch)
-    private val accV = IntArray(cw * ch)
-    private val cntC = IntArray(cw * ch)
+    private val accU = ShortArray(cw * ch)
+    private val accV = ShortArray(cw * ch)
+    private val cntC = ByteArray(cw * ch)
 
     private var refY: ByteArray? = null
     private var frames = 0
@@ -56,7 +59,7 @@ class NightStacker(private val width: Int, private val height: Int) {
                     val rv = ref[rowOut + i].toInt() and 0xFF
                     if (abs(v8 - rv) > GHOST_THRESH) continue // descarta movimiento/fantasma
                 }
-                accY[rowOut + i] += v8
+                accY[rowOut + i] = (accY[rowOut + i] + v8).toShort()
                 cntY[rowOut + i]++
             }
         }
@@ -70,8 +73,8 @@ class NightStacker(private val width: Int, private val height: Int) {
             val rowSrc = sj * cw
             for (i in 0 until cw) {
                 val si = (i + cdx).coerceIn(0, cw - 1)
-                accU[rowOut + i] += u[rowSrc + si].toInt() and 0xFF
-                accV[rowOut + i] += v[rowSrc + si].toInt() and 0xFF
+                accU[rowOut + i] = (accU[rowOut + i] + (u[rowSrc + si].toInt() and 0xFF)).toShort()
+                accV[rowOut + i] = (accV[rowOut + i] + (v[rowSrc + si].toInt() and 0xFF)).toShort()
                 cntC[rowOut + i]++
             }
         }
@@ -83,18 +86,38 @@ class NightStacker(private val width: Int, private val height: Int) {
         if (frames == 0) return null
         val ref = refY ?: return null
         val out = ByteArray(width * height + 2 * cw * ch)
-        // Luma
+        // Luma promediada
+        val luma = IntArray(width * height)
         for (i in accY.indices) {
-            out[i] = (if (cntY[i] > 0) accY[i] / cntY[i] else ref[i].toInt() and 0xFF).toByte()
+            val c = cntY[i].toInt()
+            luma[i] = if (c > 0) (accY[i].toInt() and 0xFFFF) / c else ref[i].toInt() and 0xFF
         }
+        // GANANCIA: apilar reduce ruido pero NO aclara. Sin esto la foto de noche salía
+        // MÁS OSCURA que la normal (medido: luminancia media 85 frente a 127) y por tanto
+        // el modo empeoraba la imagen. Llevamos la mediana al objetivo con una curva de
+        // hombro suave que no quema las luces (farolas, bombillas).
+        val hist = IntArray(256)
+        for (v in luma) hist[v.coerceIn(0, 255)]++
+        var acc = 0
+        val half = luma.size / 2
+        var median = 0
+        for (v in 0..255) { acc += hist[v]; if (acc >= half) { median = v; break } }
+        val gain = if (median > 4) (TARGET_MEDIAN.toFloat() / median).coerceIn(1f, MAX_GAIN) else 1f
+        val lut = IntArray(256)
+        for (v in 0..255) {
+            val g = v * gain
+            // Por encima de 200 comprimimos para conservar el detalle de las altas luces.
+            lut[v] = (if (g <= 200f) g else 200f + (g - 200f) * 0.25f).toInt().coerceIn(0, 255)
+        }
+        for (i in luma.indices) out[i] = lut[luma[i].coerceIn(0, 255)].toByte()
         // Croma NV21: V luego U, intercalados, a resolución cw x ch
         var o = width * height
         for (j in 0 until ch) {
             for (i in 0 until cw) {
                 val idx = j * cw + i
-                val c = if (cntC[idx] > 0) cntC[idx] else 1
-                out[o++] = (accV[idx] / c).toByte()
-                out[o++] = (accU[idx] / c).toByte()
+                val c = cntC[idx].toInt().let { if (it > 0) it else 1 }
+                out[o++] = ((accV[idx].toInt() and 0xFFFF) / c).toByte()
+                out[o++] = ((accU[idx].toInt() and 0xFFFF) / c).toByte()
             }
         }
         return out
@@ -183,6 +206,10 @@ class NightStacker(private val width: Int, private val height: Int) {
 
     companion object {
         private const val GHOST_THRESH = 30
+        /** Mediana de luminancia objetivo tras apilar (la foto normal ronda 127). */
+        private const val TARGET_MEDIAN = 118
+        /** Tope de ganancia: más allá se amplifica ruido en vez de señal. */
+        private const val MAX_GAIN = 3.5f
         private const val SEARCH = 6 // ±6 px de búsqueda de alineación
     }
 }
