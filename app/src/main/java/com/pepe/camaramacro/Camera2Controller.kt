@@ -149,6 +149,8 @@ class Camera2Controller(
     /** Acción pendiente a ejecutar cuando el AF converja antes de disparar. */
     private var afWaitAction: (() -> Unit)? = null
     private var afWaitTimeout: Runnable? = null
+    private var aeWaitAction: (() -> Unit)? = null
+    private var aeWaitTimeout: Runnable? = null
     private var activeFocalMm = 0f
     private var activeEquivMm = 0
 
@@ -306,7 +308,52 @@ class Camera2Controller(
         val needsAf = afAvailable && !manualFocus && !afLocked &&
             lastFocusState != FocusState.FOCUSED &&
             captureSession != null && ::previewRequestBuilder.isInitialized
-        if (needsAf) triggerAfThenCapture(onResult) else captureStillNow(onResult)
+        if (needsAf) triggerAfThenCapture(onResult) else proceedAfterAf(onResult)
+    }
+
+    /** Tras el enfoque: si hay flash auto/on hace falta la pre-captura para que encienda. */
+    private fun proceedAfterAf(onResult: (Boolean) -> Unit) {
+        val wantFlash = flashAvailable && (flashMode == 1 || flashMode == 2) && !manualExposure
+        if (wantFlash && captureSession != null && ::previewRequestBuilder.isInitialized) {
+            triggerPrecaptureThenCapture(onResult)
+        } else {
+            captureStillNow(onResult)
+        }
+    }
+
+    /**
+     * Secuencia de pre-captura del AE: sin ella el HAL no mide ni carga el flash y la foto
+     * sale a oscuras aunque se pida flash obligatorio (comprobado: ISO 14681 y sin destello).
+     */
+    private fun triggerPrecaptureThenCapture(onResult: (Boolean) -> Unit) {
+        val session = captureSession
+        if (session == null) { captureStillNow(onResult); return }
+        val fired = java.util.concurrent.atomic.AtomicBoolean(false)
+        val go = {
+            if (fired.compareAndSet(false, true)) {
+                aeWaitAction = null
+                aeWaitTimeout?.let { uiHandler.removeCallbacks(it) }
+                aeWaitTimeout = null
+                captureStillNow(onResult)
+            }
+        }
+        aeWaitAction = go
+        val timeout = Runnable { go() }
+        aeWaitTimeout = timeout
+        uiHandler.postDelayed(timeout, AE_PRECAPTURE_MAX_MS)
+        try {
+            previewRequestBuilder.set(
+                CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER,
+                CameraMetadata.CONTROL_AE_PRECAPTURE_TRIGGER_START
+            )
+            session.capture(previewRequestBuilder.build(), previewCallback, backgroundHandler)
+            previewRequestBuilder.set(
+                CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER,
+                CameraMetadata.CONTROL_AE_PRECAPTURE_TRIGGER_IDLE
+            )
+        } catch (e: Exception) {
+            go() // pase lo que pase, la foto se toma
+        }
     }
 
     private fun triggerAfThenCapture(onResult: (Boolean) -> Unit) {
@@ -318,7 +365,7 @@ class Camera2Controller(
                 afWaitAction = null
                 afWaitTimeout?.let { uiHandler.removeCallbacks(it) }
                 afWaitTimeout = null
-                captureStillNow(onResult)
+                proceedAfterAf(onResult) // el flash necesita su propia pre-captura
             }
         }
         afWaitAction = go
@@ -461,6 +508,9 @@ class Camera2Controller(
         afWaitAction = null
         afWaitTimeout?.let { uiHandler.removeCallbacks(it) }
         afWaitTimeout = null
+        aeWaitAction = null
+        aeWaitTimeout?.let { uiHandler.removeCallbacks(it) }
+        aeWaitTimeout = null
         cancelWatchdog()
         orientationListener.disable()
         stopBackgroundThread()
@@ -1200,7 +1250,18 @@ class Camera2Controller(
             b.set(CaptureRequest.SENSOR_SENSITIVITY, manualIso)
             b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, manualExpNs)
         } else {
-            b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+            // El modo de flash debe ir TAMBIÉN en la petición repetida (el visor), no solo
+            // en la foto: si el HAL no lo conoce de antemano no prepara el flash y la
+            // captura sale SIN destello (verificado por EXIF: se pedía flash y no encendía).
+            b.set(
+                CaptureRequest.CONTROL_AE_MODE,
+                when {
+                    !flashAvailable || flashMode == 0 || flashMode == 3 ->
+                        CaptureRequest.CONTROL_AE_MODE_ON
+                    flashMode == 1 -> CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH
+                    else -> CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH
+                }
+            )
             b.set(CaptureRequest.CONTROL_AE_LOCK, aeLocked)
             b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, evSteps)
             // El rango de FPS es para el VISOR. En la foto lo omitimos: si no, ata la
@@ -1273,6 +1334,18 @@ class Camera2Controller(
             result.get(CaptureResult.SENSOR_SENSITIVITY)?.let { lastAeIso = it }
             result.get(CaptureResult.SENSOR_EXPOSURE_TIME)?.let { lastAeExpNs = it }
             result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let { lastFocusDistance = it }
+            // ¿Hay una foto esperando a que el AE (y el flash) terminen la pre-captura?
+            if (aeWaitAction != null) {
+                val ae = result.get(CaptureResult.CONTROL_AE_STATE)
+                if (ae == null ||
+                    ae == CameraMetadata.CONTROL_AE_STATE_CONVERGED ||
+                    ae == CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED
+                ) {
+                    val action = aeWaitAction
+                    aeWaitAction = null
+                    activity.runOnUiThread { action?.invoke() }
+                }
+            }
             val af = result.get(CaptureResult.CONTROL_AF_STATE) ?: return
             val mapped = when (af) {
                 CameraMetadata.CONTROL_AF_STATE_PASSIVE_SCAN,
@@ -2064,6 +2137,8 @@ class Camera2Controller(
         private const val TAP_FOCUS_HOLD_MS = 5000L
         /** Techo de espera del enfoque antes de disparar (obturador nunca más lento que esto). */
         private const val AF_WAIT_MAX_MS = 400L
+        /** Techo de espera de la pre-captura del AE (el flash necesita medir antes de disparar). */
+        private const val AE_PRECAPTURE_MAX_MS = 900L
         private const val NIGHT_FRAMES = 7
     }
 }
