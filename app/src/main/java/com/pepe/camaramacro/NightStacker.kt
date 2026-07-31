@@ -103,11 +103,14 @@ class NightStacker(private val width: Int, private val height: Int) {
         var median = 0
         for (v in 0..255) { acc += hist[v]; if (acc >= half) { median = v; break } }
         val gain = if (median > 4) (TARGET_MEDIAN.toFloat() / median).coerceIn(1f, MAX_GAIN) else 1f
+        // Curva y = g·x / (1 + (g−1)·x) sobre x normalizado: sube sombras y medios pero
+        // NUNCA supera 255, así que las altas luces conservan detalle en vez de quemarse.
+        // (Una ganancia lineal con codo alto disparaba los medios tonos a ~237: pasada.)
         val lut = IntArray(256)
         for (v in 0..255) {
-            val g = v * gain
-            // Por encima de 200 comprimimos para conservar el detalle de las altas luces.
-            lut[v] = (if (g <= 200f) g else 200f + (g - 200f) * 0.25f).toInt().coerceIn(0, 255)
+            val x = v / 255f
+            val y = (gain * x) / (1f + (gain - 1f) * x)
+            lut[v] = (y * 255f).toInt().coerceIn(0, 255)
         }
         for (i in luma.indices) out[i] = lut[luma[i].coerceIn(0, 255)].toByte()
         // Croma NV21: V luego U, intercalados, a resolución cw x ch
