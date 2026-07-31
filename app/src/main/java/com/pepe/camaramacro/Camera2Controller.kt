@@ -149,6 +149,7 @@ class Camera2Controller(
     /** Acción pendiente a ejecutar cuando el AF converja antes de disparar. */
     private var afWaitAction: (() -> Unit)? = null
     private var afWaitTimeout: Runnable? = null
+    private var lastAeState = -1
     private var aeWaitAction: (() -> Unit)? = null
     private var aeWaitTimeout: Runnable? = null
     private var activeFocalMm = 0f
@@ -406,18 +407,18 @@ class Camera2Controller(
             if (wantRaw) rawReader?.let { req.addTarget(it.surface) }
             applyControls(req, still = true)
             if (flashAvailable) {
-                when (flashMode) {
-                    1 -> if (!manualExposure) req.set(
-                        CaptureRequest.CONTROL_AE_MODE,
-                        CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH
-                    )
-                    2 -> {
-                        if (!manualExposure) req.set(
-                            CaptureRequest.CONTROL_AE_MODE,
-                            CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH
-                        ) else req.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_SINGLE)
+                // Orden EXPLÍCITA de destello. Dejar que solo mande CONTROL_AE_MODE no
+                // funcionaba en este HAL (comprobado por EXIF tres veces): FLASH_MODE_SINGLE
+                // es inequívoco. En AUTO solo destella si el AE dijo que hace falta luz.
+                val fireFlash = flashMode == 2 ||
+                    (flashMode == 1 && lastAeState == CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED)
+                when {
+                    flashMode == 3 ->
+                        req.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_TORCH)
+                    fireFlash -> {
+                        req.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                        req.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_SINGLE)
                     }
-                    3 -> req.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_TORCH)
                 }
             }
             // DESPUÉS del flash (si no, el bloque de flash pisaría el AE_MODE_OFF).
@@ -1294,11 +1295,15 @@ class Camera2Controller(
             // manda sobre el HAL, así que el FLASH_MODE_OFF que había aquí anulaba el
             // CONTROL_AE_MODE_ON_(AUTO|ALWAYS)_FLASH y el flash NUNCA encendía (la linterna
             // sí funcionaba porque fija FLASH_MODE_TORCH). Verificado por EXIF.
-            when (flashMode) {
-                3 -> b.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_TORCH)
-                0 -> b.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_OFF)
-                // 1 (auto) y 2 (on): lo decide CONTROL_AE_MODE, no lo pisamos.
-            }
+            // El VISOR nunca destella: TORCH solo en linterna, OFF en el resto.
+            // El destello de la foto se ordena explícitamente en captureStillNow
+            // (FLASH_MODE_SINGLE), porque el builder se reutiliza y "no fijar" la clave
+            // dejaría pegado el OFF anterior.
+            b.set(
+                CaptureRequest.FLASH_MODE,
+                if (flashMode == 3) CameraMetadata.FLASH_MODE_TORCH
+                else CameraMetadata.FLASH_MODE_OFF
+            )
         }
         when {
             manualFocus -> {
@@ -1340,6 +1345,7 @@ class Camera2Controller(
             result.get(CaptureResult.SENSOR_EXPOSURE_TIME)?.let { lastAeExpNs = it }
             result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let { lastFocusDistance = it }
             // ¿Hay una foto esperando a que el AE (y el flash) terminen la pre-captura?
+            result.get(CaptureResult.CONTROL_AE_STATE)?.let { lastAeState = it }
             if (aeWaitAction != null) {
                 val ae = result.get(CaptureResult.CONTROL_AE_STATE)
                 if (ae == null ||
