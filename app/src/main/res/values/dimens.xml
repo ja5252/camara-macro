@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Espacio que se reserva bajo el visor para la banda de controles.
+        En pantalla alargada (teléfono plegado) los controles caben en la franja negra
+        que deja el 4:3, así que no hace falta reservar nada.
+    -->
+    <dimen name="preview_bottom_inset">0dp</dimen>
+</resources>

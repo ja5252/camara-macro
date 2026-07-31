@@ -492,9 +492,19 @@ class CameraActivity : AppCompatActivity() {
 
     /** Muestra SIEMPRE la lente física activa y el zoom: es la ventaja que nos diferencia. */
     private fun updateLensChip() {
-        binding.lensChip.text = String.format(
+        val base = String.format(
             Locale.US, "%s · %.1fx", controller.activeLensLabel, currentZoom
         )
+        // Si hay lentes apagadas, el zoom cae a digital sin poder usar esa óptica.
+        // Antes esto era invisible: se perdía el teleobjetivo y nadie sabía por qué.
+        val n = controller.disabledLensCount
+        if (n > 0) {
+            binding.lensChip.text = "$base  ⚠ $n LENTE${if (n > 1) "S" else ""} OFF"
+            binding.lensChip.setTextColor(ContextCompat.getColor(this, R.color.accent))
+        } else {
+            binding.lensChip.text = base
+            binding.lensChip.setTextColor(ContextCompat.getColor(this, R.color.warm_white))
+        }
     }
 
     private fun showZoom() {
@@ -927,6 +937,7 @@ class CameraActivity : AppCompatActivity() {
         prefs.edit().putStringSet("disabledLenses", HashSet(disabledLenses)).apply()
         controller.setDisabledLensIds(disabledLenses)
         buildLensChips()
+        updateLensChip() // refleja al instante el aviso de lente desactivada
     }
 
     private fun chipColor(active: Boolean) =

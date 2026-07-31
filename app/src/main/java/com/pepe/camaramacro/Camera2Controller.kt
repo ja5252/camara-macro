@@ -155,6 +155,17 @@ class Camera2Controller(
     /** Etiqueta de la lente física activa, p.ej. "ID3 · 15 mm". Es nuestra ventaja diferencial. */
     val activeLensLabel: String
         get() = if (activeEquivMm > 0) "ID$cameraId · $activeEquivMm mm" else "ID$cameraId"
+
+    /**
+     * Cuántas lentes traseras hay desactivadas por el usuario. Si es > 0 el zoom deja de
+     * saltar a esa óptica y cae a zoom digital SIN avisar: la UI debe hacerlo visible.
+     */
+    val disabledLensCount: Int
+        get() = disabledLensIds.size
+
+    /** true si el zoom actual ya no puede alcanzar una lente porque está desactivada. */
+    val zoomLimitedByDisabledLens: Boolean
+        get() = disabledLensIds.isNotEmpty()
     /** Piso de velocidad para congelar el movimiento (0 = automático, sin piso). */
     private var shutterFloorNs = 8_000_000L // 1/125 s
 

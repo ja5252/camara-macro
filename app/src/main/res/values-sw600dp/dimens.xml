@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Pantalla interior del plegable (casi cuadrada): el visor 4:3 la llena casi entera,
+        así que la barra de opciones y FOTO/VIDEO se montaban ENCIMA de la imagen.
+        Reservamos la banda inferior para que los controles nunca tapen el encuadre.
+    -->
+    <dimen name="preview_bottom_inset">210dp</dimen>
+</resources>
