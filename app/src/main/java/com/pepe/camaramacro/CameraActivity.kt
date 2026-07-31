@@ -162,6 +162,7 @@ class CameraActivity : AppCompatActivity() {
                 val z = prefs.getFloat("zoom", 1f)
                 if (z > 1.01f) currentZoom = controller.setZoom(z)
             }
+            runOnUiThread { updateLensChip() }
         }
         controller.onRecordingChanged = { rec -> onRecordingChanged(rec) }
         controller.onRawSaved = { ok ->
@@ -440,7 +441,15 @@ class CameraActivity : AppCompatActivity() {
     }
 
     // ---- Zoom ----
+    /** Muestra SIEMPRE la lente física activa y el zoom: es la ventaja que nos diferencia. */
+    private fun updateLensChip() {
+        binding.lensChip.text = String.format(
+            Locale.US, "%s · %.1fx", controller.activeLensLabel, currentZoom
+        )
+    }
+
     private fun showZoom() {
+        updateLensChip()
         binding.zoomPill.text = String.format(Locale.US, "%.1fx", currentZoom)
         binding.zoomPill.animate().cancel()
         binding.zoomPill.alpha = 1f

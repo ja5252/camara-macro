@@ -143,6 +143,17 @@ class Camera2Controller(
     private var videoSessionActive = false    // true mientras la sesión es de grabación
     private var refocusRelease: Runnable? = null // vuelve a enfoque continuo tras un toque
     private var manualSensorSupported = false
+    private var nrAvailable: IntArray = IntArray(0)
+    private var edgeAvailable: IntArray = IntArray(0)
+    /** Acción pendiente a ejecutar cuando el AF converja antes de disparar. */
+    private var afWaitAction: (() -> Unit)? = null
+    private var afWaitTimeout: Runnable? = null
+    private var activeFocalMm = 0f
+    private var activeEquivMm = 0
+
+    /** Etiqueta de la lente física activa, p.ej. "ID3 · 15 mm". Es nuestra ventaja diferencial. */
+    val activeLensLabel: String
+        get() = if (activeEquivMm > 0) "ID$cameraId · $activeEquivMm mm" else "ID$cameraId"
     /** Piso de velocidad para congelar el movimiento (0 = automático, sin piso). */
     private var shutterFloorNs = 8_000_000L // 1/125 s
 
@@ -273,7 +284,49 @@ class Camera2Controller(
         }
     }
 
+    /**
+     * Dispara. Si el enfoque NO está confirmado, lanza primero un barrido y espera a que
+     * converja, con techo duro (AF_WAIT_MAX_MS) para no volver lento el obturador.
+     * Antes se capturaba el frame actual aunque estuviera blando: esa era la causa de
+     * fotos "suaves" pese a tener buen sensor.
+     */
     fun takePhoto(onResult: (Boolean) -> Unit) {
+        val needsAf = afAvailable && !manualFocus && !afLocked &&
+            lastFocusState != FocusState.FOCUSED &&
+            captureSession != null && ::previewRequestBuilder.isInitialized
+        if (needsAf) triggerAfThenCapture(onResult) else captureStillNow(onResult)
+    }
+
+    private fun triggerAfThenCapture(onResult: (Boolean) -> Unit) {
+        val session = captureSession
+        if (session == null) { captureStillNow(onResult); return }
+        val fired = java.util.concurrent.atomic.AtomicBoolean(false)
+        val go = {
+            if (fired.compareAndSet(false, true)) {
+                afWaitAction = null
+                afWaitTimeout?.let { uiHandler.removeCallbacks(it) }
+                afWaitTimeout = null
+                captureStillNow(onResult)
+            }
+        }
+        afWaitAction = go
+        val timeout = Runnable { go() }
+        afWaitTimeout = timeout
+        uiHandler.postDelayed(timeout, AF_WAIT_MAX_MS)
+        try {
+            previewRequestBuilder.set(
+                CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START
+            )
+            session.capture(previewRequestBuilder.build(), previewCallback, backgroundHandler)
+            previewRequestBuilder.set(
+                CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_IDLE
+            )
+        } catch (e: Exception) {
+            go() // ante cualquier fallo, dispara igual: nunca dejar el obturador muerto
+        }
+    }
+
+    private fun captureStillNow(onResult: (Boolean) -> Unit) {
         val device = cameraDevice
         val session = captureSession
         val reader = imageReader
@@ -310,6 +363,7 @@ class Camera2Controller(
             }
             // DESPUÉS del flash (si no, el bloque de flash pisaría el AE_MODE_OFF).
             applyShutterFloor(req)
+            applyDetailModes(req)
             req.set(CaptureRequest.JPEG_ORIENTATION, currentJpegOrientation())
             session.capture(req.build(), object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureCompleted(
@@ -392,6 +446,9 @@ class Camera2Controller(
         videoSessionActive = false
         refocusRelease?.let { uiHandler.removeCallbacks(it) }
         refocusRelease = null
+        afWaitAction = null
+        afWaitTimeout?.let { uiHandler.removeCallbacks(it) }
+        afWaitTimeout = null
         cancelWatchdog()
         orientationListener.disable()
         stopBackgroundThread()
@@ -1069,6 +1126,27 @@ class Camera2Controller(
     }
 
     /** Aplica zoom, AE-lock y el modo de enfoque actual al builder. */
+    /**
+     * Recupera el detalle fino. ColorOS aplica por defecto NOISE_REDUCTION HIGH_QUALITY,
+     * que emborrona texturas (césped, tela, pelo) y deja la foto "plastificada": un análisis
+     * a nivel de píxel midió ~1.5-2 MP de detalle real dentro de un archivo de 12.6 MP.
+     * Con ISO bajo pedimos MINIMAL (máximo detalle); con ISO alto, FAST (equilibrio).
+     */
+    private fun applyDetailModes(b: CaptureRequest.Builder) {
+        val lowIso = lastAeIso < 800
+        val nr = when {
+            lowIso && nrAvailable.contains(CameraMetadata.NOISE_REDUCTION_MODE_MINIMAL) ->
+                CameraMetadata.NOISE_REDUCTION_MODE_MINIMAL
+            nrAvailable.contains(CameraMetadata.NOISE_REDUCTION_MODE_FAST) ->
+                CameraMetadata.NOISE_REDUCTION_MODE_FAST
+            else -> null
+        }
+        nr?.let { b.set(CaptureRequest.NOISE_REDUCTION_MODE, it) }
+        if (edgeAvailable.contains(CameraMetadata.EDGE_MODE_FAST)) {
+            b.set(CaptureRequest.EDGE_MODE, CameraMetadata.EDGE_MODE_FAST)
+        }
+    }
+
     /** Velocidad mínima de obturación en la FOTO: 0 = automático. */
     fun setShutterFloorNs(ns: Long) { shutterFloorNs = ns }
     val shutterFloor: Long get() = shutterFloorNs
@@ -1192,6 +1270,14 @@ class Camera2Controller(
             if (mapped != lastFocusState) {
                 lastFocusState = mapped
                 activity.runOnUiThread { onFocusState?.invoke(mapped) }
+            }
+            // ¿Hay un disparo esperando a que el enfoque converja? Dispara ya.
+            if (afWaitAction != null &&
+                (mapped == FocusState.FOCUSED || mapped == FocusState.NOT_FOCUSED)
+            ) {
+                val action = afWaitAction
+                afWaitAction = null
+                activity.runOnUiThread { action?.invoke() }
             }
         }
     }
@@ -1436,6 +1522,20 @@ class Camera2Controller(
             manualCaps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)
         val ois = characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION) ?: IntArray(0)
         oisAvailable = ois.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)
+        // Focal real y equivalente 35 mm de la lente activa (para mostrarla en la UI).
+        activeFocalMm = characteristics
+            .get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: 0f
+        val physSize = characteristics.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+        activeEquivMm = if (physSize != null && activeFocalMm > 0f) {
+            val diag = kotlin.math.sqrt(
+                (physSize.width * physSize.width + physSize.height * physSize.height).toDouble()
+            )
+            if (diag > 0) Math.round(activeFocalMm * 43.27 / diag).toInt() else 0
+        } else 0
+        nrAvailable = characteristics.get(
+            CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES
+        ) ?: IntArray(0)
+        edgeAvailable = characteristics.get(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES) ?: IntArray(0)
         val eis = characteristics.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES) ?: IntArray(0)
         eisAvailable = eis.contains(CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON)
         flashAvailable = characteristics.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) ?: false
@@ -1945,6 +2045,8 @@ class Camera2Controller(
         private const val OPEN_TIMEOUT_MS = 5000L
         /** Cuánto se mantiene el foco fijado tras tocar, antes de volver a continuo. */
         private const val TAP_FOCUS_HOLD_MS = 5000L
+        /** Techo de espera del enfoque antes de disparar (obturador nunca más lento que esto). */
+        private const val AF_WAIT_MAX_MS = 400L
         private const val NIGHT_FRAMES = 7
     }
 }
