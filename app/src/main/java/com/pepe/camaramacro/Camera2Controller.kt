@@ -127,6 +127,7 @@ class Camera2Controller(
     private var expMaxNs = 0L
     private var evMin = 0
     private var evMax = 0
+    private var evStepRational: android.util.Rational? = null
     private var manualExposure = false
     private var manualIso = 100
     private var manualExpNs = 8_000_000L
@@ -700,6 +701,10 @@ class Camera2Controller(
     val isoRange: Pair<Int, Int> get() = Pair(isoMin, isoMax)
     val shutterRangeNs: Pair<Long, Long> get() = Pair(expMinNs, expMaxNs)
     val evRange: Pair<Int, Int> get() = Pair(evMin, evMax)
+    /** Valor en EV de cada paso de compensación (p.ej. 1/6 EV), para etiquetar bien la UI. */
+    val evStepValue: Float get() = evStepRational?.let {
+        if (it.denominator != 0) it.numerator.toFloat() / it.denominator else 0f
+    } ?: 0f
     val isManualExposure: Boolean get() = manualExposure
 
     fun setManualExposure(iso: Int, expNs: Long) {
@@ -1509,6 +1514,7 @@ class Camera2Controller(
         if (expR != null) { expMinNs = expR.lower; expMaxNs = expR.upper }
         val evR = characteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
         if (evR != null) { evMin = evR.lower; evMax = evR.upper }
+        evStepRational = characteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)
 
         // FPS del PREVIEW. Antes se elegía el de cota inferior más alta (típicamente 60,60),
         // que oscurece el visor en interiores y no garantiza nada de la foto. Preferimos

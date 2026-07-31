@@ -76,6 +76,8 @@ class CameraActivity : AppCompatActivity() {
     private var flashMode = 0
     private var facing = "back"
     private var camCycleIndex = 0
+    private var aeAfLocked = false
+    private var evSteps = 0
     private val ratioLabels = arrayOf("RATIO", "4:3", "16:9", "1:1", "LLENA")
     private var ratioIndex = 0
     private var fullRes = true
@@ -199,6 +201,10 @@ class CameraActivity : AppCompatActivity() {
                     return true
                 }
 
+                override fun onLongPress(e: MotionEvent) {
+                    toggleAeAfLock()
+                }
+
                 override fun onDoubleTap(e: MotionEvent): Boolean {
                     currentZoom = if (currentZoom > 1.05f) controller.setZoom(1f)
                     else controller.setZoom(minOf(2f, controller.maxZoomRatio))
@@ -253,6 +259,19 @@ class CameraActivity : AppCompatActivity() {
         binding.chipRes.setOnClickListener { toggleRes() }
         binding.chipLenses.setOnClickListener { toggleLensPanel() }
         binding.chipFilter.setOnClickListener { cycleFilter() }
+        binding.evSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar, progress: Int, fromUser: Boolean) {
+                if (!fromUser) return
+                val r = controller.evRange
+                evSteps = r.first + ((r.second - r.first) * progress / 100.0).toInt()
+                controller.setEv(evSteps)
+                binding.evLabel.text = evLabel(evSteps)
+                ui.removeCallbacks(hideEvQuick)
+                ui.postDelayed(hideEvQuick, 4000)
+            }
+            override fun onStartTrackingTouch(s: SeekBar) { ui.removeCallbacks(hideEvQuick) }
+            override fun onStopTrackingTouch(s: SeekBar) { ui.postDelayed(hideEvQuick, 4000) }
+        })
         binding.chipVid.setOnClickListener { toggleVideoPanel() }
         binding.chipVres.setOnClickListener { cycleVres() }
         binding.chipVfps.setOnClickListener { toggleVfps() }
@@ -392,6 +411,7 @@ class CameraActivity : AppCompatActivity() {
         controller.setFocusPoint(lx, ly, t.width, t.height)
         showFocusRing(x, y)   // el anillo se dibuja en coordenadas de pantalla
         showMagnifier(lx, ly) // la lupa recorta sobre el texture
+        showEvQuick()         // exposición al alcance, sin entrar a PRO
         binding.gestureArea.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
     }
 
@@ -441,6 +461,35 @@ class CameraActivity : AppCompatActivity() {
     }
 
     // ---- Zoom ----
+    // ---- Exposición rápida y bloqueo AE/AF (sin entrar a PRO) ----
+
+    private val hideEvQuick = Runnable { binding.evQuick.visibility = View.GONE }
+
+    /** Muestra el ajuste de exposición junto al enfoque: el caso real más común
+     *  (contraluces, comida oscura) sin obligar a entrar al modo PRO. */
+    private fun showEvQuick() {
+        val r = controller.evRange
+        if (r.second <= r.first) return // la lente no permite compensación
+        binding.evSlider.progress = evToProgress(evSteps)
+        binding.evLabel.text = evLabel(evSteps)
+        binding.evQuick.visibility = View.VISIBLE
+        ui.removeCallbacks(hideEvQuick)
+        ui.postDelayed(hideEvQuick, 4000)
+    }
+
+    private fun evLabel(steps: Int): String {
+        val stepEv = controller.evStepValue
+        val v = if (stepEv > 0f) steps * stepEv else steps / 2f
+        return String.format(Locale.US, "%+.1f EV", v)
+    }
+
+    private fun toggleAeAfLock() {
+        aeAfLocked = !aeAfLocked
+        controller.lockAeAf(aeAfLocked)
+        binding.aeLockBadge.visibility = if (aeAfLocked) View.VISIBLE else View.GONE
+        binding.gestureArea.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+    }
+
     /** Muestra SIEMPRE la lente física activa y el zoom: es la ventaja que nos diferencia. */
     private fun updateLensChip() {
         binding.lensChip.text = String.format(

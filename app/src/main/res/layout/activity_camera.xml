@@ -306,6 +306,61 @@
         <TextView android:id="@+id/chip_tl" style="@style/ProChip" android:text="⏱ TL" />
     </LinearLayout>
 
+    <!-- Ajuste rápido de exposición (aparece al tocar para enfocar) -->
+    <LinearLayout
+        android:id="@+id/ev_quick"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:layout_marginBottom="236dp"
+        android:gravity="center"
+        android:orientation="horizontal"
+        android:paddingHorizontal="24dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/ev_label"
+            android:layout_width="64dp"
+            android:layout_height="wrap_content"
+            android:background="@drawable/zoom_pill_bg"
+            android:gravity="center"
+            android:paddingVertical="6dp"
+            android:text="0.0 EV"
+            android:textColor="@color/accent"
+            android:textSize="12sp"
+            android:fontFamily="monospace" />
+
+        <SeekBar
+            android:id="@+id/ev_slider"
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_weight="1"
+            android:layout_marginStart="10dp"
+            android:max="100"
+            android:progress="50"
+            android:progressTint="@color/accent"
+            android:thumbTint="@color/accent" />
+    </LinearLayout>
+
+    <!-- Indicador de bloqueo AE/AF (pulsación larga en el visor) -->
+    <TextView
+        android:id="@+id/ae_lock_badge"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|center_horizontal"
+        android:layout_marginTop="120dp"
+        android:background="@drawable/zoom_pill_bg"
+        android:paddingHorizontal="14dp"
+        android:paddingVertical="6dp"
+        android:text="@string/ae_af_locked"
+        android:textColor="@color/accent"
+        android:textSize="12sp"
+        android:textStyle="bold"
+        android:letterSpacing="0.08"
+        android:clickable="false"
+        android:focusable="false"
+        android:visibility="gone" />
+
     <!-- Barra de opciones desplazable (horizontal), encima de FOTO/VIDEO -->
     <HorizontalScrollView
         android:id="@+id/options_bar"
