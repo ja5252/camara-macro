@@ -174,7 +174,11 @@ class NightStacker(private val width: Int, private val height: Int) {
             ddy++
         }
         // Devolvemos el desplazamiento a aplicar a `cur` para alinearlo con `ref`.
-        return Pair(-bestDx, -bestDy)
+        // OJO: el signo va POSITIVO. estimateShift minimiza |ref[j][i] - cur[j+ddy][i+ddx]|
+        // y addFrame muestrea cur[j+dy][i+dx], así que devolver el negado DUPLICABA el
+        // error de registro en sentido contrario en vez de corregirlo: esa era la causa
+        // principal del "doble contorno" (fotos de noche borrosas).
+        return Pair(bestDx, bestDy)
     }
 
     companion object {

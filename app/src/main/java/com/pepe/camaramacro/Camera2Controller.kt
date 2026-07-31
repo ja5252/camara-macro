@@ -142,6 +142,9 @@ class Camera2Controller(
     private var eisAvailable = false          // estabilización electrónica (solo video)
     private var videoSessionActive = false    // true mientras la sesión es de grabación
     private var refocusRelease: Runnable? = null // vuelve a enfoque continuo tras un toque
+    private var manualSensorSupported = false
+    /** Piso de velocidad para congelar el movimiento (0 = automático, sin piso). */
+    private var shutterFloorNs = 8_000_000L // 1/125 s
 
     // Flash
     private var flashAvailable = false
@@ -175,6 +178,7 @@ class Camera2Controller(
     private var nightTarget = 0
     private var lastAeIso = 800
     private var lastAeExpNs = 33_000_000L
+    private var lastFocusDistance = 0f // última distancia de enfoque real del visor
     private var nightWatchdog: Runnable? = null
 
     // QR / código de barras (ML Kit). Excluyente con RAW y noche.
@@ -288,7 +292,7 @@ class Camera2Controller(
             val req = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
             req.addTarget(reader.surface)
             if (wantRaw) rawReader?.let { req.addTarget(it.surface) }
-            applyControls(req)
+            applyControls(req, still = true)
             if (flashAvailable) {
                 when (flashMode) {
                     1 -> if (!manualExposure) req.set(
@@ -304,6 +308,8 @@ class Camera2Controller(
                     3 -> req.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_TORCH)
                 }
             }
+            // DESPUÉS del flash (si no, el bloque de flash pisaría el AE_MODE_OFF).
+            applyShutterFloor(req)
             req.set(CaptureRequest.JPEG_ORIENTATION, currentJpegOrientation())
             session.capture(req.build(), object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureCompleted(
@@ -860,9 +866,19 @@ class Camera2Controller(
                 } else {
                     b.set(CaptureRequest.CONTROL_AWB_MODE, awbMode)
                 }
-                // AF estable durante la ráfaga (no reenfocar entre frames).
+                // AF estable durante la ráfaga (no reenfocar entre frames). CLAVE: hay que
+                // fijar la distancia REAL a la que estaba enfocado el visor; antes, en modo
+                // automático, se dejaba la del template (0 = infinito en muchos HAL) y los
+                // 7 frames salían desenfocados: ninguna alineación puede rescatar eso.
                 b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
-                if (manualFocus) b.set(CaptureRequest.LENS_FOCUS_DISTANCE, manualDiopters)
+                if (minFocusDistance > 0f) {
+                    b.set(
+                        CaptureRequest.LENS_FOCUS_DISTANCE,
+                        if (manualFocus) manualDiopters else lastFocusDistance
+                    )
+                }
+                // Congela también el balance de blancos para que los frames sean fusionables.
+                b.set(CaptureRequest.CONTROL_AWB_LOCK, true)
                 if (oisAvailable) b.set(
                     CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
                     CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON
@@ -1053,7 +1069,37 @@ class Camera2Controller(
     }
 
     /** Aplica zoom, AE-lock y el modo de enfoque actual al builder. */
-    private fun applyControls(b: CaptureRequest.Builder) {
+    /** Velocidad mínima de obturación en la FOTO: 0 = automático. */
+    fun setShutterFloorNs(ns: Long) { shutterFloorNs = ns }
+    val shutterFloor: Long get() = shutterFloorNs
+
+    /**
+     * Congela el movimiento: si el AE quiere una exposición más lenta que el piso,
+     * fija manualmente una exposición corta y sube el ISO para compensar. Sin esto,
+     * en interiores la foto sale a 1/15-1/30 s y cualquier movimiento la emborrona.
+     * Devuelve true si tomó el control de la exposición.
+     */
+    private fun applyShutterFloor(b: CaptureRequest.Builder): Boolean {
+        if (shutterFloorNs <= 0L || manualExposure || !manualSensorSupported) return false
+        if (flashMode == 1 || flashMode == 2) return false // con flash manda el AE del HAL
+        if (lastAeExpNs <= 0L || lastAeIso <= 0) return false
+        var targetExp = shutterFloorNs.coerceAtLeast(if (expMinNs > 0) expMinNs else 1L)
+        if (lastAeExpNs <= targetExp) return false // el AE ya es suficientemente rápido
+        // Conserva la exposición total: al acortar el tiempo, sube el ISO en la misma proporción.
+        var iso = Math.round(lastAeIso * (lastAeExpNs.toDouble() / targetExp)).toInt()
+        if (iso > isoMax) {
+            iso = isoMax
+            // Con el ISO al tope, alarga lo justo para no subexponer (nunca más que el AE).
+            targetExp = (lastAeExpNs.toDouble() * lastAeIso / isoMax)
+                .toLong().coerceIn(targetExp, lastAeExpNs)
+        }
+        b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+        b.set(CaptureRequest.SENSOR_SENSITIVITY, iso.coerceIn(isoMin, isoMax))
+        b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, targetExp)
+        return true
+    }
+
+    private fun applyControls(b: CaptureRequest.Builder, still: Boolean = false) {
         b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
         if (manualExposure) {
             b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
@@ -1063,7 +1109,9 @@ class Camera2Controller(
             b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
             b.set(CaptureRequest.CONTROL_AE_LOCK, aeLocked)
             b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, evSteps)
-            aeFpsRange?.let { b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
+            // El rango de FPS es para el VISOR. En la foto lo omitimos: si no, ata la
+            // exposición al ritmo del preview en vez de dejar que el AE elija bien.
+            if (!still) aeFpsRange?.let { b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
         }
         if (manualWb && awbOffSupported) {
             b.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF)
@@ -1130,6 +1178,7 @@ class Camera2Controller(
             // Cachear la exposición auto medida para bloquearla en el modo noche.
             result.get(CaptureResult.SENSOR_SENSITIVITY)?.let { lastAeIso = it }
             result.get(CaptureResult.SENSOR_EXPOSURE_TIME)?.let { lastAeExpNs = it }
+            result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let { lastFocusDistance = it }
             val af = result.get(CaptureResult.CONTROL_AF_STATE) ?: return
             val mapped = when (af) {
                 CameraMetadata.CONTROL_AF_STATE_PASSIVE_SCAN,
@@ -1149,10 +1198,27 @@ class Camera2Controller(
 
     private fun meteringRect(nx: Float, ny: Float): Rect? {
         val arr = activeArray ?: return null
-        val cropW = arr.width() / zoomRatio
-        val cropH = arr.height() / zoomRatio
-        val cropLeft = arr.exactCenterX() - cropW / 2f
-        val cropTop = arr.exactCenterY() - cropH / 2f
+        if (nx < 0f || nx > 1f || ny < 0f || ny > 1f) return null
+        // Con CONTROL_ZOOM_RATIO las regiones 3A se expresan sobre el array activo que YA
+        // representa el encuadre con zoom aplicado. Volver a dividir por zoomRatio aplicaba
+        // el zoom DOS veces: a 4x el toque se comprimía al centro y la región de enfoque
+        // quedaba minúscula (enfoque lento e impreciso al hacer zoom).
+        val useRatio = zoomRatioSupported && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+        val cropW: Float
+        val cropH: Float
+        val cropLeft: Float
+        val cropTop: Float
+        if (useRatio) {
+            cropW = arr.width().toFloat()
+            cropH = arr.height().toFloat()
+            cropLeft = arr.left.toFloat()
+            cropTop = arr.top.toFloat()
+        } else {
+            cropW = arr.width() / zoomRatio
+            cropH = arr.height() / zoomRatio
+            cropLeft = arr.exactCenterX() - cropW / 2f
+            cropTop = arr.exactCenterY() - cropH / 2f
+        }
         val sx: Float
         val sy: Float
         when (sensorOrientation) {
@@ -1358,10 +1424,16 @@ class Camera2Controller(
         val evR = characteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
         if (evR != null) { evMin = evR.lower; evMax = evR.upper }
 
-        // Anti-blur: rango de FPS con cota inferior alta => exposiciones más cortas (menos movimiento).
+        // FPS del PREVIEW. Antes se elegía el de cota inferior más alta (típicamente 60,60),
+        // que oscurece el visor en interiores y no garantiza nada de la foto. Preferimos
+        // 30 fijos: visor estable y un lastAeExpNs bien definido para el piso de obturación.
         val fpsRanges = characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
-        aeFpsRange = fpsRanges?.filter { it.upper <= 60 }?.maxByOrNull { it.lower }
+        aeFpsRange = fpsRanges?.firstOrNull { it.lower == 30 && it.upper == 30 }
+            ?: fpsRanges?.filter { it.upper <= 30 }?.maxByOrNull { it.lower }
             ?: fpsRanges?.maxByOrNull { it.lower }
+        val manualCaps = characteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: IntArray(0)
+        manualSensorSupported =
+            manualCaps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)
         val ois = characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION) ?: IntArray(0)
         oisAvailable = ois.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)
         val eis = characteristics.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES) ?: IntArray(0)
@@ -1420,6 +1492,10 @@ class Camera2Controller(
         try { qrReader?.close() } catch (e: Exception) {}
         qrReader = null
         if (qrEnabled) {
+            // close() deja qrScanner en null, pero qrEnabled sobrevive: sin recrear el
+            // scanner aquí, al volver de pausar la app el lector de QR quedaba MUERTO
+            // en silencio para siempre (onQrImage salía por scanner == null).
+            if (qrScanner == null) qrScanner = BarcodeScanning.getClient()
             val yuvSizes = map.getOutputSizes(ImageFormat.YUV_420_888)
             val qrSize = yuvSizes?.filter { it.width <= 1280 }?.maxByOrNull { it.width.toLong() * it.height }
                 ?: yuvSizes?.minByOrNull { it.width.toLong() * it.height }

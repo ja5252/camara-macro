@@ -378,9 +378,19 @@ class CameraActivity : AppCompatActivity() {
 
     // ---- Enfoque ----
     private fun focusAt(x: Float, y: Float) {
-        controller.setFocusPoint(x, y, binding.gestureArea.width, binding.gestureArea.height)
-        showFocusRing(x, y)
-        showMagnifier(x, y)
+        val t = binding.texture
+        if (t.width == 0 || t.height == 0) return
+        // El preview NO ocupa toda la pantalla (AutoFitTextureView con wrap_content,
+        // alineado arriba). Hay que mapear el toque en coordenadas DEL TEXTURE, no del
+        // área de gestos (pantalla completa): si no, el punto de enfoque cae desplazado
+        // respecto al dedo (~20% del encuadre en 4:3). En modo LLENA t.left/t.top son
+        // negativos y la resta también lo corrige.
+        val lx = x - t.left
+        val ly = y - t.top
+        if (lx < 0f || ly < 0f || lx > t.width || ly > t.height) return // toque fuera del encuadre
+        controller.setFocusPoint(lx, ly, t.width, t.height)
+        showFocusRing(x, y)   // el anillo se dibuja en coordenadas de pantalla
+        showMagnifier(lx, ly) // la lupa recorta sobre el texture
         binding.gestureArea.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
     }
 
