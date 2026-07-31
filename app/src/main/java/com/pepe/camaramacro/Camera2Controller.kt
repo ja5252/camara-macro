@@ -1290,10 +1290,15 @@ class Camera2Controller(
             else CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF
         )
         if (flashAvailable) {
-            b.set(
-                CaptureRequest.FLASH_MODE,
-                if (flashMode == 3) CameraMetadata.FLASH_MODE_TORCH else CameraMetadata.FLASH_MODE_OFF
-            )
+            // OJO: en flash AUTO/ON no se debe tocar FLASH_MODE. Un FLASH_MODE explícito
+            // manda sobre el HAL, así que el FLASH_MODE_OFF que había aquí anulaba el
+            // CONTROL_AE_MODE_ON_(AUTO|ALWAYS)_FLASH y el flash NUNCA encendía (la linterna
+            // sí funcionaba porque fija FLASH_MODE_TORCH). Verificado por EXIF.
+            when (flashMode) {
+                3 -> b.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_TORCH)
+                0 -> b.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_OFF)
+                // 1 (auto) y 2 (on): lo decide CONTROL_AE_MODE, no lo pisamos.
+            }
         }
         when {
             manualFocus -> {
