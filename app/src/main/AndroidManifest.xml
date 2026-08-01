@@ -36,6 +36,15 @@
             <!-- Permite que el sistema la ofrezca como app de cámara predeterminada -->
             <intent-filter>
                 <action android:name="android.media.action.STILL_IMAGE_CAMERA" />
+                <action android:name="android.media.action.VIDEO_CAMERA" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <!-- Captura a petición de OTRA app (banca, archivos, formularios...).
+                 OJO: declarar esto obliga a devolver el resultado correctamente; si no,
+                 la app que lo invoca se queda colgada. El manejo está en CameraActivity. -->
+            <intent-filter>
+                <action android:name="android.media.action.IMAGE_CAPTURE" />
+                <action android:name="android.media.action.VIDEO_CAPTURE" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>

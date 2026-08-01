@@ -5,6 +5,8 @@ import android.annotation.SuppressLint
 import android.content.ContentUris
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.RenderEffect
@@ -78,6 +80,10 @@ class CameraActivity : AppCompatActivity() {
     private var camCycleIndex = 0
     private var aeAfLocked = false
     private var evSteps = 0
+    // Captura solicitada por otra app (ACTION_IMAGE_CAPTURE / ACTION_VIDEO_CAPTURE)
+    private var captureIntent = false
+    private var captureVideo = false
+    private var captureOutput: Uri? = null
     private val ratioLabels = arrayOf("RATIO", "4:3", "16:9", "1:1", "LLENA")
     private var ratioIndex = 0
     private var fullRes = true
@@ -141,11 +147,28 @@ class CameraActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val savedId = prefs.getString("cameraId", null)
+        // ¿Nos invoca OTRA app para capturar? (banca, archivos, formularios...)
+        val act = intent?.action
+        captureVideo = act == MediaStore.ACTION_VIDEO_CAPTURE
+        captureIntent = captureVideo || act == MediaStore.ACTION_IMAGE_CAPTURE
+        @Suppress("DEPRECATION")
+        captureOutput = intent?.getParcelableExtra(MediaStore.EXTRA_OUTPUT) as? Uri
+        if (captureIntent) setResult(RESULT_CANCELED) // contrato por defecto si el usuario sale
+
+        var savedId = prefs.getString("cameraId", null)
         if (savedId == null || savedId == "0") {
-            startActivity(Intent(this, SetupActivity::class.java))
-            finish()
-            return
+            if (captureIntent) {
+                // Con un intent en curso NO podemos irnos al asistente: perderíamos al
+                // llamador. Elegimos la primera lente trasera que sirve (nunca la ID0 dañada).
+                savedId = CameraInfoUtil.listLenses(this)
+                    .firstOrNull { it.facingBack && it.cameraId != "0" }?.cameraId
+                if (savedId == null) { finish(); return }
+                prefs.edit().putString("cameraId", savedId).apply()
+            } else {
+                startActivity(Intent(this, SetupActivity::class.java))
+                finish()
+                return
+            }
         }
 
         binding = ActivityCameraBinding.inflate(layoutInflater)
@@ -179,6 +202,13 @@ class CameraActivity : AppCompatActivity() {
             }
         }
         controller.onQrDetected = { value -> runOnUiThread { showQrResult(value) } }
+        // La miniatura se pinta al instante desde el JPEG en memoria (antes esperaba a
+        // que MediaStore indexara el archivo y el retraso se notaba mucho).
+        controller.onPhotoThumb = { bmp ->
+            binding.thumbnailImage.setImageBitmap(bmp)
+            bounceThumbnail()
+        }
+        if (captureIntent) armIntentCapture()
 
         scaleDetector = ScaleGestureDetector(
             this,
@@ -491,6 +521,55 @@ class CameraActivity : AppCompatActivity() {
         controller.lockAeAf(aeAfLocked)
         binding.aeLockBadge.visibility = if (aeAfLocked) View.VISIBLE else View.GONE
         binding.gestureArea.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+    }
+
+    // ---- Captura solicitada por otra app ----
+
+    /**
+     * Prepara la app para responder a ACTION_IMAGE_CAPTURE de otra aplicación.
+     * Contrato de Android: con EXTRA_OUTPUT se escribe ahí y se devuelve RESULT_OK;
+     * sin él, se devuelve una MINIATURA en el extra "data" (el Binder no admite la
+     * foto completa). Si esto se hace mal, la app que llama se queda colgada.
+     */
+    private fun armIntentCapture() {
+        // En modo intent no tiene sentido RAW, ni la galería, ni compartir.
+        controller.setRawEnabled(false)
+        binding.thumbnail.visibility = View.GONE
+        binding.modeToggle.visibility = View.GONE
+        binding.chipWa.visibility = View.GONE
+        if (captureVideo) setMode("video") else setMode("photo")
+
+        controller.jpegSink = sink@{ bytes ->
+            val out = captureOutput
+            if (out != null) {
+                val ok = try {
+                    contentResolver.openOutputStream(out)?.use { it.write(bytes) } != null
+                } catch (e: Exception) {
+                    false
+                }
+                if (ok) runOnUiThread {
+                    setResult(
+                        RESULT_OK,
+                        Intent().setData(out).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    )
+                    finish()
+                }
+                return@sink ok
+            }
+            // Sin EXTRA_OUTPUT: miniatura en "data". Máx ~400 px o revienta el Binder.
+            val opts = BitmapFactory.Options().apply { inSampleSize = 8 }
+            val full = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: return@sink false
+            val s = 400f / maxOf(full.width, full.height)
+            val thumb = if (s < 1f) Bitmap.createScaledBitmap(
+                full, (full.width * s).toInt(), (full.height * s).toInt(), true
+            ) else full
+            if (thumb !== full) full.recycle()
+            runOnUiThread {
+                setResult(RESULT_OK, Intent("inline-data").putExtra("data", thumb))
+                finish()
+            }
+            true
+        }
     }
 
     // ---- Tira de zoom (una píldora por lente física real) ----
@@ -988,6 +1067,11 @@ class CameraActivity : AppCompatActivity() {
         controller.setDisabledLensIds(disabledLenses)
         buildLensChips()
         updateLensChip() // refleja al instante el aviso de lente desactivada
+    }
+
+    override fun onDestroy() {
+        if (::controller.isInitialized) controller.jpegSink = null
+        super.onDestroy()
     }
 
     private fun chipColor(active: Boolean) =

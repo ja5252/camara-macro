@@ -80,6 +80,21 @@ class Camera2Controller(
     var onReady: (() -> Unit)? = null
     var onError: ((String) -> Unit)? = null
     var onFocusState: ((FocusState) -> Unit)? = null
+    /**
+     * Miniatura de la foto recién tomada, entregada EN CUANTO existen los bytes.
+     * Antes la miniatura esperaba a que MediaStore indexara el archivo y se notaba
+     * un retraso claro; ahora se pinta al instante desde el JPEG en memoria.
+     */
+    var onPhotoThumb: ((android.graphics.Bitmap) -> Unit)? = null
+
+    /**
+     * Si está puesto, la foto NO va a la galería: se entrega aquí. Lo usa la captura
+     * solicitada por otra app (ACTION_IMAGE_CAPTURE), que debe escribirla donde diga
+     * el llamador. Devuelve true si la consumió correctamente.
+     */
+    @Volatile
+    var jpegSink: ((ByteArray) -> Boolean)? = null
+
     /** Resultado de guardar el DNG (RAW). true = guardado, false = fallo. */
     var onRawSaved: ((Boolean) -> Unit)? = null
     /** Se llama si RAW no se pudo activar (la lente no admite 3 streams) y se cayó a JPEG. */
@@ -1876,6 +1891,17 @@ class Camera2Controller(
         // En modo Full recortamos a la proporción de la pantalla (foto = lo que se ve).
         var bytes = if (aspect == AspectRatio.FULL) cropFullJpeg(rawBytes) ?: rawBytes else rawBytes
         captureMatrix?.let { bytes = applyColorFilter(bytes, it) ?: bytes } // filtro de color
+        // Miniatura inmediata: no esperamos a que MediaStore indexe el archivo.
+        onPhotoThumb?.let { cb ->
+            try {
+                val opts = BitmapFactory.Options().apply { inSampleSize = 16 }
+                val thumb = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                if (thumb != null) activity.runOnUiThread { cb(thumb) }
+            } catch (e: Exception) {
+            }
+        }
+        // Captura pedida por otra app: se la entregamos a ella en vez de a la galería.
+        jpegSink?.let { return it(bytes) }
         val name = "MACRO_${System.currentTimeMillis()}.jpg"
         return try {
             val resolver = activity.contentResolver
