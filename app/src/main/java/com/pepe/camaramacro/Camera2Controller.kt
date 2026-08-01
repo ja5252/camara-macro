@@ -216,6 +216,12 @@ class Camera2Controller(
     }
     private var aeWaitAction: (() -> Unit)? = null
     private var aeWaitTimeout: Runnable? = null
+    // Nº de fotograma en el que se envió el disparador. Sin esto, el visor (que sigue
+    // entregando resultados a 30 fps) colaba un resultado ANTERIOR al disparo y la espera
+    // de enfoque se resolvía al instante: el arreglo del enfoque no llegaba a ejecutarse.
+    private var captureWatchdog: Runnable? = null
+    @Volatile private var afTriggerFrame = Long.MAX_VALUE
+    @Volatile private var aeTriggerFrame = Long.MAX_VALUE
     private var activeFocalMm = 0f
     private var activeEquivMm = 0
 
@@ -408,6 +414,7 @@ class Camera2Controller(
             }
         }
         aeWaitAction = go
+        aeTriggerFrame = Long.MAX_VALUE
         val timeout = Runnable { go() }
         aeWaitTimeout = timeout
         uiHandler.postDelayed(timeout, AE_PRECAPTURE_MAX_MS)
@@ -416,7 +423,17 @@ class Camera2Controller(
                 CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER,
                 CameraMetadata.CONTROL_AE_PRECAPTURE_TRIGGER_START
             )
-            session.capture(previewRequestBuilder.build(), previewCallback, backgroundHandler)
+            session.capture(
+                previewRequestBuilder.build(),
+                object : CameraCaptureSession.CaptureCallback() {
+                    override fun onCaptureStarted(
+                        s: CameraCaptureSession, r: CaptureRequest, ts: Long, frame: Long
+                    ) {
+                        aeTriggerFrame = frame
+                    }
+                },
+                backgroundHandler
+            )
             previewRequestBuilder.set(
                 CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER,
                 CameraMetadata.CONTROL_AE_PRECAPTURE_TRIGGER_IDLE
@@ -439,6 +456,7 @@ class Camera2Controller(
             }
         }
         afWaitAction = go
+        afTriggerFrame = Long.MAX_VALUE // hasta saber el fotograma, no aceptamos nada
         val timeout = Runnable { go() }
         afWaitTimeout = timeout
         uiHandler.postDelayed(timeout, AF_WAIT_MAX_MS)
@@ -446,7 +464,17 @@ class Camera2Controller(
             previewRequestBuilder.set(
                 CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START
             )
-            session.capture(previewRequestBuilder.build(), previewCallback, backgroundHandler)
+            session.capture(
+                previewRequestBuilder.build(),
+                object : CameraCaptureSession.CaptureCallback() {
+                    override fun onCaptureStarted(
+                        s: CameraCaptureSession, r: CaptureRequest, ts: Long, frame: Long
+                    ) {
+                        afTriggerFrame = frame // a partir de aquí sí valen los resultados
+                    }
+                },
+                backgroundHandler
+            )
             previewRequestBuilder.set(
                 CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_IDLE
             )
@@ -464,6 +492,18 @@ class Camera2Controller(
         }
         try {
             pendingResult = onResult
+            // Vigilante: si el HAL no entrega la imagen, el obturador se liberaría igual.
+            captureWatchdog?.let { uiHandler.removeCallbacks(it) }
+            val cw = Runnable {
+                val cb = pendingResult
+                if (cb != null) {
+                    pendingResult = null
+                    Log.e("CamMacro", "captura sin respuesta: liberando el obturador")
+                    activity.runOnUiThread { cb.invoke(false) }
+                }
+            }
+            captureWatchdog = cw
+            uiHandler.postDelayed(cw, CAPTURE_TIMEOUT_MS)
             val wantRaw = rawEnabled && rawSupported && rawReader != null
             if (wantRaw) {
                 // Descarta cualquier mitad colgante de un disparo previo.
@@ -529,10 +569,25 @@ class Camera2Controller(
     private fun abortPendingCapture() {
         val cb = pendingResult
         pendingResult = null
+        captureWatchdog?.let { uiHandler.removeCallbacks(it) }
+        captureWatchdog = null
+        clearAfAeWaits() // si no, un temporizador huérfano dispara una foto fantasma
         try { pendingRawImage?.close() } catch (e: Exception) {}
         pendingRawImage = null
         pendingRawResult = null
         if (cb != null) activity.runOnUiThread { cb.invoke(false) }
+    }
+
+    /** Cancela cualquier espera de enfoque/exposición pendiente. */
+    private fun clearAfAeWaits() {
+        afWaitAction = null
+        aeWaitAction = null
+        afTriggerFrame = Long.MAX_VALUE
+        aeTriggerFrame = Long.MAX_VALUE
+        afWaitTimeout?.let { uiHandler.removeCallbacks(it) }
+        afWaitTimeout = null
+        aeWaitTimeout?.let { uiHandler.removeCallbacks(it) }
+        aeWaitTimeout = null
     }
 
     fun close() {
@@ -1434,7 +1489,8 @@ class Camera2Controller(
             result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let { lastFocusDistance = it }
             // ¿Hay una foto esperando a que el AE (y el flash) terminen la pre-captura?
             result.get(CaptureResult.CONTROL_AE_STATE)?.let { lastAeState = it }
-            if (aeWaitAction != null) {
+            // Solo valen los resultados POSTERIORES al disparador (ver afTriggerFrame).
+            if (aeWaitAction != null && result.frameNumber >= aeTriggerFrame) {
                 val ae = result.get(CaptureResult.CONTROL_AE_STATE)
                 if (ae == null ||
                     ae == CameraMetadata.CONTROL_AE_STATE_CONVERGED ||
@@ -1460,7 +1516,7 @@ class Camera2Controller(
                 activity.runOnUiThread { onFocusState?.invoke(mapped) }
             }
             // ¿Hay un disparo esperando a que el enfoque converja? Dispara ya.
-            if (afWaitAction != null &&
+            if (afWaitAction != null && result.frameNumber >= afTriggerFrame &&
                 (mapped == FocusState.FOCUSED || mapped == FocusState.NOT_FOCUSED)
             ) {
                 val action = afWaitAction
@@ -1546,6 +1602,8 @@ class Camera2Controller(
             return@OnImageAvailableListener
         }
         image?.close()
+        captureWatchdog?.let { uiHandler.removeCallbacks(it) }
+        captureWatchdog = null
         val cb = pendingResult; pendingResult = null
         activity.runOnUiThread { cb?.invoke(ok) }
     }
@@ -1646,13 +1704,24 @@ class Camera2Controller(
 
                 override fun onDisconnected(camera: CameraDevice) {
                     camera.close()
-                    if (gen == cameraGen) cameraDevice = null
+                    if (gen != cameraGen) return
+                    // En ColorOS esta es LA ruta cuando otra app se lleva la cámara. Antes
+                    // se dejaba la sesión muerta y la captura colgada: el obturador quedaba
+                    // inservible para siempre y sin avisar.
+                    cameraDevice = null
+                    try { captureSession?.close() } catch (e: Exception) {}
+                    captureSession = null
+                    abortPendingCapture()
+                    activity.runOnUiThread { onError?.invoke("Otra app tomó la cámara") }
                 }
 
                 override fun onError(camera: CameraDevice, error: Int) {
                     camera.close()
                     if (gen != cameraGen) return
                     cameraDevice = null
+                    try { captureSession?.close() } catch (e: Exception) {}
+                    captureSession = null
+                    abortPendingCapture() // no dejar el obturador colgado
                     fail("Esta lente no se pudo abrir (error $error). Prueba otra.")
                 }
             }, backgroundHandler)
@@ -2070,11 +2139,15 @@ class Camera2Controller(
     }
 
     private fun fail(msg: String) {
-        if (failed) return
+        // La limpieza va SIEMPRE: antes se salía por 'if (failed) return' antes de limpiar,
+        // así que tras el primer fallo cualquier fallo posterior no soltaba el obturador
+        // ni cancelaba nada, y la app quedaba muerta en silencio.
+        val yaAvisado = failed
         failed = true
         switching = false
         cancelWatchdog()
-        activity.runOnUiThread { onError?.invoke(msg) }
+        abortPendingCapture()
+        if (!yaAvisado) activity.runOnUiThread { onError?.invoke(msg) } // no repetir el aviso
     }
 
     private fun startBackgroundThread() {
@@ -2321,6 +2394,8 @@ class Camera2Controller(
         private const val AF_WAIT_MAX_MS = 400L
         /** Techo de espera de la pre-captura del AE (el flash necesita medir antes de disparar). */
         private const val AE_PRECAPTURE_MAX_MS = 900L
+        /** Si el HAL no entrega la foto en este tiempo, se libera el obturador igualmente. */
+        private const val CAPTURE_TIMEOUT_MS = 4000L
         private const val NIGHT_FRAMES = 7
     }
 }
