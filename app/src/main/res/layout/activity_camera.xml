@@ -137,18 +137,19 @@
             android:scaleType="centerCrop" />
     </com.google.android.material.card.MaterialCardView>
 
-    <!-- Botón WhatsApp: toma foto y la comparte por WhatsApp -->
+    <!-- Botón para voltear la cámara: ocupa el hueco canónico junto al obturador -->
     <ImageButton
-        android:id="@+id/btn_whatsapp"
+        android:id="@+id/btn_flip_main"
         android:layout_width="56dp"
         android:layout_height="56dp"
         android:layout_gravity="bottom|end"
         android:layout_marginEnd="22dp"
         android:layout_marginBottom="45dp"
         android:background="?attr/selectableItemBackgroundBorderless"
-        android:contentDescription="@string/share_whatsapp"
+        android:contentDescription="@string/change_lens"
+        android:padding="6dp"
         android:scaleType="fitCenter"
-        android:src="@drawable/ic_whatsapp" />
+        android:src="@drawable/ic_flip_camera" />
 
     <!-- 9. Obturador -->
     <ImageButton
@@ -307,6 +308,16 @@
         <TextView android:id="@+id/chip_tl" style="@style/ProChip" android:text="⏱ TL" />
     </LinearLayout>
 
+    <!-- Tira de zoom: una píldora por lente física real (se llena por código) -->
+    <LinearLayout
+        android:id="@+id/zoom_strip"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="186dp"
+        android:gravity="center"
+        android:orientation="horizontal" />
+
     <!-- Ajuste rápido de exposición (aparece al tocar para enfocar) -->
     <LinearLayout
         android:id="@+id/ev_quick"
@@ -394,6 +405,7 @@
             <TextView android:id="@+id/chip_lenses" style="@style/ProChip" android:text="LENTES" />
             <TextView android:id="@+id/chip_vid" style="@style/ProChip" android:text="🎬 HD" android:visibility="gone" />
             <TextView android:id="@+id/chip_flip" style="@style/ProChip" android:text="⟲ atrás" />
+            <TextView android:id="@+id/chip_wa" style="@style/ProChip" android:text="WhatsApp" />
 
             <ImageButton
                 android:id="@+id/btn_change_lens"

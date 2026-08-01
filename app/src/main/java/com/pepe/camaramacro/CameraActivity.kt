@@ -164,7 +164,7 @@ class CameraActivity : AppCompatActivity() {
                 val z = prefs.getFloat("zoom", 1f)
                 if (z > 1.01f) currentZoom = controller.setZoom(z)
             }
-            runOnUiThread { updateLensChip() }
+            runOnUiThread { updateLensChip(); buildZoomStrip() }
         }
         controller.onRecordingChanged = { rec -> onRecordingChanged(rec) }
         controller.onRawSaved = { ok ->
@@ -226,7 +226,10 @@ class CameraActivity : AppCompatActivity() {
         binding.btnShutter.setOnLongClickListener { startBurst(); true }
         binding.btnChangeLens.setOnClickListener { goToSetup() }
         binding.thumbnail.setOnClickListener { openGallery() }
-        binding.btnWhatsapp.setOnClickListener { shootAndShareWhatsApp() }
+        // El hueco junto al obturador es el sitio canónico del cambio de cámara, no de una
+        // marca de terceros (el botón verde de WhatsApp rompía la paleta y confundía).
+        binding.btnFlipMain.setOnClickListener { flipCamera() }
+        binding.chipWa.setOnClickListener { shootAndShareWhatsApp() }
         binding.tabPhoto.setOnClickListener { setMode("photo") }
         binding.tabVideo.setOnClickListener { setMode("video") }
 
@@ -490,6 +493,52 @@ class CameraActivity : AppCompatActivity() {
         binding.gestureArea.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
     }
 
+    // ---- Tira de zoom (una píldora por lente física real) ----
+
+    /** Construye la tira una vez que la cámara reportó su cadena de lentes. */
+    private fun buildZoomStrip() {
+        val stops = controller.zoomStops()
+        binding.zoomStrip.removeAllViews()
+        if (stops.size < 2) return // con una sola lente no aporta nada
+        val pad = dp(11f).toInt()
+        stops.forEach { (z, label) ->
+            val tv = TextView(this).apply {
+                text = if (z < 1.05f) "1x" else String.format(Locale.US, "%.1fx", z)
+                textSize = 13f
+                setPadding(pad, dp(9f).toInt(), pad, dp(9f).toInt())
+                minHeight = dp(48f).toInt() // objetivo táctil accesible
+                gravity = android.view.Gravity.CENTER
+                setBackgroundResource(R.drawable.zoom_pill_bg)
+                contentDescription = "Zoom $label"
+                setOnClickListener {
+                    currentZoom = controller.setZoom(z)
+                    performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+                    showZoom()
+                }
+            }
+            val lp = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { marginEnd = dp(8f).toInt() }
+            binding.zoomStrip.addView(tv, lp)
+        }
+        highlightZoomStrip()
+    }
+
+    /** Marca en ámbar la parada óptica activa. */
+    private fun highlightZoomStrip() {
+        val stops = controller.zoomStops()
+        if (binding.zoomStrip.childCount != stops.size) return
+        // Activa = la mayor parada que no supera el zoom actual.
+        var active = 0
+        stops.forEachIndexed { i, (z, _) -> if (currentZoom >= z - 0.01f) active = i }
+        for (i in 0 until binding.zoomStrip.childCount) {
+            (binding.zoomStrip.getChildAt(i) as? TextView)?.setTextColor(
+                if (i == active) ContextCompat.getColor(this, R.color.accent)
+                else Color.parseColor("#B3FFFFFF")
+            )
+        }
+    }
+
     /** Muestra SIEMPRE la lente física activa y el zoom: es la ventaja que nos diferencia. */
     private fun updateLensChip() {
         val base = String.format(
@@ -509,6 +558,7 @@ class CameraActivity : AppCompatActivity() {
 
     private fun showZoom() {
         updateLensChip()
+        highlightZoomStrip()
         binding.zoomPill.text = String.format(Locale.US, "%.1fx", currentZoom)
         binding.zoomPill.animate().cancel()
         binding.zoomPill.alpha = 1f

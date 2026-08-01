@@ -151,6 +151,19 @@ class Camera2Controller(
     private var afWaitTimeout: Runnable? = null
     private var lastAeState = -1
     private var lastSavedUri: Uri? = null
+    private val lensEquivMm = mutableMapOf<String, Int>()
+
+    /**
+     * Paradas ÓPTICAS del zoom: (zoom global, etiqueta). Una por lente física real.
+     * Es la base de la tira de zoom en pantalla: nuestra ventaja diferencial hecha visible.
+     */
+    fun zoomStops(): List<Pair<Float, String>> {
+        if (zoomChain.isEmpty()) return emptyList()
+        return zoomChain.map { (id, base) ->
+            val mm = lensEquivMm[id]
+            Pair(base, if (mm != null) "${mm}mm" else "ID$id")
+        }
+    }
     private var aeWaitAction: (() -> Unit)? = null
     private var aeWaitTimeout: Runnable? = null
     private var activeFocalMm = 0f
@@ -590,6 +603,13 @@ class Camera2Controller(
                 if (focal <= 0f) continue
                 // Excluye la principal dañada y cualquier duplicado con su misma focal.
                 if (mainFocal > 0f && focal > mainFocal - 0.3f && focal < mainFocal + 0.3f) continue
+                // Guarda el equivalente 35 mm de cada lente para poder etiquetar el zoom.
+                c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)?.let { ps ->
+                    val diag = kotlin.math.sqrt(
+                        (ps.width * ps.width + ps.height * ps.height).toDouble()
+                    )
+                    if (diag > 0) lensEquivMm[id] = Math.round(focal * 43.27 / diag).toInt()
+                }
                 backs.add(Pair(id, focal))
             } catch (e: Exception) {
             }
