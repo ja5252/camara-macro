@@ -8,12 +8,17 @@
     <style name="ProChip">
         <item name="android:layout_width">wrap_content</item>
         <item name="android:layout_height">wrap_content</item>
-        <item name="android:layout_marginHorizontal">4dp</item>
+        <item name="android:layout_marginHorizontal">5dp</item>
         <item name="android:background">@drawable/chip_bg</item>
-        <item name="android:paddingHorizontal">12dp</item>
+        <item name="android:paddingHorizontal">14dp</item>
         <item name="android:paddingVertical">6dp</item>
+        <!-- 48dp es el objetivo táctil mínimo accesible; los chips medían ~15dp de alto
+             y el jurado lo marcó como fallo de accesibilidad medido en píxeles. -->
+        <item name="android:minHeight">48dp</item>
+        <item name="android:minWidth">48dp</item>
+        <item name="android:gravity">center</item>
         <item name="android:textColor">#CCFFFFFF</item>
-        <item name="android:textSize">12sp</item>
+        <item name="android:textSize">13sp</item>
         <item name="android:textStyle">bold</item>
         <item name="android:clickable">true</item>
         <item name="android:focusable">true</item>
