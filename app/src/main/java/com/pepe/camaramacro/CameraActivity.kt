@@ -89,7 +89,6 @@ class CameraActivity : AppCompatActivity() {
     private var fullRes = true
     private var disabledLenses = HashSet<String>()
     private var nightOn = false
-    private var qrOn = false
     private var qrValue: String? = null
     private var filterIndex = 0
     private val vresList = intArrayOf(1080, 2160, 720)
@@ -290,7 +289,6 @@ class CameraActivity : AppCompatActivity() {
         binding.chipFlip.setOnClickListener { flipCamera() }
         binding.chipRaw.setOnClickListener { toggleRaw() }
         binding.chipNight.setOnClickListener { toggleNight() }
-        binding.chipQr.setOnClickListener { toggleQr() }
         binding.btnQrOpen.setOnClickListener { openQr() }
         binding.btnQrCopy.setOnClickListener { copyQr() }
         binding.btnQrClose.setOnClickListener { binding.qrCard.visibility = View.GONE }
@@ -298,6 +296,7 @@ class CameraActivity : AppCompatActivity() {
         binding.chipRes.setOnClickListener { toggleRes() }
         binding.chipLenses.setOnClickListener { toggleLensPanel() }
         binding.chipFilter.setOnClickListener { cycleFilter() }
+        binding.chipMore.setOnClickListener { toggleMorePanel() }
         binding.evSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(s: SeekBar, progress: Int, fromUser: Boolean) {
                 if (!fromUser) return
@@ -374,6 +373,8 @@ class CameraActivity : AppCompatActivity() {
         super.onResume()
         if (!::controller.isInitialized) return
         refreshThumbnail()
+        ui.removeCallbacks(autoScanTick)
+        ui.postDelayed(autoScanTick, 1200)
         sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)?.let {
             sensorManager.registerListener(rotationListener, it, SensorManager.SENSOR_DELAY_UI)
         }
@@ -387,6 +388,7 @@ class CameraActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
+        ui.removeCallbacks(autoScanTick)
         sensorManager.unregisterListener(rotationListener)
         if (::controller.isInitialized) {
             if (controller.isRecording) controller.stopVideo()
@@ -939,8 +941,6 @@ class CameraActivity : AppCompatActivity() {
         if (on) { // RAW, noche y QR son excluyentes
             nightOn = false
             binding.chipNight.setTextColor(Color.parseColor("#CCFFFFFF"))
-            qrOn = false
-            binding.chipQr.setTextColor(Color.parseColor("#CCFFFFFF"))
             binding.qrCard.visibility = View.GONE
         }
         Toast.makeText(this, if (on) "RAW + JPEG" else "Solo JPEG", Toast.LENGTH_SHORT).show()
@@ -955,30 +955,58 @@ class CameraActivity : AppCompatActivity() {
         )
         if (on) { // noche apaga RAW y QR (excluyentes); reflejarlo en los chips
             binding.chipRaw.setTextColor(Color.parseColor("#CCFFFFFF"))
-            binding.chipQr.setTextColor(Color.parseColor("#CCFFFFFF"))
-            qrOn = false
             binding.qrCard.visibility = View.GONE
         }
         Toast.makeText(this, if (on) "Modo noche ON" else "Modo noche OFF", Toast.LENGTH_SHORT).show()
     }
 
-    // ---- QR / código de barras ----
-    private fun toggleQr() {
-        if (controller.isRecording) return
-        val on = controller.setQrEnabled(!qrOn)
-        qrOn = on
-        binding.chipQr.setTextColor(chipColor(on))
-        if (on) {
-            // QR apaga RAW y noche (excluyentes)
-            binding.chipRaw.setTextColor(Color.parseColor("#CCFFFFFF"))
-            binding.chipNight.setTextColor(Color.parseColor("#CCFFFFFF"))
-            nightOn = false
-            Toast.makeText(this, "Apunta a un código QR", Toast.LENGTH_SHORT).show()
-        } else {
-            binding.qrCard.visibility = View.GONE
+    /** Muestra u oculta el panel con las opciones secundarias. */
+    private fun toggleMorePanel() {
+        val show = binding.morePanel.visibility != View.VISIBLE
+        binding.morePanel.visibility = if (show) View.VISIBLE else View.GONE
+        binding.chipMore.setTextColor(chipColor(show))
+    }
+
+    // ---- Escaneo SIEMPRE activo de QR y códigos de barras ----
+    // Sin chip, sin modo dedicado y sin stream extra: se analiza el propio visor
+    // (mismo método que la lupa), así funciona en cualquier modo y no compite con
+    // RAW ni con el modo noche por el número de streams de la cámara.
+
+    private val autoScanner by lazy {
+        com.google.mlkit.vision.barcode.BarcodeScanning.getClient()
+    }
+    private var autoScanBusy = false
+
+    private val autoScanTick = object : Runnable {
+        override fun run() {
+            scanViewfinderForCodes()
+            ui.postDelayed(this, 700)
         }
     }
 
+    private fun scanViewfinderForCodes() {
+        if (autoScanBusy || capturing || controller.isRecording) return
+        if (binding.qrCard.visibility == View.VISIBLE) return // ya hay uno en pantalla
+        val t = binding.texture
+        if (t.width == 0 || t.height == 0) return
+        val bmp = try { t.getBitmap(t.width / 2, t.height / 2) } catch (e: Exception) { null } ?: return
+        autoScanBusy = true
+        try {
+            val input = com.google.mlkit.vision.common.InputImage.fromBitmap(bmp, 0)
+            autoScanner.process(input)
+                .addOnSuccessListener { codes ->
+                    codes.firstOrNull()?.rawValue?.let { v ->
+                        if (v.isNotEmpty()) showQrResult(v)
+                    }
+                }
+                .addOnCompleteListener { autoScanBusy = false; bmp.recycle() }
+        } catch (e: Exception) {
+            autoScanBusy = false
+            bmp.recycle()
+        }
+    }
+
+    // ---- QR / código de barras ----
     private fun showQrResult(value: String) {
         if (binding.qrCard.visibility == View.VISIBLE && qrValue == value) return // ya mostrado
         qrValue = value

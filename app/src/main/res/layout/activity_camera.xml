@@ -135,7 +135,7 @@
         android:layout_height="54dp"
         android:layout_gravity="bottom|start"
         android:layout_marginStart="24dp"
-        android:layout_marginBottom="46dp"
+        android:layout_marginBottom="30dp"
         app:cardBackgroundColor="#22FFFFFF"
         app:cardCornerRadius="12dp"
         app:cardElevation="0dp"
@@ -157,7 +157,7 @@
         android:layout_height="56dp"
         android:layout_gravity="bottom|end"
         android:layout_marginEnd="22dp"
-        android:layout_marginBottom="45dp"
+        android:layout_marginBottom="30dp"
         android:background="?attr/selectableItemBackgroundBorderless"
         android:contentDescription="@string/change_lens"
         android:padding="6dp"
@@ -170,7 +170,7 @@
         android:layout_width="78dp"
         android:layout_height="78dp"
         android:layout_gravity="bottom|center_horizontal"
-        android:layout_marginBottom="40dp"
+        android:layout_marginBottom="24dp"
         android:background="@drawable/shutter_button"
         android:contentDescription="@string/shutter"
         android:elevation="6dp" />
@@ -181,7 +181,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|center_horizontal"
-        android:layout_marginBottom="104dp"
+        android:layout_marginBottom="92dp"
         android:background="@drawable/zoom_pill_bg"
         android:orientation="horizontal"
         android:padding="4dp">
@@ -327,7 +327,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|center_horizontal"
-        android:layout_marginBottom="212dp"
+        android:layout_marginBottom="128dp"
         android:gravity="center"
         android:orientation="horizontal" />
 
@@ -386,51 +386,80 @@
         android:focusable="false"
         android:visibility="gone" />
 
-    <!-- Barra de opciones desplazable (horizontal), encima de FOTO/VIDEO -->
-    <HorizontalScrollView
+    <!-- Barra principal ARRIBA, sobre el visor: solo lo esencial, siempre visible -->
+    <LinearLayout
         android:id="@+id/options_bar"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_gravity="bottom"
-        android:layout_marginBottom="150dp"
-        android:clipToPadding="false"
-        android:paddingHorizontal="12dp"
-        android:scrollbars="none"
-        android:requiresFadingEdge="horizontal"
-        android:fadingEdgeLength="28dp">
+        android:layout_gravity="top"
+        android:layout_marginTop="40dp"
+        android:gravity="center"
+        android:orientation="horizontal">
+
+        <TextView android:id="@+id/chip_flash" style="@style/ProChip" android:text="⚡ off" />
+        <TextView android:id="@+id/chip_timer" style="@style/ProChip" android:text="⏱ off" />
+        <TextView android:id="@+id/chip_grid" style="@style/ProChip" android:text="⊞" />
+        <TextView android:id="@+id/chip_night" style="@style/ProChip" android:text="🌙" />
+        <TextView android:id="@+id/chip_more" style="@style/ProChip" android:text="⋯" />
+    </LinearLayout>
+
+    <!-- Panel "Más": el resto de opciones, en rejilla, solo cuando se piden -->
+    <LinearLayout
+        android:id="@+id/more_panel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:layout_marginTop="96dp"
+        android:background="@drawable/zoom_pill_bg"
+        android:orientation="vertical"
+        android:padding="10dp"
+        android:visibility="gone">
 
         <LinearLayout
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:gravity="center_vertical"
+            android:gravity="center"
             android:orientation="horizontal">
 
-            <TextView android:id="@+id/chip_grid" style="@style/ProChip" android:text="⊞" />
-            <TextView android:id="@+id/chip_timer" style="@style/ProChip" android:text="⏱ off" />
-            <TextView android:id="@+id/chip_flash" style="@style/ProChip" android:text="⚡ off" />
-            <TextView android:id="@+id/chip_night" style="@style/ProChip" android:text="🌙" />
-            <TextView android:id="@+id/chip_qr" style="@style/ProChip" android:text="QR" />
             <TextView android:id="@+id/chip_raw" style="@style/ProChip" android:text="RAW" />
             <TextView android:id="@+id/chip_filter" style="@style/ProChip" android:text="✦ Normal" />
             <TextView android:id="@+id/pro_toggle" style="@style/ProChip" android:text="PRO" />
-            <TextView android:id="@+id/chip_ratio" style="@style/ProChip" android:text="4:3" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:gravity="center"
+            android:orientation="horizontal">
+
+            <TextView android:id="@+id/chip_ratio" style="@style/ProChip" android:text="16:9" />
             <TextView android:id="@+id/chip_res" style="@style/ProChip" android:text="FULL" />
-            <TextView android:id="@+id/chip_lenses" style="@style/ProChip" android:text="LENTES" />
             <TextView android:id="@+id/chip_vid" style="@style/ProChip" android:text="🎬 HD" android:visibility="gone" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:gravity="center"
+            android:orientation="horizontal">
+
+            <TextView android:id="@+id/chip_lenses" style="@style/ProChip" android:text="LENTES" />
             <TextView android:id="@+id/chip_flip" style="@style/ProChip" android:text="⟲ atrás" />
             <TextView android:id="@+id/chip_wa" style="@style/ProChip" android:text="WhatsApp" />
 
             <ImageButton
                 android:id="@+id/btn_change_lens"
-                android:layout_width="44dp"
-                android:layout_height="44dp"
-                android:layout_marginHorizontal="4dp"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:layout_marginHorizontal="5dp"
                 android:background="?attr/selectableItemBackgroundBorderless"
                 android:contentDescription="@string/change_lens"
-                android:padding="10dp"
+                android:padding="11dp"
                 android:src="@drawable/ic_settings" />
         </LinearLayout>
-    </HorizontalScrollView>
+    </LinearLayout>
 
     <!-- Cuenta atrás del temporizador -->
     <TextView
