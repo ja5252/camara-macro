@@ -370,9 +370,16 @@ class CameraActivity : AppCompatActivity() {
             if (gridOn) ContextCompat.getColor(this, R.color.accent) else Color.parseColor("#CCFFFFFF")
         )
 
-        // Por defecto 16:9 (índice 2): en una pantalla tan alargada, el 4:3 dejaba una
-        // franja negra del 42% de la pantalla. Con 16:9 baja al ~23% y el visor se ve
-        // mucho más grande. El 4:3 (máxima resolución) sigue a un toque en el chip RATIO.
+        // Por defecto 16:9 (índice 2): en una pantalla tan alargada, la proporción nativa
+        // 4:3 dejaba una franja negra enorme. Con 16:9 el visor ocupa un 80% de la pantalla.
+        // El 4:3 (máxima resolución) sigue a un toque en el chip RATIO.
+        // Migración: las instalaciones anteriores tienen guardado el valor viejo (0 =
+        // nativo) y no verían el cambio nunca; se les pasa a 16:9 UNA sola vez, respetando
+        // después lo que el usuario elija.
+        if (!prefs.getBoolean("migr169", false)) {
+            if (prefs.getInt("capRatio", 0) == 0) prefs.edit().putInt("capRatio", 2).apply()
+            prefs.edit().putBoolean("migr169", true).apply()
+        }
         ratioIndex = prefs.getInt("capRatio", 2).coerceIn(0, ratioLabels.size - 1)
         binding.chipRatio.text = ratioLabels[ratioIndex]
         binding.chipRatio.setTextColor(

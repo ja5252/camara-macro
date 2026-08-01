@@ -180,7 +180,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|center_horizontal"
-        android:layout_marginBottom="116dp"
+        android:layout_marginBottom="104dp"
         android:background="@drawable/zoom_pill_bg"
         android:orientation="horizontal"
         android:padding="4dp">
@@ -326,7 +326,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|center_horizontal"
-        android:layout_marginBottom="184dp"
+        android:layout_marginBottom="146dp"
         android:gravity="center"
         android:orientation="horizontal" />
 
