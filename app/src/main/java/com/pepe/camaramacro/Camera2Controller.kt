@@ -1701,7 +1701,7 @@ class Camera2Controller(
                 val values = ContentValues().apply {
                     put(MediaStore.Images.Media.DISPLAY_NAME, name)
                     put(MediaStore.Images.Media.MIME_TYPE, "image/x-adobe-dng")
-                    put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/CamaraMacro")
+                    put(MediaStore.Images.Media.RELATIVE_PATH, "DCIM/Camera")
                     put(MediaStore.Images.Media.IS_PENDING, 1)
                 }
                 val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
@@ -2139,10 +2139,17 @@ class Camera2Controller(
         return try {
             val resolver = activity.contentResolver
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val ahora = System.currentTimeMillis()
                 val values = ContentValues().apply {
                     put(MediaStore.Images.Media.DISPLAY_NAME, name)
                     put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-                    put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/CamaraMacro")
+                    // DCIM/Camera: es la carpeta que Google Photos respalda e indexa por
+                    // defecto. En Pictures/ las fotos quedaban fuera del respaldo automatico.
+                    put(MediaStore.Images.Media.RELATIVE_PATH, "DCIM/Camera")
+                    // Sin DATE_TAKEN, Google Photos no las ordena ni las sube bien.
+                    put(MediaStore.Images.Media.DATE_TAKEN, ahora)
+                    put(MediaStore.Images.Media.DATE_ADDED, ahora / 1000)
+                    put(MediaStore.Images.Media.DATE_MODIFIED, ahora / 1000)
                     put(MediaStore.Images.Media.IS_PENDING, 1)
                 }
                 val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
@@ -2424,10 +2431,14 @@ class Camera2Controller(
             val name = "VID_${System.currentTimeMillis()}.mp4"
             val resolver = activity.contentResolver
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val ahoraV = System.currentTimeMillis()
                 val values = ContentValues().apply {
                     put(MediaStore.Video.Media.DISPLAY_NAME, name)
                     put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-                    put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/CamaraMacro")
+                    put(MediaStore.Video.Media.RELATIVE_PATH, "DCIM/Camera")
+                    put(MediaStore.Video.Media.DATE_TAKEN, ahoraV)
+                    put(MediaStore.Video.Media.DATE_ADDED, ahoraV / 1000)
+                    put(MediaStore.Video.Media.DATE_MODIFIED, ahoraV / 1000)
                     put(MediaStore.Video.Media.IS_PENDING, 1)
                 }
                 val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)

@@ -157,6 +157,10 @@ class GalleryActivity : AppCompatActivity() {
 
     private fun loadMedia() {
         items.clear()
+        // DCIM/Camera es donde guardamos ahora (para que Google Photos las indexe), pero
+        // seguimos leyendo las carpetas antiguas para no perder las fotos ya tomadas.
+        queryInto(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, false, "DCIM/Camera")
+        queryInto(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, true, "DCIM/Camera")
         queryInto(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, false, "Pictures/CamaraMacro")
         queryInto(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, true, "Movies/CamaraMacro")
         items.sortByDescending { it.dateAdded }
@@ -171,7 +175,9 @@ class GalleryActivity : AppCompatActivity() {
         val args: Array<String>
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             // Anclado al inicio: no atrapa "CamaraMacro2" ni otras carpetas.
-            selection = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
+            selection = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ? AND " +
+                "(${MediaStore.MediaColumns.DISPLAY_NAME} LIKE 'MACRO_%' OR " +
+                "${MediaStore.MediaColumns.DISPLAY_NAME} LIKE 'VID_%')"
             args = arrayOf("$relPath/%")
         } else {
             @Suppress("DEPRECATION")
@@ -274,6 +280,42 @@ class GalleryActivity : AppCompatActivity() {
         updateCounter()
     }
 
+    /** Reproduce el vídeo DENTRO de la app en vez de derivar a otra aplicación. */
+    private fun playInline(holder: VH, item: GalleryItem) {
+        val v = holder.b.pageVideo
+        holder.b.playBadge.visibility = View.GONE
+        holder.b.pageImage.visibility = View.GONE
+        v.visibility = View.VISIBLE
+        try {
+            v.setVideoURI(item.uri)
+            val mc = android.widget.MediaController(this)
+            mc.setAnchorView(v)
+            v.setMediaController(mc)
+            v.setOnPreparedListener { it.isLooping = false; v.start() }
+            v.setOnCompletionListener { stopInline(holder) }
+            v.setOnErrorListener { _, _, _ ->
+                // Si el códec falla, ofrecemos abrirlo fuera en vez de dejar pantalla negra.
+                stopInline(holder)
+                openExternally(item)
+                true
+            }
+            v.requestFocus()
+        } catch (e: Exception) {
+            stopInline(holder)
+            openExternally(item)
+        }
+    }
+
+    private fun stopInline(holder: VH) {
+        val v = holder.b.pageVideo
+        try { if (v.isPlaying) v.stopPlayback() } catch (e: Exception) {}
+        v.setMediaController(null)
+        v.visibility = View.GONE
+        holder.b.pageImage.visibility = View.VISIBLE
+        holder.b.playBadge.visibility =
+            if (items.getOrNull(holder.bindingAdapterPosition)?.isVideo == true) View.VISIBLE else View.GONE
+    }
+
     private fun loadVideoThumb(uri: Uri, target: android.widget.ImageView) {
         target.setImageDrawable(null)
         target.tag = uri
@@ -312,7 +354,7 @@ class GalleryActivity : AppCompatActivity() {
             holder.b.pageImage.onZoomChanged = { z -> binding.pager.isUserInputEnabled = !z }
             if (item.isVideo) {
                 holder.b.playBadge.visibility = View.VISIBLE
-                holder.b.playBadge.setOnClickListener { openExternally(item) }
+                holder.b.playBadge.setOnClickListener { playInline(holder, item) }
                 loadVideoThumb(item.uri, holder.b.pageImage)
             } else {
                 holder.b.playBadge.visibility = View.GONE
@@ -323,6 +365,7 @@ class GalleryActivity : AppCompatActivity() {
         }
 
         override fun onViewRecycled(holder: VH) {
+            stopInline(holder)
             // Evita arrastrar la miniatura del item anterior al reciclar.
             holder.b.pageImage.tag = null
             holder.b.pageImage.setImageDrawable(null)
