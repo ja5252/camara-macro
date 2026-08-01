@@ -162,6 +162,12 @@ class Camera2Controller(
     private var videoSessionActive = false    // true mientras la sesión es de grabación
     private var refocusRelease: Runnable? = null // vuelve a enfoque continuo tras un toque
     private var manualSensorSupported = false
+    // Ultra HDR (JPEG_R): el HAL lo declara a resolución completa en ID3 e ID6. Es un JPEG
+    // normal con el mapa de ganancia HDR embebido, así que se ve bien en cualquier visor
+    // y espectacular en pantallas HDR. Sustituye al JPEG normal (no se suman streams).
+    private var hdrSupported = false
+    var hdrEnabled = false
+        private set
     private var nrAvailable: IntArray = IntArray(0)
     private var edgeAvailable: IntArray = IntArray(0)
     /** Acción pendiente a ejecutar cuando el AF converja antes de disparar. */
@@ -955,11 +961,28 @@ class Camera2Controller(
      * que la vista previa por defecto (sin RAW) use la combinación de 2 streams ya probada.
      * Devuelve el estado real (false si la lente no soporta RAW).
      */
+    val hasHdr: Boolean get() = hdrSupported
+
+    /**
+     * Ultra HDR: la foto se captura en JPEG_R (JPEG con mapa de ganancia HDR embebido).
+     * Reconstruye la sesión porque cambia el formato del stream de captura.
+     * Es excluyente con RAW: el DngCreator necesita el sensor en crudo.
+     */
+    fun setHdrEnabled(enabled: Boolean): Boolean {
+        val target = enabled && hdrSupported
+        if (target == hdrEnabled) return hdrEnabled
+        hdrEnabled = target
+        if (target) rawEnabled = false
+        postRebuildSession()
+        return hdrEnabled
+    }
+
     fun setRawEnabled(enabled: Boolean): Boolean {
         val target = enabled && rawSupported
         if (target == rawEnabled) return rawEnabled
         rawEnabled = target
         if (target) {
+            hdrEnabled = false // el DNG necesita el sensor en crudo
             rawFallbackTried = false // permite el fallback seguro otra vez
             nightEnabled = false     // RAW, noche y QR son excluyentes (máx 3 streams)
             if (qrEnabled) setQrEnabledInternal(false)
@@ -1810,9 +1833,23 @@ class Camera2Controller(
             ?: recSizes?.filter { it.width <= 1920 }?.maxByOrNull { it.width.toLong() * it.height }
             ?: recSizes?.maxByOrNull { it.width.toLong() * it.height }
             ?: Size(1920, 1080)
-        imageReader = ImageReader.newInstance(largest.width, largest.height, ImageFormat.JPEG, 2).apply {
+        // ¿Ultra HDR disponible a este tamaño? Si sí y está activado, el stream de la foto
+        // es JPEG_R en vez de JPEG: mismo número de streams, mucho más rango dinámico.
+        hdrSupported = false
+        if (Build.VERSION.SDK_INT >= 34) {
+            try {
+                val jr = map.getOutputSizes(ImageFormat.JPEG_R)
+                hdrSupported = jr != null && jr.any { it.width == largest.width && it.height == largest.height }
+            } catch (e: Exception) {
+                hdrSupported = false
+            }
+        }
+        val stillFormat =
+            if (hdrEnabled && hdrSupported) ImageFormat.JPEG_R else ImageFormat.JPEG
+        imageReader = ImageReader.newInstance(largest.width, largest.height, stillFormat, 2).apply {
             setOnImageAvailableListener(onImageAvailableListener, backgroundHandler)
         }
+        Log.i("CamMacro", "still=${if (stillFormat == ImageFormat.JPEG) "JPEG" else "JPEG_R/UltraHDR"} hdrSupported=$hdrSupported")
 
         camChars = characteristics
         val rawCaps = characteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: IntArray(0)
@@ -2007,8 +2044,11 @@ class Camera2Controller(
 
     private fun saveImage(rawBytes: ByteArray): Boolean {
         // En modo Full recortamos a la proporción de la pantalla (foto = lo que se ve).
-        var bytes = if (aspect == AspectRatio.FULL) cropFullJpeg(rawBytes) ?: rawBytes else rawBytes
-        captureMatrix?.let { bytes = applyColorFilter(bytes, it) ?: bytes } // filtro de color
+        // En Ultra HDR NO se puede recortar ni filtrar: se perdería el mapa de ganancia
+        // embebido y la foto dejaría de ser HDR.
+        val ultraHdr = hdrEnabled && hdrSupported
+        var bytes = if (!ultraHdr && aspect == AspectRatio.FULL) cropFullJpeg(rawBytes) ?: rawBytes else rawBytes
+        if (!ultraHdr) captureMatrix?.let { bytes = applyColorFilter(bytes, it) ?: bytes }
         // Miniatura inmediata: no esperamos a que MediaStore indexe el archivo.
         onPhotoThumb?.let { cb ->
             try {

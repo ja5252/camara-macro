@@ -96,7 +96,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|center_horizontal"
-        android:layout_marginBottom="272dp"
+        android:layout_marginBottom="244dp"
         android:background="@drawable/zoom_pill_bg"
         android:paddingHorizontal="16dp"
         android:paddingVertical="7dp"
@@ -115,7 +115,7 @@
         android:layout_height="wrap_content"
         android:layout_gravity="top|start"
         android:layout_marginStart="16dp"
-        android:layout_marginTop="44dp"
+        android:layout_marginTop="102dp"
         android:background="@drawable/chip_bg"
         android:paddingHorizontal="10dp"
         android:paddingVertical="5dp"
@@ -172,8 +172,7 @@
         android:layout_gravity="bottom|center_horizontal"
         android:layout_marginBottom="24dp"
         android:background="@drawable/shutter_button"
-        android:contentDescription="@string/shutter"
-        android:elevation="6dp" />
+        android:contentDescription="@string/shutter" />
 
     <!-- Selector de modo FOTO / VIDEO -->
     <LinearLayout
@@ -181,7 +180,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|center_horizontal"
-        android:layout_marginBottom="92dp"
+        android:layout_marginBottom="116dp"
         android:background="@drawable/zoom_pill_bg"
         android:orientation="horizontal"
         android:padding="4dp">
@@ -248,7 +247,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|center_horizontal"
-        android:layout_marginBottom="272dp"
+        android:layout_marginBottom="244dp"
         android:background="@drawable/zoom_pill_bg"
         android:gravity="center_horizontal"
         android:orientation="vertical"
@@ -295,7 +294,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|center_horizontal"
-        android:layout_marginBottom="272dp"
+        android:layout_marginBottom="244dp"
         android:background="@drawable/zoom_pill_bg"
         android:gravity="center"
         android:orientation="horizontal"
@@ -308,7 +307,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|center_horizontal"
-        android:layout_marginBottom="272dp"
+        android:layout_marginBottom="244dp"
         android:background="@drawable/zoom_pill_bg"
         android:gravity="center"
         android:orientation="horizontal"
@@ -327,7 +326,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|center_horizontal"
-        android:layout_marginBottom="128dp"
+        android:layout_marginBottom="184dp"
         android:gravity="center"
         android:orientation="horizontal" />
 
@@ -337,7 +336,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom"
-        android:layout_marginBottom="272dp"
+        android:layout_marginBottom="244dp"
         android:gravity="center"
         android:orientation="horizontal"
         android:paddingHorizontal="24dp"
@@ -421,6 +420,7 @@
             android:gravity="center"
             android:orientation="horizontal">
 
+            <TextView android:id="@+id/chip_hdr" style="@style/ProChip" android:text="HDR" />
             <TextView android:id="@+id/chip_raw" style="@style/ProChip" android:text="RAW" />
             <TextView android:id="@+id/chip_filter" style="@style/ProChip" android:text="✦ Normal" />
             <TextView android:id="@+id/pro_toggle" style="@style/ProChip" android:text="PRO" />

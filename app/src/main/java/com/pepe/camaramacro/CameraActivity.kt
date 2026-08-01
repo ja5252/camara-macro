@@ -297,6 +297,7 @@ class CameraActivity : AppCompatActivity() {
         binding.chipLenses.setOnClickListener { toggleLensPanel() }
         binding.chipFilter.setOnClickListener { cycleFilter() }
         binding.chipMore.setOnClickListener { toggleMorePanel() }
+        binding.chipHdr.setOnClickListener { toggleHdr() }
         binding.evSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(s: SeekBar, progress: Int, fromUser: Boolean) {
                 if (!fromUser) return
@@ -359,6 +360,10 @@ class CameraActivity : AppCompatActivity() {
 
         disabledLenses = HashSet(prefs.getStringSet("disabledLenses", emptySet()) ?: emptySet())
 
+        if (prefs.getBoolean("hdr", false)) {
+            val on = controller.setHdrEnabled(true)
+            binding.chipHdr.setTextColor(chipColor(on))
+        }
         filterIndex = prefs.getInt("filter", 0).coerceIn(0, Filters.list.size - 1)
         applyFilter()
 
@@ -958,6 +963,19 @@ class CameraActivity : AppCompatActivity() {
             binding.qrCard.visibility = View.GONE
         }
         Toast.makeText(this, if (on) "Modo noche ON" else "Modo noche OFF", Toast.LENGTH_SHORT).show()
+    }
+
+    /** Ultra HDR: captura en JPEG_R, con mucho más rango dinámico en contraluces. */
+    private fun toggleHdr() {
+        if (!controller.hasHdr) {
+            Toast.makeText(this, "Esta lente no admite Ultra HDR", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val on = controller.setHdrEnabled(!controller.hdrEnabled)
+        binding.chipHdr.setTextColor(chipColor(on))
+        if (on) binding.chipRaw.setTextColor(chipColor(false)) // excluyente con RAW
+        prefs.edit().putBoolean("hdr", on).apply()
+        Toast.makeText(this, if (on) "Ultra HDR activado" else "Ultra HDR desactivado", Toast.LENGTH_SHORT).show()
     }
 
     /** Muestra u oculta el panel con las opciones secundarias. */
