@@ -5,5 +5,5 @@
         así que la barra de opciones y FOTO/VIDEO se montaban ENCIMA de la imagen.
         Reservamos la banda inferior para que los controles nunca tapen el encuadre.
     -->
-    <dimen name="preview_bottom_inset">210dp</dimen>
+    <dimen name="preview_bottom_inset">0dp</dimen>
 </resources>

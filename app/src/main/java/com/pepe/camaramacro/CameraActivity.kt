@@ -1049,11 +1049,12 @@ class CameraActivity : AppCompatActivity() {
         com.google.mlkit.vision.barcode.BarcodeScanning.getClient()
     }
     private var autoScanBusy = false
+    private var scanBitmap: Bitmap? = null
 
     private val autoScanTick = object : Runnable {
         override fun run() {
             scanViewfinderForCodes()
-            ui.postDelayed(this, 700)
+            ui.postDelayed(this, 1100)
         }
     }
 
@@ -1062,20 +1063,30 @@ class CameraActivity : AppCompatActivity() {
         if (binding.qrCard.visibility == View.VISIBLE) return // ya hay uno en pantalla
         val t = binding.texture
         if (t.width == 0 || t.height == 0) return
-        val bmp = try { t.getBitmap(t.width / 2, t.height / 2) } catch (e: Exception) { null } ?: return
+        // Bitmap PEQUEÑO y REUTILIZADO: pedir uno nuevo a media resolución cada vez hacía
+        // una lectura de GPU enorme y una asignación por ciclo, y eso volvía la app lenta.
+        // A ~360 px de ancho un QR se sigue leyendo de sobra.
+        val target = 360
+        val h = (target.toFloat() * t.height / t.width).toInt().coerceAtLeast(1)
+        var bmp = scanBitmap
+        if (bmp == null || bmp.width != target || bmp.height != h) {
+            bmp?.recycle()
+            bmp = Bitmap.createBitmap(target, h, Bitmap.Config.ARGB_8888)
+            scanBitmap = bmp
+        }
+        val frame = try { t.getBitmap(bmp) } catch (e: Exception) { null } ?: return
         autoScanBusy = true
         try {
-            val input = com.google.mlkit.vision.common.InputImage.fromBitmap(bmp, 0)
+            val input = com.google.mlkit.vision.common.InputImage.fromBitmap(frame, 0)
             autoScanner.process(input)
                 .addOnSuccessListener { codes ->
                     codes.firstOrNull()?.rawValue?.let { v ->
                         if (v.isNotEmpty()) showQrResult(v)
                     }
                 }
-                .addOnCompleteListener { autoScanBusy = false; bmp.recycle() }
+                .addOnCompleteListener { autoScanBusy = false } // el bitmap se reutiliza
         } catch (e: Exception) {
             autoScanBusy = false
-            bmp.recycle()
         }
     }
 
@@ -1217,6 +1228,7 @@ class CameraActivity : AppCompatActivity() {
     override fun onDestroy() {
         ui.removeCallbacksAndMessages(null)
         try { autoScanner.close() } catch (e: Exception) {}
+        scanBitmap?.recycle(); scanBitmap = null
         if (::controller.isInitialized) controller.jpegSink = null
         super.onDestroy()
     }

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Pantalla interior del plegable (2248x2480, casi cuadrada): un visor vertical 16:9
+        solo ocupaba el 62% del ancho y dejaba dos franjas negras enormes a los lados.
+        Aquí el visor LLENA la pantalla (recortando lo que sobra) y los controles se
+        superponen sobre los degradados, como en cualquier cámara de tableta.
+    -->
+    <bool name="preview_fills_screen">true</bool>
+</resources>

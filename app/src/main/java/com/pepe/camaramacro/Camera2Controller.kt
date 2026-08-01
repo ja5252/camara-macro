@@ -1960,7 +1960,10 @@ class Camera2Controller(
         )
 
         activity.runOnUiThread {
-            textureView.coverMode = (aspect == AspectRatio.FULL)
+            // En la pantalla grande del plegable el visor llena la pantalla; en la alargada
+            // se muestra completo para que lo que ves sea lo que sale.
+            textureView.coverMode = (aspect == AspectRatio.FULL) ||
+                activity.resources.getBoolean(R.bool.preview_fills_screen)
             val orientation = activity.resources.configuration.orientation
             if (orientation == Configuration.ORIENTATION_LANDSCAPE) {
                 textureView.setAspectRatio(previewSize.width, previewSize.height)

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        En pantalla alargada (teléfono plegado) el visor se muestra completo (FIT):
+        lo que ves es exactamente lo que sale, y los controles caben en la franja negra.
+    -->
+    <bool name="preview_fills_screen">false</bool>
+</resources>
