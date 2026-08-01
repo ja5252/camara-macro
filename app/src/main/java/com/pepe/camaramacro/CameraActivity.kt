@@ -90,6 +90,8 @@ class CameraActivity : AppCompatActivity() {
     private var disabledLenses = HashSet<String>()
     private var nightOn = false
     private var qrValue: String? = null
+    private var qrDismissed: String? = null
+    private var countdownRunnable: Runnable? = null
     private var filterIndex = 0
     private val vresList = intArrayOf(1080, 2160, 720)
     private val vresLabels = arrayOf("1080p", "4K", "720p")
@@ -206,6 +208,23 @@ class CameraActivity : AppCompatActivity() {
             }
         }
         controller.onQrDetected = { value -> runOnUiThread { showQrResult(value) } }
+        controller.onFocusState = { st ->
+            runOnUiThread {
+                binding.focusRing.setColorFilter(
+                    when (st) {
+                        FocusState.FOCUSED -> Color.parseColor("#4CD964")   // verde: enfocado
+                        FocusState.NOT_FOCUSED -> Color.parseColor("#FF3B30") // rojo: no pudo
+                        else -> ContextCompat.getColor(this, R.color.accent)  // ambar: buscando
+                    }
+                )
+            }
+        }
+        controller.onHdrUnavailable = {
+            runOnUiThread {
+                Toast.makeText(this, "Ultra HDR no disponible en esta lente", Toast.LENGTH_LONG).show()
+                binding.chipHdr.setTextColor(chipColor(false))
+            }
+        }
         // La miniatura se pinta al instante desde el JPEG en memoria (antes esperaba a
         // que MediaStore indexara el archivo y el retraso se notaba mucho).
         controller.onPhotoThumb = { bmp ->
@@ -291,7 +310,10 @@ class CameraActivity : AppCompatActivity() {
         binding.chipNight.setOnClickListener { toggleNight() }
         binding.btnQrOpen.setOnClickListener { openQr() }
         binding.btnQrCopy.setOnClickListener { copyQr() }
-        binding.btnQrClose.setOnClickListener { binding.qrCard.visibility = View.GONE }
+        binding.btnQrClose.setOnClickListener {
+            qrDismissed = qrValue
+            binding.qrCard.visibility = View.GONE
+        }
         binding.chipRatio.setOnClickListener { cycleRatio() }
         binding.chipRes.setOnClickListener { toggleRes() }
         binding.chipLenses.setOnClickListener { toggleLensPanel() }
@@ -317,7 +339,8 @@ class CameraActivity : AppCompatActivity() {
         binding.chipVcodec.setOnClickListener { toggleVcodec() }
         binding.chipTl.setOnClickListener { toggleTl() }
 
-        setMode(prefs.getString("mode", "photo") ?: "photo")
+        // Si nos invoca otra app, el modo lo fija armIntentCapture: no pisarlo.
+        if (!captureIntent) setMode(prefs.getString("mode", "photo") ?: "photo")
         restoreSettings()
     }
 
@@ -1026,6 +1049,7 @@ class CameraActivity : AppCompatActivity() {
 
     // ---- QR / código de barras ----
     private fun showQrResult(value: String) {
+        if (value == qrDismissed) return // el usuario ya lo cerro
         if (binding.qrCard.visibility == View.VISIBLE && qrValue == value) return // ya mostrado
         qrValue = value
         binding.qrText.text = value
@@ -1159,6 +1183,8 @@ class CameraActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        ui.removeCallbacksAndMessages(null)
+        try { autoScanner.close() } catch (e: Exception) {}
         if (::controller.isInitialized) controller.jpegSink = null
         super.onDestroy()
     }
@@ -1267,6 +1293,7 @@ class CameraActivity : AppCompatActivity() {
         var remaining = timerSec
         binding.countdown.visibility = View.VISIBLE
         binding.countdown.text = remaining.toString()
+        countdownRunnable?.let { ui.removeCallbacks(it) }
         val r = object : Runnable {
             override fun run() {
                 remaining--
@@ -1279,6 +1306,7 @@ class CameraActivity : AppCompatActivity() {
                 }
             }
         }
+        countdownRunnable = r
         ui.postDelayed(r, 1000)
     }
 

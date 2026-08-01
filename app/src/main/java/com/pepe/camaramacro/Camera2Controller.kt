@@ -166,6 +166,9 @@ class Camera2Controller(
     // normal con el mapa de ganancia HDR embebido, así que se ve bien en cualquier visor
     // y espectacular en pantallas HDR. Sustituye al JPEG normal (no se suman streams).
     private var hdrSupported = false
+    private var hdrFallbackTried = false
+    /** Ultra HDR no se pudo activar y se cayó a JPEG normal. */
+    var onHdrUnavailable: (() -> Unit)? = null
     var hdrEnabled = false
         private set
     private var nrAvailable: IntArray = IntArray(0)
@@ -558,6 +561,7 @@ class Camera2Controller(
                     request: CaptureRequest,
                     failure: CaptureFailure
                 ) {
+                    unlockFocusAfterShot()
                     val cb = pendingResult; pendingResult = null
                     activity.runOnUiThread { cb?.invoke(false) }
                 }
@@ -582,6 +586,32 @@ class Camera2Controller(
         pendingRawImage = null
         pendingRawResult = null
         if (cb != null) activity.runOnUiThread { cb.invoke(false) }
+    }
+
+    /**
+     * Suelta el enfoque después de disparar. CRÍTICO: triggerAfThenCapture manda
+     * AF_TRIGGER_START y, sin este CANCEL, el AF se queda en FOCUSED_LOCKED. Como
+     * takePhoto decide si hace falta enfocar mirando lastFocusState, a partir de la
+     * primera foto ni el visor reenfocaba ni las siguientes fotos volvían a enfocar:
+     * quedaban clavadas a la distancia de la primera.
+     */
+    private fun unlockFocusAfterShot() {
+        if (afLocked || manualFocus || !afAvailable) return // el toque manda: no lo pisamos
+        val session = captureSession ?: return
+        if (!::previewRequestBuilder.isInitialized) return
+        try {
+            previewRequestBuilder.set(
+                CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_CANCEL
+            )
+            session.capture(previewRequestBuilder.build(), null, backgroundHandler)
+            previewRequestBuilder.set(
+                CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_IDLE
+            )
+            lastFocusState = null // que la próxima foto vuelva a enfocar de verdad
+            applyControls(previewRequestBuilder)
+            updatePreview()
+        } catch (e: Exception) {
+        }
     }
 
     /** Cancela cualquier espera de enfoque/exposición pendiente. */
@@ -972,7 +1002,7 @@ class Camera2Controller(
         val target = enabled && hdrSupported
         if (target == hdrEnabled) return hdrEnabled
         hdrEnabled = target
-        if (target) rawEnabled = false
+        if (target) { rawEnabled = false; hdrFallbackTried = false }
         postRebuildSession()
         return hdrEnabled
     }
@@ -1627,6 +1657,7 @@ class Camera2Controller(
         image?.close()
         captureWatchdog?.let { uiHandler.removeCallbacks(it) }
         captureWatchdog = null
+        unlockFocusAfterShot() // o la siguiente foto sale clavada a esta distancia
         val cb = pendingResult; pendingResult = null
         activity.runOnUiThread { cb?.invoke(ok) }
     }
@@ -1990,6 +2021,23 @@ class Camera2Controller(
                             rawReader = null
                             Log.e("CamMacro", "RAW no soportado en 3 streams; cayendo a JPEG")
                             activity.runOnUiThread { onRawUnavailable?.invoke() }
+                            startPreview()
+                            return
+                        }
+                        // Si falló con Ultra HDR (JPEG_R), volver a JPEG normal en vez de
+                        // dejar la cámara muerta: hay que RECREAR el ImageReader porque
+                        // cambia el formato del stream.
+                        if (hdrEnabled && !hdrFallbackTried) {
+                            hdrFallbackTried = true
+                            hdrEnabled = false
+                            Log.e("CamMacro", "Ultra HDR no configurable; cayendo a JPEG")
+                            try {
+                                val mgr = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+                                setUpOutputs(mgr)
+                            } catch (e: Exception) {
+                                Log.e("CamMacro", "fallback HDR: ${e.message}")
+                            }
+                            activity.runOnUiThread { onHdrUnavailable?.invoke() }
                             startPreview()
                             return
                         }
