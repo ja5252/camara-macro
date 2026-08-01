@@ -616,15 +616,18 @@ class CameraActivity : AppCompatActivity() {
         binding.zoomStrip.removeAllViews()
         if (stops.size < 2) return // con una sola lente no aporta nada
         val pad = dp(11f).toInt()
-        stops.forEach { (z, label) ->
+        stops.forEach { (z, label, optical) ->
             val tv = TextView(this).apply {
-                text = if (z < 1.05f) "1x" else String.format(Locale.US, "%.1fx", z)
-                textSize = 13f
+                text = label
+                textSize = if (optical) 14f else 12.5f
+                // Las paradas ópticas (lente física real) van en negrita: son las que
+                // dan calidad de verdad, frente al zoom digital.
+                setTypeface(null, if (optical) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
                 setPadding(pad, dp(9f).toInt(), pad, dp(9f).toInt())
                 minHeight = dp(48f).toInt() // objetivo táctil accesible
                 gravity = android.view.Gravity.CENTER
                 setBackgroundResource(R.drawable.zoom_pill_bg)
-                contentDescription = "Zoom $label"
+                contentDescription = if (optical) "Zoom $label, lente óptica" else "Zoom $label digital"
                 setOnClickListener {
                     currentZoom = controller.setZoom(z)
                     performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
@@ -645,7 +648,7 @@ class CameraActivity : AppCompatActivity() {
         if (binding.zoomStrip.childCount != stops.size) return
         // Activa = la mayor parada que no supera el zoom actual.
         var active = 0
-        stops.forEachIndexed { i, (z, _) -> if (currentZoom >= z - 0.01f) active = i }
+        stops.forEachIndexed { i, t -> if (currentZoom >= t.first - 0.01f) active = i }
         for (i in 0 until binding.zoomStrip.childCount) {
             (binding.zoomStrip.getChildAt(i) as? TextView)?.setTextColor(
                 if (i == active) ContextCompat.getColor(this, R.color.accent)
@@ -656,9 +659,9 @@ class CameraActivity : AppCompatActivity() {
 
     /** Muestra SIEMPRE la lente física activa y el zoom: es la ventaja que nos diferencia. */
     private fun updateLensChip() {
-        val base = String.format(
-            Locale.US, "%s · %.1fx", controller.activeLensLabel, currentZoom
-        )
+        // Zoom en la escala estándar del usuario (1x ≈ 24 mm), no en la interna.
+        val disp = currentZoom * controller.zoomDisplayFactor
+        val base = String.format(Locale.US, "%s · %.1fx", controller.activeLensLabel, disp)
         // Si hay lentes apagadas, el zoom cae a digital sin poder usar esa óptica.
         // Antes esto era invisible: se perdía el teleobjetivo y nadie sabía por qué.
         val n = controller.disabledLensCount
@@ -674,7 +677,8 @@ class CameraActivity : AppCompatActivity() {
     private fun showZoom() {
         updateLensChip()
         highlightZoomStrip()
-        binding.zoomPill.text = String.format(Locale.US, "%.1fx", currentZoom)
+        binding.zoomPill.text =
+            String.format(Locale.US, "%.1fx", currentZoom * controller.zoomDisplayFactor)
         binding.zoomPill.animate().cancel()
         binding.zoomPill.alpha = 1f
         ui.removeCallbacks(hideZoom)

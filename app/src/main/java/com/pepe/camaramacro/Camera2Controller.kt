@@ -175,22 +175,44 @@ class Camera2Controller(
      * Paradas ÓPTICAS del zoom: (zoom global, etiqueta). Una por lente física real.
      * Es la base de la tira de zoom en pantalla: nuestra ventaja diferencial hecha visible.
      */
-    fun zoomStops(): List<Pair<Float, String>> {
+    /**
+     * Factor para pasar del zoom interno (1.0 = lente más angular a su campo nativo) a la
+     * escala ESTÁNDAR de los teléfonos, donde 1x equivale a unos 24 mm. Así el gran angular
+     * se muestra como 0.6x y el 1x es un recorte digital suyo, como en cualquier móvil.
+     */
+    val zoomDisplayFactor: Float
+        get() {
+            val baseId = zoomChain.firstOrNull()?.first ?: return 1f
+            val mm = lensEquivMm[baseId] ?: return 1f
+            return if (mm > 0) mm / 24f else 1f
+        }
+
+    private fun fmtZoom(d: Float): String =
+        if (kotlin.math.abs(d - Math.round(d)) < 0.05f) "${Math.round(d)}x"
+        else String.format(java.util.Locale.US, "%.1fx", d)
+
+    /**
+     * Paradas de zoom para la UI: (zoom interno, etiqueta visible, esÓptica).
+     * Incluye las lentes físicas reales y las paradas estándar (1x, 2x, 5x) que
+     * caigan dentro del rango, resueltas con zoom digital.
+     */
+    fun zoomStops(): List<Triple<Float, String, Boolean>> {
         if (zoomChain.isEmpty()) return emptyList()
-        val out = mutableListOf<Pair<Float, String>>()
-        zoomChain.forEachIndexed { i, (id, base) ->
-            val mm = lensEquivMm[id]
-            // Parada ÓPTICA: cambia de lente física de verdad.
-            out.add(Pair(base, if (mm != null) "${mm}mm óptico" else "ID$id"))
-            // Paso intermedio de zoom digital, para no saltar de golpe de 1x a 4.6x.
-            val next = if (i + 1 < zoomChain.size) zoomChain[i + 1].second else base * 2.2f
-            val mid = base * 2f
-            if (mid < next - 0.2f) {
-                val midMm = if (mm != null) "${mm * 2} mm aprox." else "digital"
-                out.add(Pair(mid, midMm))
+        val f = zoomDisplayFactor
+        val byDisplay = sortedMapOf<Float, Triple<Float, String, Boolean>>()
+        zoomChain.forEach { (_, base) ->
+            val disp = base * f
+            byDisplay[disp] = Triple(base, fmtZoom(disp), true) // parada óptica real
+        }
+        val minDisp = zoomChain.first().second * f
+        val maxDisp = zoomChain.last().second * 4f * f
+        listOf(1f, 2f, 5f).forEach { d ->
+            val yaHay = byDisplay.keys.any { kotlin.math.abs(it - d) < 0.18f }
+            if (!yaHay && d > minDisp + 0.05f && d < maxDisp) {
+                byDisplay[d] = Triple(d / f, fmtZoom(d), false) // zoom digital
             }
         }
-        return out
+        return byDisplay.values.toList()
     }
     private var aeWaitAction: (() -> Unit)? = null
     private var aeWaitTimeout: Runnable? = null
