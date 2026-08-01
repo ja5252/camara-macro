@@ -210,13 +210,12 @@ class CameraActivity : AppCompatActivity() {
         controller.onQrDetected = { value -> runOnUiThread { showQrResult(value) } }
         controller.onFocusState = { st ->
             runOnUiThread {
-                binding.focusRing.setColorFilter(
-                    when (st) {
-                        FocusState.FOCUSED -> Color.parseColor("#4CD964")   // verde: enfocado
-                        FocusState.NOT_FOCUSED -> Color.parseColor("#FF3B30") // rojo: no pudo
-                        else -> ContextCompat.getColor(this, R.color.accent)  // ambar: buscando
-                    }
-                )
+                val c = when (st) {
+                    FocusState.FOCUSED -> Color.parseColor("#4CD964")     // verde: enfocado
+                    FocusState.NOT_FOCUSED -> Color.parseColor("#FF3B30") // rojo: no pudo
+                    else -> ContextCompat.getColor(this, R.color.accent)  // ámbar: buscando
+                }
+                binding.focusRing.backgroundTintList = android.content.res.ColorStateList.valueOf(c)
             }
         }
         controller.onHdrUnavailable = {
