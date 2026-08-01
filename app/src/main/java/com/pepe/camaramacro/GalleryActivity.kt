@@ -180,8 +180,9 @@ class GalleryActivity : AppCompatActivity() {
             // MISMA carpeta DCIM/Camera. El boton Borrar quedaba a un toque de los videos
             // personales del usuario. Ahora se filtra por PROPIETARIO (solo lo que creo
             // esta app) y los LIKE van escapados como respaldo para carpetas antiguas.
-            val porNombre = "(${MediaStore.MediaColumns.DISPLAY_NAME} LIKE 'MACRO\_%' ESCAPE '\' OR " +
-                "${MediaStore.MediaColumns.DISPLAY_NAME} LIKE 'VID\_%' ESCAPE '\')"
+            // El guion bajo se escapa con '#' (mas legible en Kotlin que la barra invertida).
+            val porNombre = "(${MediaStore.MediaColumns.DISPLAY_NAME} LIKE 'MACRO#_%' ESCAPE '#' OR " +
+                "${MediaStore.MediaColumns.DISPLAY_NAME} LIKE 'VID#_%' ESCAPE '#')"
             selection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ? AND " +
                     "(${MediaStore.MediaColumns.OWNER_PACKAGE_NAME} = ? OR $porNombre)"
