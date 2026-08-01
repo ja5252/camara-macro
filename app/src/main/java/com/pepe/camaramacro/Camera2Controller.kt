@@ -234,7 +234,12 @@ class Camera2Controller(
     val zoomLimitedByDisabledLens: Boolean
         get() = disabledLensIds.isNotEmpty()
     /** Piso de velocidad para congelar el movimiento (0 = automático, sin piso). */
-    private var shutterFloorNs = 8_000_000L // 1/125 s
+    // 1/60 s. Antes estaba en 1/125 y disparaba el ISO hasta 20.000 en interiores:
+    // congelaba el movimiento pero las fotos salían llenas de ruido. Con OIS, 1/60
+    // es de sobra para escenas normales a pulso.
+    private var shutterFloorNs = 16_666_667L
+    /** Tope de ISO al que estamos dispuestos a llegar por acortar la exposición. */
+    private val isoCeilingForFloor = 3200
 
     // Flash
     private var flashAvailable = false
@@ -1276,10 +1281,15 @@ class Camera2Controller(
      * Con ISO bajo pedimos MINIMAL (máximo detalle); con ISO alto, FAST (equilibrio).
      */
     private fun applyDetailModes(b: CaptureRequest.Builder) {
-        val lowIso = lastAeIso < 800
+        // Escalera según el ISO real: con luz buena priorizamos detalle; con ISO alto hace
+        // falta denoise de verdad o la foto se ve llena de grano al ampliarla.
         val nr = when {
-            lowIso && nrAvailable.contains(CameraMetadata.NOISE_REDUCTION_MODE_MINIMAL) ->
+            lastAeIso < 800 && nrAvailable.contains(CameraMetadata.NOISE_REDUCTION_MODE_MINIMAL) ->
                 CameraMetadata.NOISE_REDUCTION_MODE_MINIMAL
+            lastAeIso < 2000 && nrAvailable.contains(CameraMetadata.NOISE_REDUCTION_MODE_FAST) ->
+                CameraMetadata.NOISE_REDUCTION_MODE_FAST
+            nrAvailable.contains(CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY) ->
+                CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY
             nrAvailable.contains(CameraMetadata.NOISE_REDUCTION_MODE_FAST) ->
                 CameraMetadata.NOISE_REDUCTION_MODE_FAST
             else -> null
@@ -1308,10 +1318,12 @@ class Camera2Controller(
         if (lastAeExpNs <= targetExp) return false // el AE ya es suficientemente rápido
         // Conserva la exposición total: al acortar el tiempo, sube el ISO en la misma proporción.
         var iso = Math.round(lastAeIso * (lastAeExpNs.toDouble() / targetExp)).toInt()
-        if (iso > isoMax) {
-            iso = isoMax
-            // Con el ISO al tope, alarga lo justo para no subexponer (nunca más que el AE).
-            targetExp = (lastAeExpNs.toDouble() * lastAeIso / isoMax)
+        // Preferimos algo de trepidación antes que una foto llena de grano: si congelar
+        // el movimiento exige pasar del techo de ISO, se cede exposición en vez de ruido.
+        val ceiling = minOf(isoMax, isoCeilingForFloor)
+        if (iso > ceiling) {
+            iso = ceiling
+            targetExp = (lastAeExpNs.toDouble() * lastAeIso / ceiling)
                 .toLong().coerceIn(targetExp, lastAeExpNs)
         }
         b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
@@ -1932,8 +1944,35 @@ class Camera2Controller(
         onPhotoThumb?.let { cb ->
             try {
                 val opts = BitmapFactory.Options().apply { inSampleSize = 16 }
-                val thumb = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
-                if (thumb != null) activity.runOnUiThread { cb(thumb) }
+                var thumb = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                // Aplicar la rotación del EXIF: si no, la miniatura salía girada y luego
+                // "se acomodaba" al recargarse desde la galería.
+                if (thumb != null) {
+                    val deg = when (
+                        try {
+                            android.media.ExifInterface(java.io.ByteArrayInputStream(bytes))
+                                .getAttributeInt(
+                                    android.media.ExifInterface.TAG_ORIENTATION,
+                                    android.media.ExifInterface.ORIENTATION_NORMAL
+                                )
+                        } catch (e: Exception) {
+                            android.media.ExifInterface.ORIENTATION_NORMAL
+                        }
+                    ) {
+                        android.media.ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                        android.media.ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                        android.media.ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                        else -> 0f
+                    }
+                    if (deg != 0f) {
+                        val m = Matrix().apply { postRotate(deg) }
+                        val r = Bitmap.createBitmap(thumb, 0, 0, thumb.width, thumb.height, m, true)
+                        if (r != thumb) thumb.recycle()
+                        thumb = r
+                    }
+                    val out = thumb
+                    activity.runOnUiThread { cb(out) }
+                }
             } catch (e: Exception) {
             }
         }
