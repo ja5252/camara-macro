@@ -87,6 +87,9 @@ class Camera2Controller(
      */
     var onPhotoThumb: ((android.graphics.Bitmap) -> Unit)? = null
 
+    /** Se avisa justo antes de cerrar una lente para abrir otra (para el fundido). */
+    var onLensSwitching: (() -> Unit)? = null
+
     /**
      * Si está puesto, la foto NO va a la galería: se entrega aquí. Lo usa la captura
      * solicitada por otra app (ACTION_IMAGE_CAPTURE), que debe escribirla donde diga
@@ -174,10 +177,20 @@ class Camera2Controller(
      */
     fun zoomStops(): List<Pair<Float, String>> {
         if (zoomChain.isEmpty()) return emptyList()
-        return zoomChain.map { (id, base) ->
+        val out = mutableListOf<Pair<Float, String>>()
+        zoomChain.forEachIndexed { i, (id, base) ->
             val mm = lensEquivMm[id]
-            Pair(base, if (mm != null) "${mm}mm" else "ID$id")
+            // Parada ÓPTICA: cambia de lente física de verdad.
+            out.add(Pair(base, if (mm != null) "${mm}mm óptico" else "ID$id"))
+            // Paso intermedio de zoom digital, para no saltar de golpe de 1x a 4.6x.
+            val next = if (i + 1 < zoomChain.size) zoomChain[i + 1].second else base * 2.2f
+            val mid = base * 2f
+            if (mid < next - 0.2f) {
+                val midMm = if (mm != null) "${mm * 2} mm aprox." else "digital"
+                out.add(Pair(mid, midMm))
+            }
         }
+        return out
     }
     private var aeWaitAction: (() -> Unit)? = null
     private var aeWaitTimeout: Runnable? = null
@@ -666,6 +679,8 @@ class Camera2Controller(
     private fun switchToLens(targetIndex: Int) {
         if (switching) return
         switching = true
+        // Congela el último fotograma para tapar el negro del cambio de lente.
+        activity.runOnUiThread { onLensSwitching?.invoke() }
         chainIndex = targetIndex
         cameraId = zoomChain[targetIndex].first
         failed = false

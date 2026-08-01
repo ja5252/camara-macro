@@ -187,7 +187,12 @@ class CameraActivity : AppCompatActivity() {
                 val z = prefs.getFloat("zoom", 1f)
                 if (z > 1.01f) currentZoom = controller.setZoom(z)
             }
-            runOnUiThread { updateLensChip(); buildZoomStrip() }
+            runOnUiThread {
+                updateLensChip()
+                buildZoomStrip()
+                // Da un par de fotogramas a la lente nueva antes de quitar el congelado.
+                ui.postDelayed({ releaseLensFade() }, 120)
+            }
         }
         controller.onRecordingChanged = { rec -> onRecordingChanged(rec) }
         controller.onRawSaved = { ok ->
@@ -209,6 +214,7 @@ class CameraActivity : AppCompatActivity() {
             bounceThumbnail()
         }
         if (captureIntent) armIntentCapture()
+        controller.onLensSwitching = { freezeForLensSwitch() }
 
         scaleDetector = ScaleGestureDetector(
             this,
@@ -570,6 +576,36 @@ class CameraActivity : AppCompatActivity() {
             }
             true
         }
+    }
+
+    // ---- Fundido al cambiar de lente física ----
+
+    /** Congela el último fotograma para que el cambio de lente no muestre un negro. */
+    private fun freezeForLensSwitch() {
+        val t = binding.texture
+        if (t.width == 0 || t.height == 0) return
+        try {
+            val bmp = t.getBitmap(t.width, t.height) ?: return
+            binding.lensFade.layoutParams = binding.lensFade.layoutParams.apply {
+                width = t.width
+                height = t.height
+            }
+            binding.lensFade.setImageBitmap(bmp)
+            binding.lensFade.alpha = 1f
+            binding.lensFade.visibility = View.VISIBLE
+        } catch (e: Exception) {
+        }
+    }
+
+    /** Desvanece el fotograma congelado cuando la lente nueva ya está dando imagen. */
+    private fun releaseLensFade() {
+        val v = binding.lensFade
+        if (v.visibility != View.VISIBLE) return
+        v.animate().alpha(0f).setDuration(140)
+            .withEndAction {
+                v.visibility = View.GONE
+                v.setImageDrawable(null)
+            }.start()
     }
 
     // ---- Tira de zoom (una píldora por lente física real) ----

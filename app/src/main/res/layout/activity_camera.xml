@@ -13,6 +13,19 @@
         android:layout_gravity="top|center_horizontal"
         android:layout_marginBottom="@dimen/preview_bottom_inset" />
 
+    <!-- Fotograma congelado que tapa el negro mientras cambia la lente física -->
+    <ImageView
+        android:id="@+id/lens_fade"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|center_horizontal"
+        android:layout_marginBottom="@dimen/preview_bottom_inset"
+        android:contentDescription="@string/cd_thumbnail"
+        android:scaleType="centerCrop"
+        android:clickable="false"
+        android:focusable="false"
+        android:visibility="gone" />
+
     <!-- 2. Capa de gestos (tap = enfoque, pellizco = zoom) -->
     <View
         android:id="@+id/gesture_area"
@@ -83,7 +96,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|center_horizontal"
-        android:layout_marginBottom="310dp"
+        android:layout_marginBottom="372dp"
         android:background="@drawable/zoom_pill_bg"
         android:paddingHorizontal="16dp"
         android:paddingVertical="7dp"
@@ -168,7 +181,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|center_horizontal"
-        android:layout_marginBottom="134dp"
+        android:layout_marginBottom="162dp"
         android:background="@drawable/zoom_pill_bg"
         android:orientation="horizontal"
         android:padding="4dp">
@@ -235,7 +248,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|center_horizontal"
-        android:layout_marginBottom="314dp"
+        android:layout_marginBottom="372dp"
         android:background="@drawable/zoom_pill_bg"
         android:gravity="center_horizontal"
         android:orientation="vertical"
@@ -282,7 +295,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|center_horizontal"
-        android:layout_marginBottom="314dp"
+        android:layout_marginBottom="372dp"
         android:background="@drawable/zoom_pill_bg"
         android:gravity="center"
         android:orientation="horizontal"
@@ -295,7 +308,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|center_horizontal"
-        android:layout_marginBottom="314dp"
+        android:layout_marginBottom="372dp"
         android:background="@drawable/zoom_pill_bg"
         android:gravity="center"
         android:orientation="horizontal"
@@ -314,7 +327,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|center_horizontal"
-        android:layout_marginBottom="248dp"
+        android:layout_marginBottom="298dp"
         android:gravity="center"
         android:orientation="horizontal" />
 
@@ -324,7 +337,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom"
-        android:layout_marginBottom="310dp"
+        android:layout_marginBottom="372dp"
         android:gravity="center"
         android:orientation="horizontal"
         android:paddingHorizontal="24dp"
@@ -379,7 +392,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom"
-        android:layout_marginBottom="176dp"
+        android:layout_marginBottom="228dp"
         android:clipToPadding="false"
         android:paddingHorizontal="12dp"
         android:scrollbars="none"
