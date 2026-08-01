@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!--
+        Carpeta desde la que compartimos fotos con OTRAS apps. Va en la caché privada:
+        el archivo se entrega por content:// con permiso de lectura temporal, que es la
+        única forma fiable de responder a ACTION_GET_CONTENT sin depender de que el
+        llamador tenga permisos de galería.
+    -->
+    <cache-path name="compartir" path="compartir/" />
+</paths>

@@ -47,6 +47,20 @@
                 <action android:name="android.media.action.VIDEO_CAPTURE" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
+            <!-- Muchas apps NO usan IMAGE_CAPTURE sino GET_CONTENT/PICK para pedir una
+                 imagen (adjuntar documento en WhatsApp, formularios, subidas web...).
+                 Apareciendo aquí podemos ofrecer "tomar la foto ahora" con la lente buena. -->
+            <intent-filter>
+                <action android:name="android.intent.action.GET_CONTENT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.OPENABLE" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.PICK" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
         </activity>
 
         <activity
@@ -54,6 +68,17 @@
             android:exported="false"
             android:screenOrientation="portrait"
             android:configChanges="orientation|screenSize|keyboardHidden" />
+
+        <!-- Entrega de la foto a otras apps por content:// con permiso temporal -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
         <activity
             android:name=".GalleryActivity"

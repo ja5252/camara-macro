@@ -84,6 +84,7 @@ class CameraActivity : AppCompatActivity() {
     private var captureIntent = false
     private var captureVideo = false
     private var captureOutput: Uri? = null
+    private var pickContent = false
     private val ratioLabels = arrayOf("RATIO", "4:3", "16:9", "1:1", "LLENA")
     private var ratioIndex = 0
     private var fullRes = true
@@ -151,7 +152,10 @@ class CameraActivity : AppCompatActivity() {
         // ¿Nos invoca OTRA app para capturar? (banca, archivos, formularios...)
         val act = intent?.action
         captureVideo = act == MediaStore.ACTION_VIDEO_CAPTURE
-        captureIntent = captureVideo || act == MediaStore.ACTION_IMAGE_CAPTURE
+        // GET_CONTENT/PICK: otra app pide una imagen (adjuntar documento, formularios,
+        // subidas web...). Respondemos capturandola con la lente que SI funciona.
+        pickContent = act == Intent.ACTION_GET_CONTENT || act == Intent.ACTION_PICK
+        captureIntent = captureVideo || act == MediaStore.ACTION_IMAGE_CAPTURE || pickContent
         @Suppress("DEPRECATION")
         captureOutput = intent?.getParcelableExtra(MediaStore.EXTRA_OUTPUT) as? Uri
         if (captureIntent) setResult(RESULT_CANCELED) // contrato por defecto si el usuario sale
@@ -594,6 +598,22 @@ class CameraActivity : AppCompatActivity() {
                 }
                 return@sink ok
             }
+            // GET_CONTENT/PICK esperan un content:// legible, no una miniatura.
+            if (pickContent) {
+                val uri = writeSharedJpeg(bytes)
+                if (uri != null) {
+                    runOnUiThread {
+                        setResult(
+                            RESULT_OK,
+                            Intent().setDataAndType(uri, "image/jpeg")
+                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        )
+                        finish()
+                    }
+                    return@sink true
+                }
+                return@sink false
+            }
             // Sin EXTRA_OUTPUT: miniatura en "data". Máx ~400 px o revienta el Binder.
             val opts = BitmapFactory.Options().apply { inSampleSize = 8 }
             val full = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: return@sink false
@@ -638,6 +658,19 @@ class CameraActivity : AppCompatActivity() {
                 v.visibility = View.GONE
                 v.setImageDrawable(null)
             }.start()
+    }
+
+    /** Escribe la foto en la caché privada y la expone por content:// para otra app. */
+    private fun writeSharedJpeg(bytes: ByteArray): Uri? = try {
+        val dir = java.io.File(cacheDir, "compartir").apply { if (!exists()) mkdirs() }
+        dir.listFiles()?.forEach { if (it.isFile) it.delete() } // no acumular basura
+        val f = java.io.File(dir, "captura_${System.currentTimeMillis()}.jpg")
+        java.io.FileOutputStream(f).use { it.write(bytes) }
+        androidx.core.content.FileProvider.getUriForFile(
+            this, "$packageName.fileprovider", f
+        )
+    } catch (e: Exception) {
+        null
     }
 
     // ---- Tira de zoom (una píldora por lente física real) ----
