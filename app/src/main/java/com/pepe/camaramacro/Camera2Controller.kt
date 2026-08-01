@@ -2273,13 +2273,17 @@ class Camera2Controller(
         maxHeight: Int,
         aspectRatio: Size
     ): Size {
-        val w = aspectRatio.width
-        val h = aspectRatio.height
+        if (choices.isEmpty()) return Size(1920, 1080)
+        val target = aspectRatio.width.toFloat() / aspectRatio.height
         val bigEnough = ArrayList<Size>()
         val notBigEnough = ArrayList<Size>()
         for (option in choices) {
+            // Antes se exigía coincidencia ENTERA exacta de la proporción. Si ningún tamaño
+            // de vista previa encajaba, se caía al más grande sin más, que suele ser 4:3:
+            // por eso el visor salía en 4:3 estando la foto en 16:9, y aparecía una franja
+            // negra enorme. Ahora se admite tolerancia y el respaldo respeta la proporción.
             if (option.width <= maxWidth && option.height <= maxHeight &&
-                option.height == option.width * h / w
+                kotlin.math.abs(option.width.toFloat() / option.height - target) < 0.04f
             ) {
                 if (option.width >= viewWidth && option.height >= viewHeight) {
                     bigEnough.add(option)
@@ -2291,7 +2295,12 @@ class Camera2Controller(
         return when {
             bigEnough.isNotEmpty() -> bigEnough.minByOrNull { it.width.toLong() * it.height }!!
             notBigEnough.isNotEmpty() -> notBigEnough.maxByOrNull { it.width.toLong() * it.height }!!
-            else -> choices.maxByOrNull { it.width.toLong() * it.height } ?: choices[0]
+            // Respaldo: el que MÁS se parezca a la proporción de la foto, no el más grande.
+            else -> choices
+                .filter { it.width <= maxWidth && it.height <= maxHeight }
+                .minByOrNull { kotlin.math.abs(it.width.toFloat() / it.height - target) }
+                ?: choices.minByOrNull { kotlin.math.abs(it.width.toFloat() / it.height - target) }
+                ?: choices[0]
         }
     }
 

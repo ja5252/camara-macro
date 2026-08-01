@@ -680,14 +680,17 @@ class CameraActivity : AppCompatActivity() {
         val stops = controller.zoomStops()
         binding.zoomStrip.removeAllViews()
         if (stops.size < 2) return // con una sola lente no aporta nada
-        val pad = dp(11f).toInt()
+        // TODAS las píldoras iguales: mismo tamaño, misma tipografía y mismo ancho mínimo.
+        // Antes las ópticas iban en negrita y más grandes y la fila se veía desigual;
+        // ahora lo óptico se distingue por COLOR, no por tamaño.
+        val pad = dp(10f).toInt()
+        val minW = dp(52f).toInt()
         stops.forEach { (z, label, optical) ->
             val tv = TextView(this).apply {
                 text = label
-                textSize = if (optical) 14f else 12.5f
-                // Las paradas ópticas (lente física real) van en negrita: son las que
-                // dan calidad de verdad, frente al zoom digital.
-                setTypeface(null, if (optical) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+                textSize = 13f
+                minWidth = minW
+                setTypeface(null, android.graphics.Typeface.NORMAL)
                 setPadding(pad, dp(9f).toInt(), pad, dp(9f).toInt())
                 minHeight = dp(48f).toInt() // objetivo táctil accesible
                 gravity = android.view.Gravity.CENTER
@@ -715,9 +718,13 @@ class CameraActivity : AppCompatActivity() {
         var active = 0
         stops.forEachIndexed { i, t -> if (currentZoom >= t.first - 0.01f) active = i }
         for (i in 0 until binding.zoomStrip.childCount) {
+            val esOptica = stops.getOrNull(i)?.third == true
             (binding.zoomStrip.getChildAt(i) as? TextView)?.setTextColor(
-                if (i == active) ContextCompat.getColor(this, R.color.accent)
-                else Color.parseColor("#B3FFFFFF")
+                when {
+                    i == active -> ContextCompat.getColor(this, R.color.accent) // activa
+                    esOptica -> Color.WHITE          // lente física real: blanco pleno
+                    else -> Color.parseColor("#8CFFFFFF") // zoom digital: atenuado
+                }
             )
         }
     }
