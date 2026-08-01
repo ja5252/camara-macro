@@ -175,10 +175,24 @@ class GalleryActivity : AppCompatActivity() {
         val args: Array<String>
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             // Anclado al inicio: no atrapa "CamaraMacro2" ni otras carpetas.
-            selection = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ? AND " +
-                "(${MediaStore.MediaColumns.DISPLAY_NAME} LIKE 'MACRO_%' OR " +
-                "${MediaStore.MediaColumns.DISPLAY_NAME} LIKE 'VID_%')"
-            args = arrayOf("$relPath/%")
+            // PELIGRO EVITADO: en SQL el guion bajo es COMODIN, asi que 'VID_%' casaba
+            // tambien con los VID_20250801_... de la camara de fabrica, que viven en la
+            // MISMA carpeta DCIM/Camera. El boton Borrar quedaba a un toque de los videos
+            // personales del usuario. Ahora se filtra por PROPIETARIO (solo lo que creo
+            // esta app) y los LIKE van escapados como respaldo para carpetas antiguas.
+            val porNombre = "(${MediaStore.MediaColumns.DISPLAY_NAME} LIKE 'MACRO\_%' ESCAPE '\' OR " +
+                "${MediaStore.MediaColumns.DISPLAY_NAME} LIKE 'VID\_%' ESCAPE '\')"
+            selection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ? AND " +
+                    "(${MediaStore.MediaColumns.OWNER_PACKAGE_NAME} = ? OR $porNombre)"
+            } else {
+                "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ? AND $porNombre"
+            }
+            args = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                arrayOf("$relPath/%", packageName)
+            } else {
+                arrayOf("$relPath/%")
+            }
         } else {
             @Suppress("DEPRECATION")
             selection = "${MediaStore.MediaColumns.DATA} LIKE ?"

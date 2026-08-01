@@ -178,6 +178,9 @@ class Camera2Controller(
     private var afWaitTimeout: Runnable? = null
     private var lastAeState = -1
     private var lastSavedUri: Uri? = null
+    /** URI de lo ultimo que se guardo: la miniatura y compartir deben usar ESTO,
+     *  no una busqueda en MediaStore que puede apuntar a la carpeta equivocada. */
+    val ultimoGuardado: Uri? get() = lastSavedUri
     private val lensEquivMm = mutableMapOf<String, Int>()
 
     /**
@@ -508,6 +511,7 @@ class Camera2Controller(
                 if (cb != null) {
                     pendingResult = null
                     Log.e("CamMacro", "captura sin respuesta: liberando el obturador")
+                    unlockFocusAfterShot()
                     activity.runOnUiThread { cb.invoke(false) }
                 }
             }
@@ -581,7 +585,8 @@ class Camera2Controller(
         pendingResult = null
         captureWatchdog?.let { uiHandler.removeCallbacks(it) }
         captureWatchdog = null
-        clearAfAeWaits() // si no, un temporizador huérfano dispara una foto fantasma
+        clearAfAeWaits()
+        unlockFocusAfterShot() // cualquier cancelacion debe soltar el enfoque // si no, un temporizador huérfano dispara una foto fantasma
         try { pendingRawImage?.close() } catch (e: Exception) {}
         pendingRawImage = null
         pendingRawResult = null
@@ -2455,6 +2460,7 @@ class Camera2Controller(
                 }
                 val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
                     ?: return null
+                lastSavedUri = uri
                 val pfd = resolver.openFileDescriptor(uri, "w") ?: return null
                 videoPfd = pfd
                 Pair(pfd.fileDescriptor, uri)

@@ -878,7 +878,7 @@ class CameraActivity : AppCompatActivity() {
 
     // ---- Miniatura / galería ----
     private fun refreshThumbnail() {
-        val uri = latestMediaUri()
+        val uri = latestOwnUri()
         if (uri != null) binding.thumbnailImage.load(uri)
     }
 
@@ -909,7 +909,7 @@ class CameraActivity : AppCompatActivity() {
     }
 
     private fun shareLatestToWhatsApp() {
-        val uri = latestMediaUri() ?: return
+        val uri = latestOwnUri() ?: return
         val base = Intent(Intent.ACTION_SEND)
             .setType("image/jpeg")
             .putExtra(Intent.EXTRA_STREAM, uri)
@@ -929,11 +929,16 @@ class CameraActivity : AppCompatActivity() {
         }
     }
 
+    /** Lo ultimo guardado por NOSOTROS. Preferimos la URI directa del motor: buscar en
+     *  MediaStore fallaba desde que guardamos en DCIM/Camera en vez de Pictures. */
+    private fun latestOwnUri(): Uri? =
+        (if (::controller.isInitialized) controller.ultimoGuardado else null) ?: latestMediaUri()
+
     private fun latestMediaUri(): Uri? {
         val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
         val projection = arrayOf(MediaStore.Images.Media._ID)
         val selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
-        val args = arrayOf("%Pictures/CamaraMacro%")
+        val args = arrayOf("%DCIM/Camera%")
         val sort = "${MediaStore.Images.Media.DATE_ADDED} DESC"
         return try {
             contentResolver.query(collection, projection, selection, args, sort)?.use { c ->
