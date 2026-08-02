@@ -34,11 +34,15 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Compilar APK (debug)
-        run: gradle assembleDebug --no-daemon --stacktrace
+      # RELEASE, no debug. Todas las versiones anteriores se publicaron como
+      # assembleDebug: binario "debuggable", sin R8 y con ART sin optimizar, o sea
+      # el peor arranque posible. Misma llave de firma, así que se instala encima
+      # de la que ya está sin desinstalar ni perder ajustes.
+      - name: Compilar APK (release)
+        run: gradle assembleRelease --no-daemon --stacktrace
 
       - name: Renombrar APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk camara-macro.apk
+        run: cp app/build/outputs/apk/release/app-release.apk camara-macro.apk
 
       - name: Publicar APK en Releases
         uses: softprops/action-gh-release@v2

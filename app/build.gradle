@@ -30,7 +30,12 @@ android {
             signingConfig signingConfigs.camara
         }
         release {
-            minifyEnabled false
+            // R8: recorta y optimiza el bytecode. Baja el tamaño del APK y, sobre todo,
+            // arranca antes. Las librerías (ML Kit, Coil, Material) traen sus propias
+            // reglas de consumo, así que solo hace falta proteger lo nuestro.
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             signingConfig signingConfigs.camara
         }
     }
