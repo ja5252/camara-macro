@@ -31,7 +31,11 @@ import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.MeteringRectangle
 import android.hardware.camera2.params.RggbChannelVector
 import android.hardware.camera2.params.TonemapCurve
-import android.media.ExifInterface
+// La de AndroidX, no la del framework: android.media.ExifInterface no tiene TAG_LENS_MODEL
+// ni setLatLong/setAltitude, que hacen falta para dejar constancia de con qué lente se tomó
+// la foto y para geoetiquetar la ruta de noche (que compone el JPEG a mano y perdería el GPS).
+// Las constantes son las mismas y valen lo mismo, así que el resto del fichero no cambia.
+import androidx.exifinterface.media.ExifInterface
 import android.media.Image
 import android.media.ImageReader
 import android.media.MediaRecorder

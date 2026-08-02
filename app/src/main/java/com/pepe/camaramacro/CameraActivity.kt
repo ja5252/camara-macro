@@ -1271,7 +1271,9 @@ class CameraActivity : AppCompatActivity() {
      * FLAG_ACTIVITY_SINGLE_TOP (lo hacen bastantes selectores de archivos). No se cambia a
      * singleTop porque afectaría al ciclo de vida de la sesión de cámara.
      */
-    override fun onNewIntent(intent: Intent?) {
+    // El parámetro va SIN nullable: AppCompatActivity 1.7 lo declara @NonNull y con Intent?
+    // no sobrescribe nada (el compilador avisa con "overrides nothing").
+    override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
         if (!::controller.isInitialized) return
