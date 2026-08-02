@@ -409,7 +409,13 @@ class CameraActivity : AppCompatActivity() {
     }
 
     private val hideZoom = Runnable {
-        binding.zoomPill.animate().alpha(0f).setDuration(200).start()
+        // GONE al terminar, no solo alpha 0. Con alpha 0 la pastilla es invisible pero
+        // SIGUE OCUPANDO SU ALTURA: medido con uiautomator, se comia unos 180 px de la
+        // franja de control de forma permanente, o sea casi el 7% de la pantalla dedicado
+        // a un hueco que no se ve nunca. Esa era buena parte de la "franja negra enorme".
+        binding.zoomPill.animate().alpha(0f).setDuration(200)
+            .withEndAction { binding.zoomPill.visibility = View.GONE }
+            .start()
     }
 
     private val requestCamera =
@@ -2295,6 +2301,7 @@ class CameraActivity : AppCompatActivity() {
             v.setPadding(pi, ps, pd, pb)
         }
         binding.zoomPill.animate().cancel()
+        binding.zoomPill.visibility = View.VISIBLE
         binding.zoomPill.alpha = 1f
         ui.removeCallbacks(hideZoom)
         // La píldora solo se esconde si el zoom ha quedado clavado en una parada, porque

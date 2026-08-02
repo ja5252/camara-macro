@@ -564,8 +564,8 @@
         android:focusable="false"
         android:importantForAccessibility="no"
         android:orientation="vertical"
-        android:paddingTop="14dp"
-        android:paddingBottom="16dp"
+        android:paddingTop="6dp"
+        android:paddingBottom="10dp"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent">
@@ -1257,6 +1257,7 @@
             android:layout_gravity="center_horizontal"
             android:layout_marginTop="12dp"
             android:alpha="0"
+            android:visibility="gone"
             android:background="@drawable/zoom_pill_bg"
             android:clickable="false"
             android:focusable="false"
