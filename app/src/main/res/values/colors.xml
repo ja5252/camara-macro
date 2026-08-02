@@ -10,4 +10,34 @@
     <color name="panel">#B3000000</color>
     <color name="scrim">#CC000000</color>
     <color name="error_bg">#CC2A1500</color>
+
+    <!--
+        Tokens de texto del HUD. Antes estaban escritos a mano dentro de CameraActivity
+        (Color.parseColor("#CCFFFFFF") y "#8CFFFFFF" repetidos en catorce sitios):
+        cambiar el contraste obligaba a tocar catorce líneas de Kotlin y siempre se
+        quedaba alguna sin cambiar, así que la barra superior nunca era homogénea.
+        text_primary es blanco pleno porque el 80% de blanco sobre una escena quemada
+        no llegaba al 4,5:1 que el jurado midió como criterio de aceptación.
+    -->
+    <color name="text_primary">#FFFFFFFF</color>
+    <color name="text_dim">#E6FFFFFF</color>
+    <color name="text_off">#99FFFFFF</color>
+
+    <!--
+        Verde y rojo del anillo de enfoque. Los anteriores (#4CD964 y #FF3B30) eran
+        literalmente la paleta de iOS y chocaban con el ámbar de la app. Estos están
+        desplazados hacia el cálido para convivir con el acento.
+    -->
+    <color name="focus_ok">#FF6FD68C</color>
+    <color name="focus_fail">#FFFF6B4A</color>
+
+    <!--
+        Superficies del HUD: dos niveles de elevación de la misma familia.
+        surface_chip estaba en 40% de negro y los chips desaparecían sobre fondo claro.
+    -->
+    <color name="surface_chip">#99000000</color>
+    <color name="surface_panel">#D9000000</color>
+    <color name="hairline">#33FFFFFF</color>
+    <!-- Ámbar al 18%: fondo de la parada de zoom seleccionada. -->
+    <color name="accent_soft">#2EFF9E00</color>
 </resources>

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Identificadores de las acciones accesibles del visor.
+    El area de gestos concentra enfoque por toque, pellizco de zoom, doble toque y
+    pulsacion larga para bloquear AE/AF, y no tenia NINGUNA accion accesible: sin
+    vista, 692x716dp de visor no servian para nada.
+-->
+<resources>
+    <item name="action_focus_center" type="id" />
+    <item name="action_ae_lock" type="id" />
+</resources>

@@ -49,8 +49,108 @@
     <string name="lens_min_one">Debe quedar al menos una lente activa</string>
 
     <string name="ae_af_locked">AE/AF BLOQUEADO</string>
+    <string name="ae_af_unlocked">Exposición y enfoque desbloqueados</string>
 
     <!-- WhatsApp -->
     <string name="share_whatsapp">Tomar foto y enviar por WhatsApp</string>
     <string name="no_whatsapp">WhatsApp no está instalado</string>
+
+    <!-- ============ Secciones del panel "Más" ============
+         Antes era una rejilla de chips crípticos (HDR, RAW, FULL, LENTES, ⟲ atrás,
+         ✦ Normal, PRO) sin una sola etiqueta que dijera qué hacen. -->
+    <string name="sec_image">Calidad de imagen</string>
+    <string name="sec_lenses">Lentes y cámara</string>
+    <string name="sec_tools">Herramientas</string>
+
+    <!-- ============ Nombres humanos de las lentes ============
+         "ID3 · 15 MM · 0.6X" es jerga de programador en la pantalla de uso diario.
+         El identificador sigue estando en la pantalla de elección de lente. -->
+    <string name="lens_wide">Gran angular</string>
+    <string name="lens_main">Principal</string>
+    <string name="lens_tele">Teleobjetivo</string>
+    <string name="lens_front">Frontal</string>
+    <string name="lens_digital">digital</string>
+    <string name="lens_off_one">1 lente apagada</string>
+    <string name="lens_off_many">%1$d lentes apagadas</string>
+
+    <!-- ============ Accesibilidad ============ -->
+    <string name="cd_viewfinder">Visor. Toca para enfocar, mantén pulsado para bloquear exposición y enfoque</string>
+    <string name="cd_focus_center">Enfocar al centro</string>
+    <string name="cd_toggle_ae_lock">Bloquear o desbloquear exposición y enfoque</string>
+    <string name="cd_flash">Flash: %1$s</string>
+    <string name="cd_timer">Temporizador: %1$s</string>
+    <string name="cd_grid">Cuadrícula y nivel: %1$s</string>
+    <string name="cd_night">Modo noche: %1$s</string>
+    <string name="cd_more">Más opciones</string>
+    <string name="cd_hdr">Ultra HDR: %1$s</string>
+    <string name="cd_raw">RAW más JPEG: %1$s</string>
+    <string name="cd_filter">Filtro de color: %1$s</string>
+    <string name="cd_pro">Controles manuales: %1$s</string>
+    <string name="cd_ratio">Proporción de la foto: %1$s</string>
+    <string name="cd_res">Resolución: %1$s</string>
+    <string name="cd_lenses">Elegir qué lentes entran en el zoom</string>
+    <string name="cd_flip">Cambiar entre cámara trasera y frontal. Ahora: %1$s</string>
+    <string name="cd_wa">Tomar foto y enviarla por WhatsApp</string>
+    <string name="cd_vid">Ajustes de video</string>
+    <string name="cd_vres">Resolución de video: %1$s</string>
+    <string name="cd_vfps">Fotogramas por segundo: %1$s</string>
+    <string name="cd_vcodec">Códec de video: %1$s</string>
+    <string name="cd_tl">Time-lapse: %1$s</string>
+    <string name="cd_ev">Compensación de exposición</string>
+    <string name="cd_iso">Sensibilidad ISO</string>
+    <string name="cd_vel">Velocidad de obturación</string>
+    <string name="cd_wb">Balance de blancos: %1$s</string>
+    <string name="cd_kelvin">Temperatura de color en kelvin</string>
+    <string name="cd_auto">Volver todo a automático</string>
+    <string name="cd_pro_slider">Ajuste del parámetro seleccionado</string>
+    <string name="cd_ev_slider">Exposición rápida</string>
+    <string name="cd_mode_photo">Modo foto</string>
+    <string name="cd_mode_video">Modo video</string>
+    <string name="cd_zoom_optical">Zoom %1$s, lente óptica real</string>
+    <string name="cd_zoom_digital">Zoom %1$s, recorte digital</string>
+    <string name="cd_qr_copy">Copiar el código al portapapeles</string>
+    <string name="cd_qr_open">Abrir el enlace del código</string>
+    <string name="cd_qr_close">Cerrar el aviso del código</string>
+    <string name="cd_rec_time">Tiempo grabado</string>
+    <string name="cd_countdown">Cuenta atrás del temporizador</string>
+    <string name="state_on">activado</string>
+    <string name="state_off">desactivado</string>
+    <string name="state_auto">automático</string>
+    <string name="state_torch">linterna</string>
+
+    <!-- ============ Avisos efímeros (sustituyen a los Toast) ============ -->
+    <string name="hint_night_on">Modo noche activado</string>
+    <string name="hint_night_off">Modo noche desactivado</string>
+    <string name="hint_raw_on">RAW + JPEG</string>
+    <string name="hint_raw_off">Solo JPEG</string>
+    <string name="hint_hdr_on">Ultra HDR activado</string>
+    <string name="hint_hdr_off">Ultra HDR desactivado</string>
+    <string name="hint_burst">Ráfaga</string>
+    <string name="hint_copied">Código copiado</string>
+    <string name="hint_no_raw">Esta lente no admite RAW</string>
+    <string name="hint_no_hdr">Esta lente no admite Ultra HDR</string>
+    <string name="hint_no_manual_wb">Esta lente no admite balance manual</string>
+    <string name="hint_no_front">No hay cámara frontal disponible</string>
+    <string name="hint_only_photo">Solo en modo foto</string>
+
+    <!-- ============ Plegable: espejo en la pantalla externa ============ -->
+    <string name="mirror">Espejo</string>
+    <string name="mirror_on">Espejo en la pantalla externa activado</string>
+    <string name="mirror_off">Espejo en la pantalla externa desactivado</string>
+    <string name="mirror_failed">La pantalla externa no aceptó el espejo</string>
+    <string name="mirror_hint">Toca esta pantalla para disparar</string>
+    <string name="cd_mirror">Espejo en la pantalla externa: %1$s</string>
+    <string name="cd_mirror_view">Vista previa espejada en la pantalla externa</string>
+
+    <!-- ============ Etiquetas de la barra ============ -->
+    <string name="chip_hdr">HDR</string>
+    <string name="chip_raw">RAW</string>
+    <string name="chip_pro">PRO</string>
+    <string name="chip_lenses">LENTES</string>
+    <string name="chip_full">FULL</string>
+    <string name="chip_med">MED</string>
+    <string name="chip_wa">WHATSAPP</string>
+    <string name="night_stacking">Apilando…</string>
+    <string name="qr_detected">Código detectado · toca para ver</string>
+    <string name="cd_lens_chip">Lente %1$s: %2$s</string>
 </resources>

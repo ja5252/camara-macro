@@ -1,5 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    Superficie de CHIP (nivel 1 de la escala 8 / 16 / 28dp).
+    Estaba en #66000000 (40% de negro) con texto #CCFFFFFF: sobre la escena de la
+    cocina a contraluz eso daba ~1,8:1 y la fila superior de chips desaparecia.
+    Subimos el fondo al 60% y anadimos un filo de 1dp para que el chip tenga borde
+    propio incluso sobre una pared blanca quemada.
+-->
 <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
-    <solid android:color="#66000000" />
+    <solid android:color="@color/surface_chip" />
+    <stroke android:width="1dp" android:color="@color/hairline" />
     <corners android:radius="8dp" />
 </shape>

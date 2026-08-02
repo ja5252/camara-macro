@@ -5,9 +5,10 @@ import android.annotation.SuppressLint
 import android.content.ContentUris
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Color
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.RenderEffect
 import android.hardware.Sensor
@@ -31,6 +32,7 @@ import android.view.View
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import android.view.animation.OvershootInterpolator
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.TextView
@@ -38,6 +40,9 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.view.AccessibilityDelegateCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.accessibility.AccessibilityNodeInfoCompat
 import coil.load
 import com.pepe.camaramacro.databinding.ActivityCameraBinding
 import java.util.Locale
@@ -53,6 +58,8 @@ class CameraActivity : AppCompatActivity() {
 
     private var mode = "photo"
     private var capturing = false
+    /** El dedo está sobre el obturador: se precalienta el AF y se calla el escáner. */
+    private var shutterHeld = false
     private var burstRemaining = 0
     private var currentZoom = 1f
     private var zoomRestored = false
@@ -91,7 +98,9 @@ class CameraActivity : AppCompatActivity() {
     private var disabledLenses = HashSet<String>()
     private var nightOn = false
     private var qrValue: String? = null
-    private var qrDismissed: String? = null
+    // Lista, no un solo valor: con una sola variable el aviso volvía a saltar en cuanto
+    // entraba en cuadro un código distinto del que se acababa de descartar.
+    private val qrDismissedList = HashSet<String>()
     private var countdownRunnable: Runnable? = null
     private var filterIndex = 0
     private val vresList = intArrayOf(1080, 2160, 720)
@@ -119,7 +128,24 @@ class CameraActivity : AppCompatActivity() {
     private lateinit var scaleDetector: ScaleGestureDetector
     private lateinit var gestureDetector: GestureDetector
 
-    private val dimWhite = Color.parseColor("#99FFFFFF")
+    /**
+     * Espejo del visor en la pantalla externa del plegable. Puede no llegar a existir:
+     * solo se enciende si el sistema publica de verdad la pantalla de cubierta.
+     */
+    private var mirror: CoverMirror? = null
+
+    // ---- Colores del HUD ----
+    // Estaban escritos a mano como Color.parseColor("#CCFFFFFF") / "#8CFFFFFF" /
+    // "#4CD964" / "#FF3B30" repartidos por catorce sitios de este fichero: subir el
+    // contraste obligaba a cambiarlos uno a uno y siempre quedaba alguno sin tocar,
+    // así que la barra superior nunca era homogénea. Ahora salen de colors.xml.
+    private val cAccent by lazy { ContextCompat.getColor(this, R.color.accent) }
+    private val cDim by lazy { ContextCompat.getColor(this, R.color.text_dim) }
+    private val cOff by lazy { ContextCompat.getColor(this, R.color.text_off) }
+    private val cWhite by lazy { ContextCompat.getColor(this, R.color.text_primary) }
+    private val cWarm by lazy { ContextCompat.getColor(this, R.color.warm_white) }
+    private val cFocusOk by lazy { ContextCompat.getColor(this, R.color.focus_ok) }
+    private val cFocusFail by lazy { ContextCompat.getColor(this, R.color.focus_fail) }
 
     private var recStart = 0L
     private val tick = object : Runnable {
@@ -193,12 +219,19 @@ class CameraActivity : AppCompatActivity() {
                 if (z > 1.01f) currentZoom = controller.setZoom(z)
             }
             runOnUiThread {
+                syncPreviewGravity()
+                syncRatioChip()
                 updateLensChip()
                 buildZoomStrip()
                 // Da un par de fotogramas a la lente nueva antes de quitar el congelado.
                 ui.postDelayed({ releaseLensFade() }, 120)
             }
         }
+        // El motor puede apagar RAW/HDR/noche/QR por su cuenta (son excluyentes entre
+        // sí y dependen de la lente). Sin este aviso los chips se quedaban encendidos
+        // mintiendo sobre un modo que ya no estaba activo.
+        controller.onCaptureModesChanged = { runOnUiThread { syncCaptureModeChips() } }
+        controller.onFirstFrame = { runOnUiThread { syncPreviewGravity() } }
         controller.onRecordingChanged = { rec -> onRecordingChanged(rec) }
         controller.onRawSaved = { ok ->
             if (!ok) runOnUiThread {
@@ -207,25 +240,25 @@ class CameraActivity : AppCompatActivity() {
         }
         controller.onRawUnavailable = {
             runOnUiThread {
-                Toast.makeText(this, R.string.raw_unavailable, Toast.LENGTH_LONG).show()
-                binding.chipRaw.setTextColor(Color.parseColor("#CCFFFFFF"))
+                hint(getString(R.string.raw_unavailable))
+                setChipState(binding.chipRaw, false, R.string.cd_raw)
             }
         }
         controller.onQrDetected = { value -> runOnUiThread { showQrResult(value) } }
         controller.onFocusState = { st ->
             runOnUiThread {
                 val c = when (st) {
-                    FocusState.FOCUSED -> Color.parseColor("#4CD964")     // verde: enfocado
-                    FocusState.NOT_FOCUSED -> Color.parseColor("#FF3B30") // rojo: no pudo
-                    else -> ContextCompat.getColor(this, R.color.accent)  // ámbar: buscando
+                    FocusState.FOCUSED -> cFocusOk       // verde: enfocado
+                    FocusState.NOT_FOCUSED -> cFocusFail // rojo: no pudo
+                    else -> cAccent                      // ámbar: buscando
                 }
-                binding.focusRing.backgroundTintList = android.content.res.ColorStateList.valueOf(c)
+                binding.focusRing.backgroundTintList = ColorStateList.valueOf(c)
             }
         }
         controller.onHdrUnavailable = {
             runOnUiThread {
-                Toast.makeText(this, "Ultra HDR no disponible en esta lente", Toast.LENGTH_LONG).show()
-                binding.chipHdr.setTextColor(chipColor(false))
+                hint(getString(R.string.hint_no_hdr))
+                setChipState(binding.chipHdr, false, R.string.cd_hdr)
             }
         }
         // La miniatura se pinta al instante desde el JPEG en memoria (antes esperaba a
@@ -281,6 +314,20 @@ class CameraActivity : AppCompatActivity() {
             if (mode == "video") toggleRecord() else startPhotoOrTimer()
         }
         binding.btnShutter.setOnLongClickListener { startBurst(); true }
+        // Devuelve SIEMPRE false para no robarle el clic ni la pulsación larga al botón:
+        // esto solo escucha. En ACTION_DOWN se precalienta el autofoco, que es el único
+        // adelanto real de latencia posible sin reprocesado, y se corta el escaneo de
+        // códigos mientras el dedo está puesto.
+        binding.btnShutter.setOnTouchListener { _, ev ->
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    shutterHeld = true
+                    if (mode == "photo" && !capturing) controller.prewarmAf()
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> shutterHeld = false
+            }
+            false
+        }
         binding.btnChangeLens.setOnClickListener { goToSetup() }
         binding.thumbnail.setOnClickListener { openGallery() }
         // El hueco junto al obturador es el sitio canónico del cambio de cámara, no de una
@@ -311,12 +358,10 @@ class CameraActivity : AppCompatActivity() {
         binding.chipFlip.setOnClickListener { flipCamera() }
         binding.chipRaw.setOnClickListener { toggleRaw() }
         binding.chipNight.setOnClickListener { toggleNight() }
+        binding.qrHint.setOnClickListener { openQrCard() }
         binding.btnQrOpen.setOnClickListener { openQr() }
         binding.btnQrCopy.setOnClickListener { copyQr() }
-        binding.btnQrClose.setOnClickListener {
-            qrDismissed = qrValue
-            binding.qrCard.visibility = View.GONE
-        }
+        binding.btnQrClose.setOnClickListener { dismissQr() }
         binding.chipRatio.setOnClickListener { cycleRatio() }
         binding.chipRes.setOnClickListener { toggleRes() }
         binding.chipLenses.setOnClickListener { toggleLensPanel() }
@@ -342,9 +387,108 @@ class CameraActivity : AppCompatActivity() {
         binding.chipVcodec.setOnClickListener { toggleVcodec() }
         binding.chipTl.setOnClickListener { toggleTl() }
 
+        setUpCoverMirror()
+        setUpAccessibility()
+
         // Si nos invoca otra app, el modo lo fija armIntentCapture: no pisarlo.
         if (!captureIntent) setMode(prefs.getString("mode", "photo") ?: "photo")
         restoreSettings()
+    }
+
+    // ================= PLEGABLE =================
+
+    /**
+     * Al plegar y desplegar el teléfono la Activity YA NO se recrea (el manifiesto
+     * declara screenLayout y smallestScreenSize). Aquí solo hay que reajustar el visor:
+     * la cámara sigue abierta, así que desaparecen los 539-572 ms de pantalla en negro
+     * y no se pierden ni el zoom ni el modo ni los ajustes en curso.
+     *
+     * Lo único que hay que reponer a mano es coverMode: el motor lo decide una sola vez
+     * al configurar las salidas leyendo el bool preview_fills_screen, y ese bool cambia
+     * de valor al pasar de la pantalla de cubierta a la interior. Si no se repone, el
+     * visor se queda con el criterio de la pantalla anterior. Al cambiarlo se dispara
+     * un requestLayout, el TextureView cambia de tamaño y el propio motor recalcula la
+     * matriz de transformación en onSurfaceTextureSizeChanged: no hace falta (ni se
+     * debe) cerrar el CameraDevice.
+     */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (!::controller.isInitialized) return
+        syncPreviewGravity()
+        // El HUD se recoloca solo: cuelga del rectángulo del visor, no de la pantalla.
+        binding.previewFrame.requestLayout()
+        // Las paradas de zoom se reconstruyen con el nuevo ancho de píldora de dimens.
+        buildZoomStrip()
+    }
+
+    /**
+     * Alinea el visor con el modo de encuadre y replica la gravedad en el fotograma
+     * congelado del cambio de lente.
+     *
+     * El TextureView estaba clavado a top|center_horizontal SIEMPRE. En la pantalla
+     * interior, con el visor en modo LLENAR y 16:9, se medía a 692x1230dp dentro de un
+     * padre de 716dp: los 514dp que sobraban (el 41,8% del encuadre) se perdían TODOS
+     * por abajo y 0dp por arriba, así que lo que el usuario centraba en pantalla acababa
+     * al 29% de altura del fotograma real. Centrado, el recorte se reparte arriba y
+     * abajo, que es lo que cualquiera espera al encuadrar.
+     */
+    private fun syncPreviewGravity() {
+        // Mismo criterio que usa el motor al configurar las salidas, con su API pública:
+        // el recorte se aplica si el usuario pidió LLENA o si la pantalla lo pide.
+        val cover = controller.currentAspect == AspectRatio.FULL ||
+            resources.getBoolean(R.bool.preview_fills_screen)
+        val g = if (cover) android.view.Gravity.CENTER
+        else android.view.Gravity.TOP or android.view.Gravity.CENTER_HORIZONTAL
+        (binding.texture.layoutParams as? FrameLayout.LayoutParams)?.let {
+            if (it.gravity != g) {
+                it.gravity = g
+                binding.texture.layoutParams = it
+            }
+        }
+        if (binding.texture.coverMode != cover) binding.texture.coverMode = cover
+    }
+
+    /** El chip de proporción nacía con "16:9" escrito en el XML mientras las fotos
+     *  salían en 4:3: en una app cuyo valor es decir la verdad sobre la óptica, el HUD
+     *  no puede equivocarse sobre el encuadre. Ahora se lee del motor. */
+    private fun syncRatioChip() {
+        val real = controller.currentAspect.ordinal.coerceIn(0, ratioLabels.size - 1)
+        if (real != ratioIndex) ratioIndex = real
+        binding.chipRatio.text = ratioLabels[ratioIndex]
+        setChipState(binding.chipRatio, ratioIndex != 0, R.string.cd_ratio, ratioLabels[ratioIndex])
+    }
+
+    /** Prepara el espejo de la pantalla externa. El chip solo aparece si esa pantalla
+     *  existe de verdad: prometer un botón que no hace nada es peor que no tenerlo. */
+    private fun setUpCoverMirror() {
+        val m = CoverMirror(this, binding.texture)
+        m.onShutter = {
+            // Disparo desde la pantalla externa: es para lo que sirve el espejo.
+            if (mode == "video") toggleRecord() else startPhotoOrTimer()
+        }
+        m.onAvailabilityChanged = { available ->
+            runOnUiThread {
+                binding.chipMirror.visibility = if (available) View.VISIBLE else View.GONE
+                if (!available) setChipState(binding.chipMirror, false, R.string.cd_mirror)
+            }
+        }
+        binding.chipMirror.setOnClickListener { toggleMirror() }
+        mirror = m
+    }
+
+    private fun toggleMirror() {
+        val m = mirror ?: return
+        if (m.isShowing) {
+            m.hide()
+            setChipState(binding.chipMirror, false, R.string.cd_mirror)
+            hint(getString(R.string.mirror_off))
+            return
+        }
+        // Distinguimos "apagado" de "la pantalla externa no lo aceptó": si se falla en
+        // silencio, el usuario pulsa el chip tres veces creyendo que no responde.
+        val ok = m.show()
+        setChipState(binding.chipMirror, ok, R.string.cd_mirror)
+        hint(getString(if (ok) R.string.mirror_on else R.string.mirror_failed))
     }
 
     /** Reabre con los últimos ajustes (flash, temporizador, cuadrícula). */
@@ -352,23 +496,15 @@ class CameraActivity : AppCompatActivity() {
         // Flash: el modo linterna (3) no se restaura para no encender la luz al abrir.
         flashMode = prefs.getInt("flash", 0).let { if (it == 3) 0 else it }
         controller.setFlashMode(flashMode)
-        binding.chipFlash.text = arrayOf("⚡ off", "⚡ auto", "⚡ on", "🔦")[flashMode]
-        binding.chipFlash.setTextColor(
-            if (flashMode == 0) Color.parseColor("#CCFFFFFF") else ContextCompat.getColor(this, R.color.accent)
-        )
+        applyFlashChip()
 
         timerSec = prefs.getInt("timer", 0)
-        binding.chipTimer.text = if (timerSec == 0) "⏱ off" else "⏱ ${timerSec}s"
-        binding.chipTimer.setTextColor(
-            if (timerSec == 0) Color.parseColor("#CCFFFFFF") else ContextCompat.getColor(this, R.color.accent)
-        )
+        applyTimerChip()
 
         gridOn = prefs.getBoolean("grid", false)
         binding.gridOverlay.showGrid = gridOn
         binding.gridOverlay.showLevel = gridOn
-        binding.chipGrid.setTextColor(
-            if (gridOn) ContextCompat.getColor(this, R.color.accent) else Color.parseColor("#CCFFFFFF")
-        )
+        setChipState(binding.chipGrid, gridOn, R.string.cd_grid)
 
         // Por defecto 16:9 (índice 2): en una pantalla tan alargada, la proporción nativa
         // 4:3 dejaba una franja negra enorme. Con 16:9 el visor ocupa un 80% de la pantalla.
@@ -382,21 +518,20 @@ class CameraActivity : AppCompatActivity() {
         }
         ratioIndex = prefs.getInt("capRatio", 2).coerceIn(0, ratioLabels.size - 1)
         binding.chipRatio.text = ratioLabels[ratioIndex]
-        binding.chipRatio.setTextColor(
-            if (ratioIndex == 0) Color.parseColor("#CCFFFFFF") else ContextCompat.getColor(this, R.color.accent)
-        )
+        setChipState(binding.chipRatio, ratioIndex != 0, R.string.cd_ratio, ratioLabels[ratioIndex])
+
         fullRes = prefs.getBoolean("capFull", true)
-        binding.chipRes.text = if (fullRes) "FULL" else "MED"
-        binding.chipRes.setTextColor(
-            if (fullRes) Color.parseColor("#CCFFFFFF") else ContextCompat.getColor(this, R.color.accent)
-        )
+        applyResChip()
 
         disabledLenses = HashSet(prefs.getStringSet("disabledLenses", emptySet()) ?: emptySet())
 
-        if (prefs.getBoolean("hdr", false)) {
-            val on = controller.setHdrEnabled(true)
-            binding.chipHdr.setTextColor(chipColor(on))
-        }
+        // presetHdr deja anotada la intención SIN mentir: setHdrEnabled devolvía false
+        // antes de que la lente estuviera abierta y el chip se quedaba apagado aunque
+        // el ajuste sí estuviera guardado. El motor avisa por onCaptureModesChanged
+        // cuando resuelve si esta lente lo admite y ahí se repinta.
+        controller.presetHdr(prefs.getBoolean("hdr", false))
+        syncCaptureModeChips()
+
         filterIndex = prefs.getInt("filter", 0).coerceIn(0, Filters.list.size - 1)
         applyFilter()
 
@@ -405,6 +540,10 @@ class CameraActivity : AppCompatActivity() {
         vhevc = prefs.getBoolean("vhevc", false)
         tlOn = prefs.getBoolean("tl", false)
         applyVideoSettings()
+
+        // Deja la ranura de paneles cerrada Y de paso pone el color y la descripción
+        // accesible de los cuatro chips que abren panel, que si no arrancaban sin nada.
+        showPanel(null)
     }
 
     override fun onResume() {
@@ -413,6 +552,9 @@ class CameraActivity : AppCompatActivity() {
         refreshThumbnail()
         ui.removeCallbacks(autoScanTick)
         ui.postDelayed(autoScanTick, 1200)
+        // Vigila si aparece o desaparece la pantalla externa del plegable: el chip
+        // "Espejo" solo debe existir cuando de verdad hay dónde pintarlo.
+        mirror?.start()
         sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)?.let {
             sensorManager.registerListener(rotationListener, it, SensorManager.SENSOR_DELAY_UI)
         }
@@ -428,6 +570,18 @@ class CameraActivity : AppCompatActivity() {
     override fun onPause() {
         ui.removeCallbacks(autoScanTick)
         sensorManager.unregisterListener(rotationListener)
+        // El espejo copia fotogramas del visor: sin cámara no hay nada que copiar y
+        // dejarlo vivo sería una lectura de GPU cada 66 ms con la app en segundo plano.
+        mirror?.stop()
+        // Ojo: onCreate puede terminar en finish() ANTES de inflar la vista (sin lente
+        // guardada, o invocados por otra app sin cámara trasera válida), y onPause se
+        // llama igual. Tocar binding sin esta guarda revienta al salir en ese caso.
+        if (::binding.isInitialized) {
+            setChipState(binding.chipMirror, false, R.string.cd_mirror)
+            // Un temporizador en marcha al salir seguía contando y disparaba con la
+            // cámara ya cerrada.
+            cancelCountdown()
+        }
         if (::controller.isInitialized) {
             if (controller.isRecording) controller.stopVideo()
             prefs.edit().putFloat("zoom", currentZoom).putString("mode", mode).apply()
@@ -442,6 +596,13 @@ class CameraActivity : AppCompatActivity() {
         zoomRestored = false
         camCycleIndex = 0
         facing = "back"
+        // El estado del HUD tiene que volver atrás con la cámara. Tras bloquear la
+        // pantalla estando en la frontal, se reabría la trasera pero el chip seguía
+        // diciendo "frontal", y la insignia AE/AF BLOQUEADO se quedaba encendida con
+        // el bloqueo ya deshecho por la reapertura.
+        setChipState(binding.chipFlip, false, R.string.cd_flip, getString(R.string.lens_back))
+        aeAfLocked = false
+        binding.aeLockBadge.visibility = View.GONE
         // Aplicar ajustes guardados ANTES de abrir (sin reconstruir): el primer setUpOutputs ya los usa.
         controller.presetCaptureSettings(AspectRatio.values()[ratioIndex], fullRes)
         controller.setDisabledLensIds(disabledLenses)
@@ -459,17 +620,18 @@ class CameraActivity : AppCompatActivity() {
         mode = m
         prefs.edit().putString("mode", m).apply()
         val photo = m == "photo"
-        val accent = ContextCompat.getColor(this, R.color.accent)
-        binding.tabPhoto.setTextColor(if (photo) accent else dimWhite)
-        binding.tabVideo.setTextColor(if (photo) dimWhite else accent)
+        // Cambiar de modo con una cuenta atrás en marcha disparaba una foto en pleno
+        // modo video segundos después.
+        cancelCountdown()
+        binding.tabPhoto.setTextColor(if (photo) cAccent else cOff)
+        binding.tabVideo.setTextColor(if (photo) cOff else cAccent)
+        binding.tabPhoto.isSelected = photo
+        binding.tabVideo.isSelected = !photo
         binding.shutterIcon.visibility = if (photo) View.GONE else View.VISIBLE
         binding.shutterIcon.setBackgroundResource(R.drawable.rec_dot)
         // El chip de ajustes de video solo aparece en modo video.
         binding.chipVid.visibility = if (photo) View.GONE else View.VISIBLE
-        if (photo) {
-            binding.videoPanel.visibility = View.GONE
-            binding.chipVid.setTextColor(chipColor(false))
-        }
+        if (photo && binding.videoPanel.visibility == View.VISIBLE) showPanel(null)
         if (!photo &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED
@@ -482,40 +644,67 @@ class CameraActivity : AppCompatActivity() {
     private fun focusAt(x: Float, y: Float) {
         val t = binding.texture
         if (t.width == 0 || t.height == 0) return
-        // El preview NO ocupa toda la pantalla (AutoFitTextureView con wrap_content,
-        // alineado arriba). Hay que mapear el toque en coordenadas DEL TEXTURE, no del
-        // área de gestos (pantalla completa): si no, el punto de enfoque cae desplazado
-        // respecto al dedo (~20% del encuadre en 4:3). En modo LLENA t.left/t.top son
-        // negativos y la resta también lo corrige.
-        val lx = x - t.left
-        val ly = y - t.top
-        if (lx < 0f || ly < 0f || lx > t.width || ly > t.height) return // toque fuera del encuadre
+        // x,y llegan en coordenadas de gesture_area, que ES el rectángulo visible de la
+        // imagen: PreviewFrameLayout lo coloca justo encima del fotograma. Para pasar a
+        // coordenadas del TextureView basta con el desplazamiento entre ambos, que en
+        // modo LLENAR NO es cero porque ahí el texture es más grande que lo visible y
+        // sobresale por los cuatro lados.
+        // El código anterior restaba t.left/t.top a un toque medido en la PANTALLA
+        // entera, con un comentario que afirmaba que "en modo LLENA t.left/t.top son
+        // negativos": con gravedad top|center_horizontal t.top nunca fue negativo, así
+        // que el punto de enfoque caía desplazado hasta un 20% del encuadre.
+        val hud = binding.previewHud
+        val lx = x + (hud.left - t.left)
+        val ly = y + (hud.top - t.top)
+        if (lx < 0f || ly < 0f || lx > t.width || ly > t.height) return // fuera del encuadre
         controller.setFocusPoint(lx, ly, t.width, t.height)
-        showFocusRing(x, y)   // el anillo se dibuja en coordenadas de pantalla
-        showMagnifier(lx, ly) // la lupa recorta sobre el texture
-        showEvQuick()         // exposición al alcance, sin entrar a PRO
+        showFocusRing(x, y)              // el anillo vive dentro del visor
+        showMagnifier(x, y, lx, ly)      // la lupa recorta sobre el texture
+        showEvQuick()                    // exposición al alcance, sin entrar a PRO
         binding.gestureArea.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+    }
+
+    /** Enfoque al centro sin vista: el visor concentra cuatro gestos y no tenía ni una
+     *  sola acción accesible, así que sin tacto fino la app era inservible. */
+    private fun focusCenter() {
+        val hud = binding.previewHud
+        if (hud.width == 0 || hud.height == 0) return
+        focusAt(hud.width / 2f, hud.height / 2f)
     }
 
     private val hideMagnifier = Runnable { binding.magnifierCard.visibility = View.GONE }
 
     /** Lupa: muestra una zona ampliada del punto enfocado para confirmar nitidez. */
-    private fun showMagnifier(x: Float, y: Float) {
+    private fun showMagnifier(hudX: Float, hudY: Float, texX: Float, texY: Float) {
         val tw = binding.texture.width
         val th = binding.texture.height
         if (tw == 0 || th == 0) return
         try {
             val bmp = binding.texture.getBitmap(tw, th) ?: return
             val crop = (tw * 0.12f).toInt().coerceAtLeast(40)
-            // El texture está alineado arriba y ocupa el ancho: el mapeo es directo.
-            val cx = x.toInt().coerceIn(crop / 2, (tw - crop / 2).coerceAtLeast(crop / 2))
-            val cy = y.toInt().coerceIn(crop / 2, (th - crop / 2).coerceAtLeast(crop / 2))
+            val cx = texX.toInt().coerceIn(crop / 2, (tw - crop / 2).coerceAtLeast(crop / 2))
+            val cy = texY.toInt().coerceIn(crop / 2, (th - crop / 2).coerceAtLeast(crop / 2))
             val left = (cx - crop / 2).coerceIn(0, (tw - crop).coerceAtLeast(0))
             val top = (cy - crop / 2).coerceIn(0, (th - crop).coerceAtLeast(0))
             val w = crop.coerceAtMost(tw - left)
             val h = crop.coerceAtMost(th - top)
             if (w <= 0 || h <= 0) { bmp.recycle(); return }
             val region = android.graphics.Bitmap.createBitmap(bmp, left, top, w, h)
+            // La lupa va al cuadrante OPUESTO al dedo. Clavada arriba a la derecha
+            // tapaba justo lo que el usuario acababa de tocar en esa esquina, y encima
+            // el panel "Más" se dibujaba encima de ella: parecía que no funcionaba.
+            val hudW = binding.previewHud.width
+            val hudH = binding.previewHud.height
+            if (hudW > 0 && hudH > 0) {
+                val g = (if (hudY < hudH / 2f) android.view.Gravity.BOTTOM else android.view.Gravity.TOP) or
+                    (if (hudX < hudW / 2f) android.view.Gravity.END else android.view.Gravity.START)
+                (binding.magnifierCard.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
+                    if (lp.gravity != g) {
+                        lp.gravity = g
+                        binding.magnifierCard.layoutParams = lp
+                    }
+                }
+            }
             binding.magnifier.setImageBitmap(region)
             binding.magnifierCard.visibility = View.VISIBLE
             ui.removeCallbacks(hideMagnifier)
@@ -545,16 +734,22 @@ class CameraActivity : AppCompatActivity() {
     // ---- Zoom ----
     // ---- Exposición rápida y bloqueo AE/AF (sin entrar a PRO) ----
 
-    private val hideEvQuick = Runnable { binding.evQuick.visibility = View.GONE }
+    private val hideEvQuick = Runnable {
+        if (binding.evQuick.visibility == View.VISIBLE) showPanel(null)
+    }
 
     /** Muestra el ajuste de exposición junto al enfoque: el caso real más común
      *  (contraluces, comida oscura) sin obligar a entrar al modo PRO. */
     private fun showEvQuick() {
         val r = controller.evRange
         if (r.second <= r.first) return // la lente no permite compensación
+        // Si ya hay otro panel abierto no se le echa encima. Antes ev_quick aparecía
+        // en CADA toque de enfoque, a la misma cota que el panel PRO y por encima:
+        // dos sliders superpuestos, y el de arriba movía la exposición.
+        if (binding.evQuick.visibility != View.VISIBLE && anyPanelVisible()) return
         binding.evSlider.progress = evToProgress(evSteps)
         binding.evLabel.text = evLabel(evSteps)
-        binding.evQuick.visibility = View.VISIBLE
+        showPanel(binding.evQuick)
         ui.removeCallbacks(hideEvQuick)
         ui.postDelayed(hideEvQuick, 4000)
     }
@@ -570,6 +765,9 @@ class CameraActivity : AppCompatActivity() {
         controller.lockAeAf(aeAfLocked)
         binding.aeLockBadge.visibility = if (aeAfLocked) View.VISIBLE else View.GONE
         binding.gestureArea.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+        binding.gestureArea.announceForAccessibility(
+            getString(if (aeAfLocked) R.string.ae_af_locked else R.string.ae_af_unlocked)
+        )
     }
 
     // ---- Captura solicitada por otra app ----
@@ -645,10 +843,9 @@ class CameraActivity : AppCompatActivity() {
         if (t.width == 0 || t.height == 0) return
         try {
             val bmp = t.getBitmap(t.width, t.height) ?: return
-            binding.lensFade.layoutParams = binding.lensFade.layoutParams.apply {
-                width = t.width
-                height = t.height
-            }
+            // Ya no hay que copiar el tamaño del texture a mano: lens_fade cuelga del
+            // PreviewFrameLayout, que lo coloca exactamente sobre el rectángulo visible
+            // de la imagen, y con centerCrop encaja también en modo LLENAR.
             binding.lensFade.setImageBitmap(bmp)
             binding.lensFade.alpha = 1f
             binding.lensFade.visibility = View.VISIBLE
@@ -687,70 +884,145 @@ class CameraActivity : AppCompatActivity() {
         val stops = controller.zoomStops()
         binding.zoomStrip.removeAllViews()
         if (stops.size < 2) return // con una sola lente no aporta nada
-        // TODAS las píldoras iguales: mismo tamaño, misma tipografía y mismo ancho mínimo.
-        // Antes las ópticas iban en negrita y más grandes y la fila se veía desigual;
-        // ahora lo óptico se distingue por COLOR, no por tamaño.
-        val pad = dp(10f).toInt()
-        val minW = dp(52f).toInt()
+        // TODAS las píldoras EXACTAMENTE iguales, con ancho y alto fijos de dimens.
+        // La queja literal del usuario fue "botones de zoom disparejos": eran
+        // wrap_content con minWidth, así que "0.6x" y "2.9x" salían más anchas que
+        // "1x", "2x" y "5x". Lo óptico se distingue por COLOR, nunca por tamaño.
+        val w = resources.getDimensionPixelSize(R.dimen.zoom_stop_width)
+        val h = resources.getDimensionPixelSize(R.dimen.zoom_stop_height)
         stops.forEach { (z, label, optical) ->
             val tv = TextView(this).apply {
                 text = label
                 textSize = 13f
-                minWidth = minW
-                setTypeface(null, android.graphics.Typeface.NORMAL)
-                setPadding(pad, dp(9f).toInt(), pad, dp(9f).toInt())
-                minHeight = dp(48f).toInt() // objetivo táctil accesible
+                setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL))
                 gravity = android.view.Gravity.CENTER
-                setBackgroundResource(R.drawable.zoom_pill_bg)
-                contentDescription = if (optical) "Zoom $label, lente óptica" else "Zoom $label digital"
+                maxLines = 1
+                setBackgroundResource(R.drawable.zoom_stop_bg)
+                contentDescription = getString(
+                    if (optical) R.string.cd_zoom_optical else R.string.cd_zoom_digital, label
+                )
                 setOnClickListener {
                     currentZoom = controller.setZoom(z)
                     performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
                     showZoom()
                 }
             }
-            val lp = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { marginEnd = dp(8f).toInt() }
+            markAsButton(tv)
+            val lp = LinearLayout.LayoutParams(w, h).apply { marginEnd = dp(8f).toInt() }
             binding.zoomStrip.addView(tv, lp)
         }
         highlightZoomStrip()
     }
 
-    /** Marca en ámbar la parada óptica activa. */
+    /** Marca la parada activa. */
     private fun highlightZoomStrip() {
         val stops = controller.zoomStops()
         if (binding.zoomStrip.childCount != stops.size) return
-        // Activa = la mayor parada que no supera el zoom actual.
+        // La activa es la parada MÁS CERCANA al zoom real, no la última que no lo supera:
+        // con el zoom global en 6,6x quedaba resaltada la de 5x, que es mentira.
         var active = 0
-        stops.forEachIndexed { i, t -> if (currentZoom >= t.first - 0.01f) active = i }
+        var best = Float.MAX_VALUE
+        stops.forEachIndexed { i, t ->
+            val d = kotlin.math.abs(currentZoom - t.first)
+            if (d < best) { best = d; active = i }
+        }
         for (i in 0 until binding.zoomStrip.childCount) {
             val esOptica = stops.getOrNull(i)?.third == true
-            (binding.zoomStrip.getChildAt(i) as? TextView)?.setTextColor(
+            val v = binding.zoomStrip.getChildAt(i) as? TextView ?: continue
+            // El estado seleccionado se lee de reojo: fondo ámbar al 18% con filo ámbar
+            // (zoom_stop_bg), no solo el color de la cifra.
+            v.isSelected = i == active
+            v.setTextColor(
                 when {
-                    i == active -> ContextCompat.getColor(this, R.color.accent) // activa
-                    esOptica -> Color.WHITE          // lente física real: blanco pleno
-                    else -> Color.parseColor("#8CFFFFFF") // zoom digital: atenuado
+                    i == active -> cAccent
+                    esOptica -> cWhite      // lente física real: blanco pleno
+                    else -> cOff            // zoom digital: atenuado
                 }
             )
         }
     }
 
-    /** Muestra SIEMPRE la lente física activa y el zoom: es la ventaja que nos diferencia. */
+    /**
+     * Chip de lente: UNA sola fuente de verdad para la óptica.
+     *
+     * Antes el rótulo decía "ID6 · 70 MM · 6.6X" mientras la píldora decía "5x", y en
+     * otra captura "ID6 · 70 MM · 10.5X" con la píldora en "4.6x": los milímetros
+     * quedaban congelados en la focal FÍSICA mientras el recorte digital crecía hasta
+     * 3,6x, así que la pantalla se contradecía a sí misma en una app cuyo mayor valor
+     * es decir la verdad sobre la óptica.
+     *
+     * Ahora todo sale del mismo currentZoom: la píldora muestra el zoom total y el chip
+     * la focal EFECTIVA (focal equivalente de la lente × recorte de esa lente). Y ya no
+     * hay jerga: "GRAN ANGULAR · 15 MM", no "ID3". El identificador se queda en la
+     * pantalla de elección de lente, que es donde hace falta.
+     */
     private fun updateLensChip() {
-        // Zoom en la escala estándar del usuario (1x ≈ 24 mm), no en la interna.
-        val disp = currentZoom * controller.zoomDisplayFactor
-        val base = String.format(Locale.US, "%s · %.1fx", controller.activeLensLabel, disp)
+        val nombre = lensHumanName()
+        val mm = effectiveFocalMm()
+        val recorte = lensCropFactor()
+        val base = when {
+            mm > 0 && recorte > 1.05f ->
+                String.format(Locale.US, "%s · %d mm · %s", nombre, mm, getString(R.string.lens_digital))
+            mm > 0 -> String.format(Locale.US, "%s · %d mm", nombre, mm)
+            else -> nombre
+        }
         // Si hay lentes apagadas, el zoom cae a digital sin poder usar esa óptica.
         // Antes esto era invisible: se perdía el teleobjetivo y nadie sabía por qué.
         val n = controller.disabledLensCount
         if (n > 0) {
-            binding.lensChip.text = "$base  ⚠ $n LENTE${if (n > 1) "S" else ""} OFF"
-            binding.lensChip.setTextColor(ContextCompat.getColor(this, R.color.accent))
+            val off = if (n == 1) getString(R.string.lens_off_one)
+            else getString(R.string.lens_off_many, n)
+            binding.lensChip.text = "$base · $off"
+            binding.lensChip.setTextColor(cAccent)
         } else {
             binding.lensChip.text = base
-            binding.lensChip.setTextColor(ContextCompat.getColor(this, R.color.warm_white))
+            // Ámbar cuando el número ya es recorte digital: el usuario tiene que saber
+            // que a partir de ahí no está ganando óptica, está ampliando píxeles.
+            binding.lensChip.setTextColor(if (recorte > 1.05f) cAccent else cWarm)
         }
+        binding.lensChip.contentDescription = binding.lensChip.text
+    }
+
+    /** Nombre humano de la lente activa, deducido de su sitio en la cadena de zoom. */
+    private fun lensHumanName(): String {
+        if (facing != "back") return getString(R.string.lens_front)
+        val opticas = controller.zoomStops().filter { it.third }
+        if (opticas.size < 2) return getString(R.string.lens_main)
+        val i = activeOpticalIndex(opticas)
+        return when (i) {
+            0 -> getString(R.string.lens_wide)
+            opticas.size - 1 -> getString(R.string.lens_tele)
+            else -> getString(R.string.lens_main)
+        }
+    }
+
+    /** Índice de la parada óptica que está realmente en uso (la mayor que no supera
+     *  el zoom actual: por encima de ella todo es recorte digital de esa misma lente). */
+    private fun activeOpticalIndex(opticas: List<Triple<Float, String, Boolean>>): Int {
+        var idx = 0
+        opticas.forEachIndexed { i, t -> if (currentZoom >= t.first - 0.01f) idx = i }
+        return idx
+    }
+
+    /** Cuánto se está recortando digitalmente SOBRE la lente física activa. */
+    private fun lensCropFactor(): Float {
+        val opticas = controller.zoomStops().filter { it.third }
+        if (opticas.isEmpty()) return 1f
+        val base = opticas[activeOpticalIndex(opticas)].first
+        return if (base > 0f) (currentZoom / base).coerceAtLeast(1f) else 1f
+    }
+
+    /**
+     * Focal equivalente EFECTIVA en mm.
+     * El milimetraje físico solo lo conoce el motor y lo publica dentro de
+     * activeLensLabel ("ID3 · 15 mm"), así que se extrae de ahí y se multiplica por el
+     * recorte. Si el formato de esa etiqueta cambiase, esto devuelve 0 y el chip se
+     * queda solo con el nombre de la lente: nunca enseña un número inventado.
+     */
+    private fun effectiveFocalMm(): Int {
+        val m = Regex("(\\d+)\\s*mm").find(controller.activeLensLabel) ?: return 0
+        val fisica = m.groupValues[1].toIntOrNull() ?: return 0
+        return Math.round(fisica * lensCropFactor())
     }
 
     private fun showZoom() {
@@ -776,7 +1048,7 @@ class CameraActivity : AppCompatActivity() {
             }.start()
         val cb: (Boolean) -> Unit = { ok ->
             capturing = false
-            binding.nightLabel.visibility = View.GONE
+            if (binding.nightLabel.visibility == View.VISIBLE) showCenterSlot(null)
             if (ok) {
                 refreshThumbnail()
                 bounceThumbnail()
@@ -786,7 +1058,7 @@ class CameraActivity : AppCompatActivity() {
         }
         if (nightOn) {
             // Apilado multi-frame: sin destello, con indicador de procesado.
-            binding.nightLabel.visibility = View.VISIBLE
+            showCenterSlot(binding.nightLabel)
             controller.takeNightPhoto(cb)
         } else {
             flashScreen()
@@ -799,7 +1071,7 @@ class CameraActivity : AppCompatActivity() {
         if (mode != "photo" || nightOn || capturing || burstRemaining > 0) return
         burstRemaining = 7
         binding.btnShutter.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-        Toast.makeText(this, "Ráfaga", Toast.LENGTH_SHORT).show()
+        hint(getString(R.string.hint_burst))
         burstNext()
     }
 
@@ -890,7 +1162,7 @@ class CameraActivity : AppCompatActivity() {
     private fun shootAndShareWhatsApp() {
         if (capturing) return
         if (mode == "video") {
-            Toast.makeText(this, R.string.mode_photo, Toast.LENGTH_SHORT).show()
+            hint(getString(R.string.hint_only_photo))
             return
         }
         capturing = true
@@ -978,9 +1250,8 @@ class CameraActivity : AppCompatActivity() {
         gridOn = !gridOn
         binding.gridOverlay.showGrid = gridOn
         binding.gridOverlay.showLevel = gridOn
-        binding.chipGrid.setTextColor(
-            if (gridOn) ContextCompat.getColor(this, R.color.accent) else Color.parseColor("#CCFFFFFF")
-        )
+        setChipState(binding.chipGrid, gridOn, R.string.cd_grid)
+        announceChip(binding.chipGrid)
         prefs.edit().putBoolean("grid", gridOn).apply()
     }
 
@@ -990,73 +1261,57 @@ class CameraActivity : AppCompatActivity() {
             3 -> 10
             else -> 0
         }
-        binding.chipTimer.text = if (timerSec == 0) "⏱ off" else "⏱ ${timerSec}s"
-        binding.chipTimer.setTextColor(
-            if (timerSec == 0) Color.parseColor("#CCFFFFFF") else ContextCompat.getColor(this, R.color.accent)
-        )
+        applyTimerChip()
+        announceChip(binding.chipTimer)
         prefs.edit().putInt("timer", timerSec).apply()
     }
 
     private fun cycleFlash() {
         flashMode = (flashMode + 1) % 4
         controller.setFlashMode(flashMode)
-        binding.chipFlash.text = arrayOf("⚡ off", "⚡ auto", "⚡ on", "🔦")[flashMode]
-        binding.chipFlash.setTextColor(
-            if (flashMode == 0) Color.parseColor("#CCFFFFFF") else ContextCompat.getColor(this, R.color.accent)
-        )
+        applyFlashChip()
+        announceChip(binding.chipFlash)
         prefs.edit().putInt("flash", flashMode).apply()
     }
 
     private fun toggleRaw() {
         if (!controller.hasRaw) {
-            Toast.makeText(this, "Esta lente no soporta RAW", Toast.LENGTH_SHORT).show()
+            hint(getString(R.string.hint_no_raw))
             return
         }
         val on = controller.setRawEnabled(!controller.rawEnabled)
-        binding.chipRaw.setTextColor(
-            if (on) ContextCompat.getColor(this, R.color.accent)
-            else Color.parseColor("#CCFFFFFF")
-        )
-        if (on) { // RAW, noche y QR son excluyentes
-            nightOn = false
-            binding.chipNight.setTextColor(Color.parseColor("#CCFFFFFF"))
-            binding.qrCard.visibility = View.GONE
-        }
-        Toast.makeText(this, if (on) "RAW + JPEG" else "Solo JPEG", Toast.LENGTH_SHORT).show()
+        // RAW, noche y QR son excluyentes: la exclusión la resuelve el motor y aquí
+        // solo se repintan los cuatro chips a la vez, para que ninguno se quede
+        // encendido anunciando un modo que ya está apagado.
+        syncCaptureModeChips()
+        if (on && binding.qrCard.visibility == View.VISIBLE) showCenterSlot(null)
+        hint(getString(if (on) R.string.hint_raw_on else R.string.hint_raw_off))
     }
 
     private fun toggleNight() {
         if (controller.isRecording) return
         val on = controller.setNightEnabled(!nightOn)
         nightOn = on
-        binding.chipNight.setTextColor(
-            if (on) ContextCompat.getColor(this, R.color.accent) else Color.parseColor("#CCFFFFFF")
-        )
-        if (on) { // noche apaga RAW y QR (excluyentes); reflejarlo en los chips
-            binding.chipRaw.setTextColor(Color.parseColor("#CCFFFFFF"))
-            binding.qrCard.visibility = View.GONE
-        }
-        Toast.makeText(this, if (on) "Modo noche ON" else "Modo noche OFF", Toast.LENGTH_SHORT).show()
+        syncCaptureModeChips()
+        if (on && binding.qrCard.visibility == View.VISIBLE) showCenterSlot(null)
+        hint(getString(if (on) R.string.hint_night_on else R.string.hint_night_off))
     }
 
     /** Ultra HDR: captura en JPEG_R, con mucho más rango dinámico en contraluces. */
     private fun toggleHdr() {
         if (!controller.hasHdr) {
-            Toast.makeText(this, "Esta lente no admite Ultra HDR", Toast.LENGTH_SHORT).show()
+            hint(getString(R.string.hint_no_hdr))
             return
         }
         val on = controller.setHdrEnabled(!controller.hdrEnabled)
-        binding.chipHdr.setTextColor(chipColor(on))
-        if (on) binding.chipRaw.setTextColor(chipColor(false)) // excluyente con RAW
+        syncCaptureModeChips()
         prefs.edit().putBoolean("hdr", on).apply()
-        Toast.makeText(this, if (on) "Ultra HDR activado" else "Ultra HDR desactivado", Toast.LENGTH_SHORT).show()
+        hint(getString(if (on) R.string.hint_hdr_on else R.string.hint_hdr_off))
     }
 
     /** Muestra u oculta el panel con las opciones secundarias. */
     private fun toggleMorePanel() {
-        val show = binding.morePanel.visibility != View.VISIBLE
-        binding.morePanel.visibility = if (show) View.VISIBLE else View.GONE
-        binding.chipMore.setTextColor(chipColor(show))
+        showPanel(if (binding.morePanel.visibility == View.VISIBLE) null else binding.morePanel)
     }
 
     // ---- Escaneo SIEMPRE activo de QR y códigos de barras ----
@@ -1080,6 +1335,11 @@ class CameraActivity : AppCompatActivity() {
     private fun scanViewfinderForCodes() {
         if (autoScanBusy || capturing || controller.isRecording) return
         if (binding.qrCard.visibility == View.VISIBLE) return // ya hay uno en pantalla
+        if (binding.qrHint.visibility == View.VISIBLE) return // ya hay un aviso pendiente
+        // Ni con el dedo puesto en el obturador ni durante la cuenta atrás: en esos dos
+        // momentos el usuario está haciendo una foto, no leyendo un código, y la lectura
+        // de GPU compite justo con el disparo.
+        if (shutterHeld || binding.countdown.visibility == View.VISIBLE) return
         val t = binding.texture
         if (t.width == 0 || t.height == 0) return
         // Bitmap PEQUEÑO y REUTILIZADO: pedir uno nuevo a media resolución cada vez hacía
@@ -1110,14 +1370,35 @@ class CameraActivity : AppCompatActivity() {
     }
 
     // ---- QR / código de barras ----
+    /**
+     * Aviso discreto, no secuestro del visor.
+     * La tarjeta saltaba al centro en cuanto entraba CUALQUIER código en cuadro,
+     * mientras el usuario componía, y qrDismissed recordaba UN solo valor: al siguiente
+     * código volvía a saltar. Ahora aparece una pastilla abajo, la tarjeta solo se
+     * despliega si se toca, y los descartados se recuerdan todos.
+     */
     private fun showQrResult(value: String) {
-        if (value == qrDismissed) return // el usuario ya lo cerro
+        if (value.isEmpty()) return
+        if (qrDismissedList.contains(value)) return // el usuario ya lo cerró
         if (binding.qrCard.visibility == View.VISIBLE && qrValue == value) return // ya mostrado
         qrValue = value
-        binding.qrText.text = value
-        binding.qrCard.visibility = View.VISIBLE
+        binding.qrHint.visibility = View.VISIBLE
+    }
+
+    /** Despliega la tarjeta con el contenido del código. */
+    private fun openQrCard() {
+        val v = qrValue ?: return
+        binding.qrText.text = v
         binding.btnQrOpen.visibility =
-            if (value.startsWith("http://") || value.startsWith("https://")) View.VISIBLE else View.GONE
+            if (v.startsWith("http://") || v.startsWith("https://")) View.VISIBLE else View.GONE
+        binding.qrHint.visibility = View.GONE
+        showCenterSlot(binding.qrCard)
+    }
+
+    private fun dismissQr() {
+        qrValue?.let { qrDismissedList.add(it) }
+        binding.qrHint.visibility = View.GONE
+        if (binding.qrCard.visibility == View.VISIBLE) showCenterSlot(null)
     }
 
     private fun openQr() {
@@ -1133,19 +1414,21 @@ class CameraActivity : AppCompatActivity() {
         val v = qrValue ?: return
         val cb = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
         cb.setPrimaryClip(android.content.ClipData.newPlainText("QR", v))
-        Toast.makeText(this, "Copiado", Toast.LENGTH_SHORT).show()
-        binding.qrCard.visibility = View.GONE
+        hint(getString(R.string.hint_copied))
+        dismissQr()
     }
 
     private fun cycleRatio() {
         if (controller.isRecording) return
         ratioIndex = (ratioIndex + 1) % ratioLabels.size
         binding.chipRatio.text = ratioLabels[ratioIndex]
-        binding.chipRatio.setTextColor(
-            if (ratioIndex == 0) Color.parseColor("#CCFFFFFF") else ContextCompat.getColor(this, R.color.accent)
-        )
+        setChipState(binding.chipRatio, ratioIndex != 0, R.string.cd_ratio, ratioLabels[ratioIndex])
+        announceChip(binding.chipRatio)
         prefs.edit().putInt("capRatio", ratioIndex).apply()
         controller.setCaptureSettings(AspectRatio.values()[ratioIndex], fullRes)
+        // Al pasar a LLENA (o al salir de ella) cambia el recorte del visor: hay que
+        // repartirlo otra vez arriba y abajo en vez de dejarlo caer todo hacia abajo.
+        syncPreviewGravity()
     }
 
     private fun cycleFilter() {
@@ -1156,10 +1439,10 @@ class CameraActivity : AppCompatActivity() {
 
     private fun applyFilter() {
         val f = Filters.list[filterIndex.coerceIn(0, Filters.list.size - 1)]
-        binding.chipFilter.text = "✦ ${f.name}"
-        binding.chipFilter.setTextColor(
-            if (f.matrix == null) Color.parseColor("#CCFFFFFF") else ContextCompat.getColor(this, R.color.accent)
-        )
+        // El nombre solo cuando hay filtro puesto: el icono ya dice lo que es y "Normal"
+        // ocupaba sitio para no decir nada.
+        binding.chipFilter.text = if (f.matrix == null) "" else f.name
+        setChipState(binding.chipFilter, f.matrix != null, R.string.cd_filter, f.name)
         controller.setCaptureColorMatrix(f.matrix)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             binding.texture.setRenderEffect(
@@ -1172,31 +1455,22 @@ class CameraActivity : AppCompatActivity() {
     private fun toggleRes() {
         if (controller.isRecording) return
         fullRes = !fullRes
-        binding.chipRes.text = if (fullRes) "FULL" else "MED"
-        binding.chipRes.setTextColor(
-            if (fullRes) Color.parseColor("#CCFFFFFF") else ContextCompat.getColor(this, R.color.accent)
-        )
+        applyResChip()
+        announceChip(binding.chipRes)
         prefs.edit().putBoolean("capFull", fullRes).apply()
         controller.setCaptureSettings(AspectRatio.values()[ratioIndex], fullRes)
     }
 
     // ---- Lentes (activar/desactivar en el ciclo de zoom) ----
     private fun toggleLensPanel() {
-        val show = binding.lensPanel.visibility != View.VISIBLE
-        if (show) {
-            if (proOn) togglePro() // no solapar paneles
-            if (binding.videoPanel.visibility == View.VISIBLE) {
-                binding.videoPanel.visibility = View.GONE
-                binding.chipVid.setTextColor(chipColor(false))
-            }
-            buildLensChips()
-            binding.lensPanel.visibility = View.VISIBLE
+        // La exclusión entre paneles ya no se hace con ifs a mano: showPanel deja uno
+        // visible y esconde el resto, y el chip que corresponda se enciende solo.
+        if (binding.lensPanel.visibility == View.VISIBLE) {
+            showPanel(null)
         } else {
-            binding.lensPanel.visibility = View.GONE
+            buildLensChips()
+            showPanel(binding.lensPanel)
         }
-        binding.chipLenses.setTextColor(
-            if (show) ContextCompat.getColor(this, R.color.accent) else Color.parseColor("#CCFFFFFF")
-        )
     }
 
     private fun buildLensChips() {
@@ -1212,11 +1486,15 @@ class CameraActivity : AppCompatActivity() {
                 else -> "ID $id"
             }
             val chip = TextView(this, null, 0, R.style.ProChip)
+            val activa = !disabledLenses.contains(id)
             chip.text = label
-            chip.setTextColor(
-                if (!disabledLenses.contains(id)) ContextCompat.getColor(this, R.color.accent)
-                else Color.parseColor("#66FFFFFF")
+            chip.isSelected = activa
+            chip.setTextColor(if (activa) cAccent else cOff)
+            chip.contentDescription = getString(
+                R.string.cd_lens_chip, label,
+                getString(if (activa) R.string.state_on else R.string.state_off)
             )
+            markAsButton(chip)
             val lp = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
             )
@@ -1231,7 +1509,7 @@ class CameraActivity : AppCompatActivity() {
         val enabledCount = controller.backLensCandidates().count { !disabledLenses.contains(it.first) }
         if (!disabledLenses.contains(id)) {
             if (enabledCount <= 1) {
-                Toast.makeText(this, R.string.lens_min_one, Toast.LENGTH_SHORT).show()
+                hint(getString(R.string.lens_min_one))
                 return
             }
             disabledLenses.add(id)
@@ -1246,29 +1524,237 @@ class CameraActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         ui.removeCallbacksAndMessages(null)
+        mirror?.release()
+        mirror = null
         try { autoScanner.close() } catch (e: Exception) {}
         scanBitmap?.recycle(); scanBitmap = null
         if (::controller.isInitialized) controller.jpegSink = null
         super.onDestroy()
     }
 
-    private fun chipColor(active: Boolean) =
-        if (active) ContextCompat.getColor(this, R.color.accent) else Color.parseColor("#CCFFFFFF")
+    // ==========================================================================
+    //  HELPERS DE HUD: estado de chip, paneles, ranura central y avisos
+    // ==========================================================================
+
+    /**
+     * Estado visual Y accesible de un chip, en un solo sitio.
+     *
+     * Antes cada chip repetía a mano tres líneas (setText, setTextColor con un
+     * Color.parseColor literal y nada más), así que el color se escapaba en la mitad de
+     * los sitios y NINGÚN chip decía qué era ni cómo estaba: un lector de pantalla leía
+     * "alto voltaje off" donde tenía que decir "flash apagado", porque el texto
+     * accesible del chip era literalmente el emoji.
+     *
+     * @param stateText estado en lenguaje humano para el lector de pantalla.
+     * @param iconRes   icono monocromo; se tiñe con el mismo color que la letra, cosa
+     *                  que con los emoji del sistema era sencillamente imposible.
+     */
+    private fun setChipState(
+        chip: TextView,
+        active: Boolean,
+        cdRes: Int,
+        stateText: String? = null,
+        iconRes: Int = 0
+    ) {
+        val c = if (active) cAccent else cDim
+        chip.setTextColor(c)
+        chip.compoundDrawableTintList = ColorStateList.valueOf(c)
+        if (iconRes != 0) chip.setCompoundDrawablesRelativeWithIntrinsicBounds(iconRes, 0, 0, 0)
+        chip.isSelected = active
+        // Sin letra no hay separación que reservar: TextView cuenta el drawablePadding
+        // aunque el texto esté vacío y el icono quedaba descentrado a la izquierda en
+        // los cinco chips de la barra superior, que son justo los que solo llevan icono.
+        chip.compoundDrawablePadding = if (chip.text.isNullOrEmpty()) 0 else dp(5f).toInt()
+        val estado = stateText
+            ?: getString(if (active) R.string.state_on else R.string.state_off)
+        chip.contentDescription = getString(cdRes, estado)
+    }
+
+    /** Un cambio de estado que no se anuncia no existe para quien usa TalkBack. */
+    private fun announceChip(chip: TextView) {
+        chip.contentDescription?.let { chip.announceForAccessibility(it) }
+    }
+
+    /** TalkBack leía los chips como texto suelto: ni que son botones ni si están
+     *  puestos. Con esto se anuncian como botón conmutable y con su estado. */
+    private fun markAsButton(v: View) {
+        ViewCompat.setAccessibilityDelegate(v, object : AccessibilityDelegateCompat() {
+            override fun onInitializeAccessibilityNodeInfo(
+                host: View,
+                info: AccessibilityNodeInfoCompat
+            ) {
+                super.onInitializeAccessibilityNodeInfo(host, info)
+                info.className = "android.widget.Button"
+                info.isCheckable = true
+                info.isChecked = host.isSelected
+            }
+        })
+    }
+
+    private fun anyPanelVisible(): Boolean {
+        val slot = binding.panelSlot
+        for (i in 0 until slot.childCount) {
+            if (slot.getChildAt(i).visibility == View.VISIBLE) return true
+        }
+        return false
+    }
+
+    /**
+     * Exclusión mutua ESTRUCTURAL de paneles: solo uno visible, siempre.
+     * Antes los cuatro paneles vivían a la misma cota (marginBottom=244dp) y la
+     * exclusión se intentaba con ifs sueltos que ev_quick se saltaba en cada toque.
+     */
+    private fun showPanel(panel: View?) {
+        val slot = binding.panelSlot
+        for (i in 0 until slot.childCount) {
+            val c = slot.getChildAt(i)
+            c.visibility = if (c === panel && panel != null) View.VISIBLE else View.GONE
+        }
+        proOn = panel === binding.proPanel
+        setChipState(binding.proToggle, proOn, R.string.cd_pro)
+        setChipState(binding.chipLenses, panel === binding.lensPanel, R.string.cd_lenses)
+        setChipState(binding.chipVid, panel === binding.videoPanel, R.string.cd_vid)
+        setChipState(binding.chipMore, panel === binding.morePanel, R.string.cd_more)
+    }
+
+    /**
+     * Ranura central única dentro del VISOR. Cuenta atrás, tarjeta QR y aviso de
+     * apilado compartían el centro de la PANTALLA: con relación 1:1 salían enteros
+     * sobre la franja negra, y un código detectado durante la cuenta atrás tapaba el
+     * número. Ahora solo puede haber uno y siempre está sobre la imagen.
+     */
+    private fun showCenterSlot(v: View?) {
+        val slot = binding.centerSlot
+        for (i in 0 until slot.childCount) {
+            val c = slot.getChildAt(i)
+            c.visibility = if (c === v && v != null) View.VISIBLE else View.GONE
+        }
+    }
+
+    private val hideHint = Runnable {
+        binding.hintPill.animate().alpha(0f).setDuration(160)
+            .withEndAction { binding.hintPill.visibility = View.GONE }.start()
+    }
+
+    /**
+     * Aviso efímero pegado a los controles. Sustituye a los más de 20 Toast: en la
+     * pantalla grande el Toast salía abajo del todo, lejísimos del chip que se acababa
+     * de tocar, y tapaba el obturador justo cuando hacía falta. El Toast se reserva
+     * ahora para errores de verdad (no se pudo guardar la foto).
+     */
+    private fun hint(text: String) {
+        val v = binding.hintPill
+        v.animate().cancel()
+        v.text = text
+        v.alpha = 1f
+        v.visibility = View.VISIBLE
+        ui.removeCallbacks(hideHint)
+        ui.postDelayed(hideHint, 1700)
+        v.announceForAccessibility(text)
+    }
+
+    private fun applyFlashChip() {
+        val icon = when (flashMode) {
+            0 -> R.drawable.ic_flash_off
+            3 -> R.drawable.ic_torch
+            else -> R.drawable.ic_flash_on
+        }
+        val estado = getString(
+            when (flashMode) {
+                1 -> R.string.state_auto
+                2 -> R.string.state_on
+                3 -> R.string.state_torch
+                else -> R.string.state_off
+            }
+        )
+        // Solo el modo AUTO necesita letra: el icono ya dice si está encendido o no.
+        binding.chipFlash.text = if (flashMode == 1) "AUTO" else ""
+        setChipState(binding.chipFlash, flashMode != 0, R.string.cd_flash, estado, icon)
+    }
+
+    private fun applyTimerChip() {
+        binding.chipTimer.text = if (timerSec == 0) "" else "${timerSec}s"
+        val estado = if (timerSec == 0) getString(R.string.state_off) else "$timerSec s"
+        setChipState(binding.chipTimer, timerSec != 0, R.string.cd_timer, estado)
+    }
+
+    private fun applyResChip() {
+        binding.chipRes.text = getString(if (fullRes) R.string.chip_full else R.string.chip_med)
+        setChipState(
+            binding.chipRes, !fullRes, R.string.cd_res, binding.chipRes.text.toString()
+        )
+    }
+
+    /** Repinta de una vez los modos que son excluyentes entre sí. */
+    private fun syncCaptureModeChips() {
+        setChipState(binding.chipHdr, controller.hdrEnabled, R.string.cd_hdr)
+        setChipState(binding.chipRaw, controller.rawEnabled, R.string.cd_raw)
+        nightOn = controller.nightEnabled
+        setChipState(binding.chipNight, nightOn, R.string.cd_night)
+    }
+
+    private fun cancelCountdown() {
+        countdownRunnable?.let { ui.removeCallbacks(it) }
+        countdownRunnable = null
+        if (binding.countdown.visibility == View.VISIBLE) showCenterSlot(null)
+        mirror?.setCountdown(null)
+    }
+
+    /**
+     * Descripciones y objetivos táctiles de todo lo que se toca.
+     * El visor concentraba cuatro gestos (enfoque, pellizco, doble toque y pulsación
+     * larga) sin una sola acción accesible: en la pantalla interior son 692x716dp
+     * completamente inservibles sin vista.
+     */
+    private fun setUpAccessibility() {
+        ViewCompat.setAccessibilityDelegate(
+            binding.gestureArea,
+            object : AccessibilityDelegateCompat() {
+                override fun onInitializeAccessibilityNodeInfo(
+                    host: View,
+                    info: AccessibilityNodeInfoCompat
+                ) {
+                    super.onInitializeAccessibilityNodeInfo(host, info)
+                    info.addAction(
+                        AccessibilityNodeInfoCompat.AccessibilityActionCompat(
+                            R.id.action_focus_center, getString(R.string.cd_focus_center)
+                        )
+                    )
+                    info.addAction(
+                        AccessibilityNodeInfoCompat.AccessibilityActionCompat(
+                            R.id.action_ae_lock, getString(R.string.cd_toggle_ae_lock)
+                        )
+                    )
+                }
+
+                override fun performAccessibilityAction(
+                    host: View,
+                    action: Int,
+                    args: android.os.Bundle?
+                ): Boolean = when (action) {
+                    R.id.action_focus_center -> { focusCenter(); true }
+                    R.id.action_ae_lock -> { toggleAeAfLock(); true }
+                    else -> super.performAccessibilityAction(host, action, args)
+                }
+            }
+        )
+
+        // Todos los chips se anuncian como botón conmutable con su estado.
+        arrayOf(
+            binding.chipFlash, binding.chipTimer, binding.chipGrid, binding.chipNight,
+            binding.chipMore, binding.chipHdr, binding.chipRaw, binding.chipRatio,
+            binding.chipRes, binding.chipFilter, binding.chipLenses, binding.chipFlip,
+            binding.chipMirror, binding.chipWa, binding.proToggle, binding.chipVid,
+            binding.chipVres, binding.chipVfps, binding.chipVcodec, binding.chipTl,
+            binding.chipEv, binding.chipIso, binding.chipVel, binding.chipWb,
+            binding.chipK, binding.chipAuto, binding.tabPhoto, binding.tabVideo,
+            binding.btnQrCopy, binding.btnQrOpen, binding.btnQrClose, binding.qrHint
+        ).forEach { markAsButton(it) }
+    }
 
     // ---- Ajustes de video ----
     private fun toggleVideoPanel() {
-        val show = binding.videoPanel.visibility != View.VISIBLE
-        if (show) {
-            if (proOn) togglePro()
-            if (binding.lensPanel.visibility == View.VISIBLE) {
-                binding.lensPanel.visibility = View.GONE
-                binding.chipLenses.setTextColor(chipColor(false))
-            }
-            binding.videoPanel.visibility = View.VISIBLE
-        } else {
-            binding.videoPanel.visibility = View.GONE
-        }
-        binding.chipVid.setTextColor(chipColor(show))
+        showPanel(if (binding.videoPanel.visibility == View.VISIBLE) null else binding.videoPanel)
     }
 
     private fun cycleVres() {
@@ -1304,12 +1790,14 @@ class CameraActivity : AppCompatActivity() {
 
     private fun applyVideoSettings() {
         binding.chipVres.text = vresLabels[vresIndex]
-        binding.chipVres.setTextColor(chipColor(vresIndex != 0))
+        setChipState(binding.chipVres, vresIndex != 0, R.string.cd_vres, vresLabels[vresIndex])
         binding.chipVfps.text = "${vfps}fps"
-        binding.chipVfps.setTextColor(chipColor(vfps == 60))
+        setChipState(binding.chipVfps, vfps == 60, R.string.cd_vfps, "$vfps")
         binding.chipVcodec.text = if (vhevc) "HEVC" else "H264"
-        binding.chipVcodec.setTextColor(chipColor(vhevc))
-        binding.chipTl.setTextColor(chipColor(tlOn))
+        setChipState(
+            binding.chipVcodec, vhevc, R.string.cd_vcodec, binding.chipVcodec.text.toString()
+        )
+        setChipState(binding.chipTl, tlOn, R.string.cd_tl)
         controller.setVideoTargetHeight(vresList[vresIndex])
         controller.setVideoFps(vfps)
         controller.setVideoHevc(vhevc)
@@ -1326,7 +1814,7 @@ class CameraActivity : AppCompatActivity() {
         if (controller.isRecording) return
         val cycle = lensCycle()
         if (cycle.size <= 1) {
-            Toast.makeText(this, "No hay cámara frontal disponible", Toast.LENGTH_SHORT).show()
+            hint(getString(R.string.hint_no_front))
             return
         }
         camCycleIndex = (camCycleIndex + 1) % cycle.size
@@ -1337,14 +1825,16 @@ class CameraActivity : AppCompatActivity() {
         controller.close()
         controller.open(target)
         val frontCount = cycle.size - 1
-        binding.chipFlip.text = when {
-            camCycleIndex == 0 -> "⟲ atrás"
-            frontCount > 1 -> "⟲ frontal $camCycleIndex"
-            else -> "⟲ frontal"
+        val etiqueta = when {
+            camCycleIndex == 0 -> getString(R.string.lens_back)
+            frontCount > 1 -> "${getString(R.string.lens_front)} $camCycleIndex"
+            else -> getString(R.string.lens_front)
         }
-        binding.chipFlip.setTextColor(
-            if (camCycleIndex == 0) Color.parseColor("#CCFFFFFF") else ContextCompat.getColor(this, R.color.accent)
-        )
+        // El chip solo lleva el icono: el nombre de la cámara ya está en el chip de
+        // lente, arriba en el visor, y repetirlo aquí obligaba a que la fila creciera
+        // hasta 388dp y se comiera el botón de al lado.
+        setChipState(binding.chipFlip, camCycleIndex != 0, R.string.cd_flip, etiqueta)
+        announceChip(binding.chipFlip)
     }
 
     private fun startPhotoOrTimer() {
@@ -1354,17 +1844,23 @@ class CameraActivity : AppCompatActivity() {
             return
         }
         var remaining = timerSec
-        binding.countdown.visibility = View.VISIBLE
+        cancelCountdown()
         binding.countdown.text = remaining.toString()
-        countdownRunnable?.let { ui.removeCallbacks(it) }
+        showCenterSlot(binding.countdown)
+        // La cuenta atrás también sale en la pantalla externa: si el espejo sirve para
+        // hacerse un autorretrato, hay que ver desde fuera cuánto queda.
+        mirror?.setCountdown(remaining.toString())
         val r = object : Runnable {
             override fun run() {
                 remaining--
                 if (remaining <= 0) {
-                    binding.countdown.visibility = View.GONE
+                    countdownRunnable = null
+                    showCenterSlot(null)
+                    mirror?.setCountdown(null)
                     takePhoto()
                 } else {
                     binding.countdown.text = remaining.toString()
+                    mirror?.setCountdown(remaining.toString())
                     ui.postDelayed(this, 1000)
                 }
             }
@@ -1375,18 +1871,8 @@ class CameraActivity : AppCompatActivity() {
 
     // ---- PRO ----
     private fun togglePro() {
-        proOn = !proOn
-        binding.proPanel.visibility = if (proOn) View.VISIBLE else View.GONE
-        binding.proToggle.setTextColor(if (proOn) ContextCompat.getColor(this, R.color.accent) else dimWhite)
+        showPanel(if (binding.proPanel.visibility == View.VISIBLE) null else binding.proPanel)
         if (proOn) {
-            if (binding.lensPanel.visibility == View.VISIBLE) {
-                binding.lensPanel.visibility = View.GONE
-                binding.chipLenses.setTextColor(Color.parseColor("#CCFFFFFF"))
-            }
-            if (binding.videoPanel.visibility == View.VISIBLE) {
-                binding.videoPanel.visibility = View.GONE
-                binding.chipVid.setTextColor(Color.parseColor("#CCFFFFFF"))
-            }
             if (proIso == 0) proIso = (controller.isoRange.first + controller.isoRange.second) / 2
             if (proExpNs == 0L) proExpNs = 16_000_000L
             selectParam("ev")
@@ -1439,11 +1925,13 @@ class CameraActivity : AppCompatActivity() {
         wbIndex = (wbIndex + 1) % wbModes.size
         controller.setWhiteBalance(wbModes[wbIndex])
         binding.proValue.text = wbLabels[wbIndex]
+        binding.chipWb.contentDescription = getString(R.string.cd_wb, wbLabels[wbIndex])
+        announceChip(binding.chipWb)
     }
 
     private fun selectKelvin() {
         if (!controller.hasManualWb) {
-            Toast.makeText(this, "WB manual no disponible", Toast.LENGTH_SHORT).show()
+            hint(getString(R.string.hint_no_manual_wb))
             return
         }
         proParam = "k"

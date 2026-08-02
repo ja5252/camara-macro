@@ -1,10 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Cuadricula de tercios. Antes el chip usaba el glifo Unicode "⊞", que se pintaba con
+    la fuente del sistema: caja optica distinta a la del resto y sin poder tenirlo.
+    20dp y trazo de 1,6 como todos los iconos de la barra: una sola caja optica.
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="24dp"
-    android:height="24dp"
+    android:width="20dp"
+    android:height="20dp"
     android:viewportWidth="24"
-    android:viewportHeight="24"
-    android:tint="@color/white">
+    android:viewportHeight="24">
     <path
-        android:fillColor="@android:color/white"
-        android:pathData="M3,3v8h8V3L3,3zM9,9L5,9L5,5h4v4zM3,13v8h8v-8L3,13zM9,19L5,19v-4h4v4zM13,3v8h8V3h-8zM19,9h-4L15,5h4v4zM13,13v8h8v-8h-8zM19,19h-4v-4h4v4z" />
+        android:pathData="M3,3L21,3L21,21L3,21Z"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.8" />
+    <path
+        android:pathData="M9,3L9,21"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.4" />
+    <path
+        android:pathData="M15,3L15,21"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.4" />
+    <path
+        android:pathData="M3,9L21,9"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.4" />
+    <path
+        android:pathData="M3,15L21,15"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.4" />
 </vector>

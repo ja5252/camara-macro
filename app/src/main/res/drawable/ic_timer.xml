@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Reloj del temporizador. Circulo trazado con dos arcos: un unico arco cuyo punto
+     final coincide con el inicial deja el trazo indefinido en algunos renderizadores. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="20dp"
+    android:height="20dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:pathData="M3.5,12.5A8.5,8.5 0 0,1 20.5,12.5A8.5,8.5 0 0,1 3.5,12.5"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="2" />
+    <path
+        android:pathData="M12,12.5L12,7.5"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round"
+        android:strokeWidth="2" />
+    <path
+        android:pathData="M12,12.5L15.6,14.1"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round"
+        android:strokeWidth="2" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M9,1.5L15,1.5L15,3.5L9,3.5Z" />
+</vector>

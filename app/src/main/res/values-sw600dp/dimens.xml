@@ -1,9 +1,33 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    Pantalla interior del plegable (2248x2480 px ≈ 716x790dp, casi cuadrada).
+    Aquí NO se cambia de layout: se cambian las medidas. Un segundo
+    layout-sw600dp/activity_camera.xml obligaría a repetir los 60 identificadores del
+    layout base, y cualquier identificador que faltase en una de las dos variantes
+    convierte el campo de ViewBinding en @Nullable y rompe la compilación entera.
+-->
 <resources>
+    <!-- La barra de opciones respira más arriba, así que el degradado tiene que bajar más. -->
+    <dimen name="scrim_top_height">190dp</dimen>
+
+    <!-- 280dp de slider en 716dp de ancho se veían perdidos en el centro. -->
+    <dimen name="panel_slider_width">400dp</dimen>
+    <dimen name="panel_max_width">460dp</dimen>
+
+    <!-- Aquí cabe el nombre completo de la lente sin recortar. -->
+    <dimen name="lens_chip_max_width">420dp</dimen>
+
     <!--
-        Pantalla interior del plegable (casi cuadrada): el visor 4:3 la llena casi entera,
-        así que la barra de opciones y FOTO/VIDEO se montaban ENCIMA de la imagen.
-        Reservamos la banda inferior para que los controles nunca tapen el encuadre.
+        La clave del alcance con una mano: con 26dp la miniatura y el botón de voltear
+        quedaban a 592dp de distancia (unos 118 mm), imposibles de tocar sin cambiar
+        la mano de sitio. Con 150dp los tres controles quedan agrupados en el centro,
+        dentro del arco natural del pulgar.
     -->
-    <dimen name="preview_bottom_inset">0dp</dimen>
+    <dimen name="action_row_side_margin">150dp</dimen>
+
+    <dimen name="zoom_stop_width">64dp</dimen>
+    <dimen name="zoom_stop_height">52dp</dimen>
+
+    <dimen name="touch_min">48dp</dimen>
+    <dimen name="hud_top_offset">84dp</dimen>
 </resources>

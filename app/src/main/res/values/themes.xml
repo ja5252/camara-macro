@@ -5,21 +5,119 @@
         <item name="android:navigationBarColor">@android:color/black</item>
     </style>
 
-    <style name="ProChip">
+    <!--
+        ================= SISTEMA TIPOGRÁFICO =================
+        Antes convivían monospace (zoom_pill, ev_label, rec_indicator, pro_value),
+        sans-serif-medium (lens_chip, qr_text) y el bold por defecto de ProChip, con
+        tamaños 12/13/14/15/16/96sp y tres reglas de caja a la vez.
+        Ahora hay TRES estilos y una sola familia. Las cifras no usan monospace como
+        parche para que no bailen: usan cifras tabulares de verdad (tnum), que es lo
+        que hacía falta y además no cambia la letra a mitad de HUD.
+    -->
+
+    <!-- Raíz vacía del sistema tipográfico. Existe para que "Hud.Label" no herede por
+         accidente de un estilo "Hud" inexistente al resolver el nombre por puntos. -->
+    <style name="Hud" />
+
+    <!-- Etiqueta de estado: versalitas, siempre. Sin excepciones. -->
+    <style name="Hud.Label" parent="">
+        <item name="android:textSize">11sp</item>
+        <item name="android:textAllCaps">true</item>
+        <item name="android:letterSpacing">0.10</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:textColor">@color/text_dim</item>
+        <item name="android:shadowColor">#CC000000</item>
+        <item name="android:shadowRadius">4</item>
+    </style>
+
+    <!-- Valor numérico: cifras tabulares para que no salte al pasar de 9 a 10. -->
+    <style name="Hud.Value" parent="">
+        <item name="android:textSize">13sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:fontFeatureSettings">tnum</item>
+        <item name="android:textColor">@color/text_primary</item>
+        <item name="android:shadowColor">#CC000000</item>
+        <item name="android:shadowRadius">4</item>
+    </style>
+
+    <!-- Dato principal (texto del QR, aviso de apilado). -->
+    <style name="Hud.Data" parent="">
+        <item name="android:textSize">15sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:textColor">@color/text_primary</item>
+    </style>
+
+    <!--
+        ================= JERARQUÍA DE CHIPS =================
+        El mismo ProChip servía para conmutar un ajuste (HDR, RAW, FLASH), para navegar
+        (PRO, LENTES) y para ejecutar una acción de la tarjeta QR (Copiar, Abrir): todo
+        pesaba igual y no había manera de saber qué cambia un ajuste y qué ejecuta algo.
+
+        ProChip         = conmutador de estado (relleno oscuro; el estado es el color).
+        ProChip.Icon    = conmutador de estado con icono y poca o ninguna letra.
+        ProChip.Action  = acción (contorno ámbar): ejecuta algo y desaparece.
+
+        El fondo lleva filo de 1dp y foreground con ripple, y el delegado de
+        accesibilidad de CameraActivity los anuncia como Button: eran TextView planos
+        y TalkBack los leía como texto suelto, sin estado ni realimentación al pulsar.
+    -->
+    <style name="ProChip" parent="">
         <item name="android:layout_width">wrap_content</item>
         <item name="android:layout_height">wrap_content</item>
-        <item name="android:layout_marginHorizontal">5dp</item>
+        <item name="android:layout_marginHorizontal">4dp</item>
         <item name="android:background">@drawable/chip_bg</item>
-        <item name="android:paddingHorizontal">14dp</item>
+        <item name="android:foreground">?attr/selectableItemBackground</item>
+        <item name="android:paddingHorizontal">12dp</item>
         <item name="android:paddingVertical">6dp</item>
         <!-- 48dp es el objetivo táctil mínimo accesible; los chips medían ~15dp de alto
              y el jurado lo marcó como fallo de accesibilidad medido en píxeles. -->
-        <item name="android:minHeight">48dp</item>
-        <item name="android:minWidth">48dp</item>
+        <item name="android:minHeight">@dimen/touch_min</item>
+        <item name="android:minWidth">@dimen/touch_min</item>
         <item name="android:gravity">center</item>
-        <item name="android:textColor">#CCFFFFFF</item>
+        <item name="android:maxLines">1</item>
+        <item name="android:ellipsize">end</item>
+        <item name="android:textColor">@color/text_dim</item>
         <item name="android:textSize">13sp</item>
         <item name="android:textStyle">bold</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:fontFeatureSettings">tnum</item>
+        <item name="android:letterSpacing">0.04</item>
+        <item name="android:shadowColor">#CC000000</item>
+        <item name="android:shadowRadius">4</item>
+        <item name="android:clickable">true</item>
+        <item name="android:focusable">true</item>
+    </style>
+
+    <style name="ProChip.Icon" parent="ProChip">
+        <item name="android:minWidth">56dp</item>
+        <item name="android:paddingHorizontal">10dp</item>
+        <item name="android:drawablePadding">5dp</item>
+        <item name="android:textSize">11sp</item>
+    </style>
+
+    <style name="ProChip.Action" parent="ProChip">
+        <item name="android:background">@drawable/chip_action_bg</item>
+        <item name="android:textColor">@color/accent</item>
+        <item name="android:paddingHorizontal">16dp</item>
+    </style>
+
+    <!-- Pestaña FOTO / VIDEO. Eran TextView con 6dp de padding vertical y 13sp: ~29dp
+         de alto en el control más usado después del obturador, contra los 48dp que el
+         propio proyecto ya exigía en ProChip. -->
+    <style name="ModeTab" parent="">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:minHeight">@dimen/touch_min</item>
+        <item name="android:minWidth">80dp</item>
+        <item name="android:gravity">center</item>
+        <item name="android:paddingHorizontal">18dp</item>
+        <item name="android:background">?attr/selectableItemBackgroundBorderless</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:letterSpacing">0.10</item>
+        <item name="android:textAllCaps">true</item>
         <item name="android:clickable">true</item>
         <item name="android:focusable">true</item>
     </style>

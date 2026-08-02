@@ -24,11 +24,23 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.CamaraMacro">
 
+        <!--
+            configChanges: al plegar y desplegar cambian screenLayout y smallestScreenSize,
+            y eran justo los dos que faltaban. Sin ellos el sistema DESTRUÍA la Activity al
+            abrir el teléfono: se cerraba y se reabría la cámara (539-572 ms de pantalla en
+            negro medidos) y se perdían el zoom, el modo y los ajustes en curso. Es la causa
+            directa del "se siente lenta" en la pantalla grande, y no era lentitud: era un
+            reinicio completo. GalleryActivity ya los declaraba; esta no.
+            density y uiMode se añaden por el mismo motivo: en ColorOS el modo oscuro y el
+            tamaño de fuente también recrean la Activity con la cámara abierta.
+            CameraActivity.onConfigurationChanged reajusta el visor SIN cerrar el CameraDevice.
+        -->
         <activity
             android:name=".CameraActivity"
             android:exported="true"
+            android:resizeableActivity="true"
             android:screenOrientation="portrait"
-            android:configChanges="orientation|screenSize|keyboardHidden">
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|uiMode|keyboardHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -63,11 +75,14 @@
             </intent-filter>
         </activity>
 
+        <!-- El asistente de elección de lente tiene una cámara abierta en vivo: si se
+             recrea al plegar, se pierde la lente que el usuario estaba mirando. -->
         <activity
             android:name=".SetupActivity"
             android:exported="false"
+            android:resizeableActivity="true"
             android:screenOrientation="portrait"
-            android:configChanges="orientation|screenSize|keyboardHidden" />
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|uiMode|keyboardHidden" />
 
         <!-- Entrega de la foto a otras apps por content:// con permiso temporal -->
         <provider

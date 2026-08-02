@@ -4,10 +4,20 @@ App Android (APK) que abre **directo una lente que funciona** en un Oppo cuya c�
 principal está dañada, y permite tomar fotos. **Ya funciona**; ahora se mejora.
 
 ## Hardware / realidad del dispositivo
-- Modelo real de prueba: **Oppo CPH2765**, Android 16, ColorOS.
-- 8 cámaras físicas; IDs públicos: 0, 1, 2, 3, 4, 5, 6.
-- **ID 0 = principal trasera DAÑADA de fábrica (enfoque). NUNCA abrirla** (cuelga el HAL).
-- **ID "3" = la lente que el usuario usa (gran angular/macro). Es la que funciona.**
+- Modelo real de prueba: **Oppo CPH2765**, Android 16, ColorOS. Plegable:
+  pantalla interior 2248x2480, exterior 1140x2616.
+- 8 cámaras; IDs públicos: 0..7. Traseras reales: **ID2 (5 mm, 200 MP, MUERTA)**,
+  **ID3 (2.3 mm gran angular, ISO 100-6400, exp. 83 µs–30 s)**,
+  **ID6 (10.55 mm tele, ISO 100-12800)**, ID7 (profundidad, 1600x1200).
+  Frontales: ID1, ID4, ID5.
+- **ID 0 = cámara LÓGICA sobre las físicas [3, 2, 6]. NUNCA abrirla.** Medido con
+  `dumpsys media.camera` con la app nativa abierta: se abre, se configura, queda
+  `Device status: ACTIVE`... y **`Frames produced: 0` en TODOS sus streams**, tanto
+  a 1x como a 0.6x. No es que enfoque mal: no entrega ni un fotograma. Por eso
+  WhatsApp, Gemini y la cámara nativa salen en negro y se cuelgan: todos abren ID0.
+- No se puede quitar la ID0 del sistema: `ro.boot.flash.locked=1`,
+  `verifiedbootstate=green`, build `user`, sin root. La lista de cámaras la fija el
+  HAL del fabricante en una partición de solo lectura con verified boot.
 - ColorOS **quita el acceso a la cámara si la app no está visible** → abrir/cerrar
   la cámara con el ciclo de vida; probar con pantalla encendida.
 

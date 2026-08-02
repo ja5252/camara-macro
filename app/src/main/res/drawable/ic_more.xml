@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Tres puntos. Antes era el glifo Unicode "⋯", que cambia de caja segun la fuente. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="20dp"
+    android:height="20dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M5,10A2,2 0 0,1 5,14A2,2 0 0,1 5,10ZM12,10A2,2 0 0,1 12,14A2,2 0 0,1 12,10ZM19,10A2,2 0 0,1 19,14A2,2 0 0,1 19,10Z" />
+</vector>

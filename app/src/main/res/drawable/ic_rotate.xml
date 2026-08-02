@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Flecha circular de "voltear camara". Antes era el glifo "⟲". -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="20dp"
+    android:height="20dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:pathData="M19.5,12A7.5,7.5 0 1,1 12,4.5"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round"
+        android:strokeWidth="2.2" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12.6,1.2L12.6,7.8L8,4.5Z" />
+</vector>

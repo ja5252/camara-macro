@@ -1,9 +1,47 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!--
-        Espacio que se reserva bajo el visor para la banda de controles.
-        En pantalla alargada (teléfono plegado) los controles caben en la franja negra
-        que deja el 4:3, así que no hace falta reservar nada.
+        preview_bottom_inset ya NO existe. Valía 0dp en values/ y 0dp otra vez en
+        values-sw600dp/ con un comentario que afirmaba "reservamos la banda inferior
+        para que los controles nunca tapen el encuadre": no reservaba nada, y quien
+        leyera el recurso creía que el problema del recorte estaba resuelto.
+        Ahora el visor y la banda de controles son dos piezas del ConstraintLayout y
+        el espacio se reparte por restricciones, no por un margen inventado.
     -->
-    <dimen name="preview_bottom_inset">0dp</dimen>
+
+    <!-- Alto del degradado superior. Tiene que cubrir la barra de opciones ENTERA más
+         el chip de lente que va justo debajo, dentro ya del visor. -->
+    <dimen name="scrim_top_height">168dp</dimen>
+
+    <!-- Ancho del slider del panel PRO. Era 288dp fijos: el 82% del ancho útil con el
+         teléfono cerrado y solo el 42% con el teléfono abierto. -->
+    <dimen name="panel_slider_width">280dp</dimen>
+
+    <!-- Tope de ancho de los paneles y de la tarjeta QR. qr_card era match_parent y
+         se estiraba a 644dp en la pantalla interior para mostrar una URL. -->
+    <dimen name="panel_max_width">340dp</dimen>
+
+    <!-- El chip de lente es texto dinámico ("GRAN ANGULAR · 15 MM · 2 LENTES OFF"):
+         sin tope se partía en dos líneas e invadía la zona de la lupa. -->
+    <dimen name="lens_chip_max_width">240dp</dimen>
+
+    <!-- Separación de la miniatura y del botón de voltear respecto a los bordes.
+         Con el teléfono abierto la fila medía 592dp de punta a punta (unos 118 mm
+         reales): el margen crece en sw600dp para agrupar los tres controles en la
+         zona que el pulgar alcanza. -->
+    <dimen name="action_row_side_margin">26dp</dimen>
+
+    <!-- Todas las paradas de zoom miden EXACTAMENTE lo mismo. La queja literal del
+         usuario fue "botones de zoom disparejos": 0.6x y 2.9x se veían más grandes
+         que 1x/2x/5x porque cada píldora era wrap_content con minWidth. -->
+    <dimen name="zoom_stop_width">56dp</dimen>
+    <dimen name="zoom_stop_height">48dp</dimen>
+
+    <!-- Objetivo táctil mínimo accesible. -->
+    <dimen name="touch_min">48dp</dimen>
+
+    <!-- Altura ocupada por la barra de opciones. Lo que va pegado a la IMAGEN pero
+         debajo de esa barra (chip de lente, aviso de bloqueo) se separa esto del
+         borde superior del visor, no del borde de la PANTALLA. -->
+    <dimen name="hud_top_offset">76dp</dimen>
 </resources>

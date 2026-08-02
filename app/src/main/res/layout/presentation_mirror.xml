@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Espejo del visor en la pantalla EXTERNA del plegable.
+    Es lo que permite hacerse un autorretrato con la cámara trasera buena: se ve el
+    encuadre por fuera mientras la lente que funciona apunta hacia uno.
+    Va espejado en horizontal (scaleX=-1) a propósito: es lo que espera cualquiera que
+    se mira, igual que un espejo de verdad.
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/mirror_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/black"
+    android:clickable="true"
+    android:focusable="true">
+
+    <ImageView
+        android:id="@+id/mirror_image"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="@string/cd_mirror_view"
+        android:scaleType="fitCenter"
+        android:scaleX="-1" />
+
+    <TextView
+        android:id="@+id/mirror_countdown"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:fontFamily="sans-serif-medium"
+        android:shadowColor="#B3000000"
+        android:shadowRadius="14"
+        android:text=""
+        android:textColor="@color/white"
+        android:textSize="120sp"
+        android:textStyle="bold"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/mirror_hint"
+        style="@style/Hud.Label"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="26dp"
+        android:background="@drawable/zoom_pill_bg"
+        android:paddingHorizontal="16dp"
+        android:paddingVertical="9dp"
+        android:text="@string/mirror_hint"
+        android:textAllCaps="false"
+        android:textSize="13sp" />
+</FrameLayout>

@@ -1,16 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    Obturador: relleno blanco (maxima legibilidad sobre cualquier escena) con anillo
+    exterior AMBAR de 3dp. Era blanco puro y no participaba del sistema de acento:
+    es lo unico que el usuario mira mientras dispara y no tenia firma ninguna.
+-->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
     <item>
         <shape android:shape="oval">
-            <stroke android:width="4dp" android:color="#FFFFFFFF" />
+            <stroke android:width="3dp" android:color="@color/accent" />
             <solid android:color="#00000000" />
         </shape>
     </item>
     <item
-        android:left="9dp"
-        android:top="9dp"
-        android:right="9dp"
-        android:bottom="9dp">
+        android:left="8dp"
+        android:top="8dp"
+        android:right="8dp"
+        android:bottom="8dp">
         <shape android:shape="oval">
             <solid android:color="#FFFFFFFF" />
         </shape>
