@@ -4404,11 +4404,13 @@ class Camera2Controller(
      *    Bitmap.compress genera un JPEG NUEVO sin EXIF y nadie lo había detectado: se perdían
      *    ISO, exposición, focal, apertura y fecha enteros.
      *
-     * ORIENTACIÓN: política única para todas las rutas. Los píxeles salen SIEMPRE ya girados
-     * (el HAL en la ruta directa, rotateNv21 en la de noche, transformStillJpeg en la
-     * recodificada), así que la etiqueta dice NORMAL en todas. Antes la de noche salía con
-     * Orientation=6 y el buffer sin girar, y cualquier visor que ignore el EXIF la enseñaba
-     * tumbada.
+     * ORIENTACIÓN: aquí, y SOLO aquí, la etiqueta se pone a NORMAL, porque estas dos rutas
+     * (noche con rotateNv21, recodificada con transformStillJpeg) entregan el buffer ya
+     * girado. Antes la de noche salía con Orientation=6 y los píxeles sin girar, y cualquier
+     * visor que ignore el EXIF la enseñaba tumbada.
+     * La ruta DIRECTA no pasa por aquí y conserva la etiqueta del HAL (medido: Orientation=6):
+     * ponerla a NORMAL sin girar el buffer rompería justo lo que se acaba de arreglar. Sus
+     * etiquetas descriptivas las añade stampDescriptiveExif, que no toca la orientación.
      */
     private fun writeStillExif(uri: Uri?, night: Boolean, frames: Int) {
         // La guarda de Q es de la RUTA, no del EXIF: por debajo de Q no hay MediaStore con
@@ -4510,6 +4512,69 @@ class Camera2Controller(
         ex.saveAttributes()
     }
 
+    /**
+     * Sella SOLO las etiquetas descriptivas sobre un JPEG que ya trae los suyos.
+     *
+     * Por qué hace falta: writeStillExif únicamente se llama cuando el archivo sale pelado
+     * (noche o recodificado). En la ruta normal el JPEG lo escribe el HAL, que pone ISO,
+     * exposición, focal, apertura y fecha, así que reponerlos sería pisar buenos datos con
+     * los del visor. Pero eso dejaba a la MAYORÍA de las fotos sin nada que dijera con qué
+     * lente física se tomaron, con cuánto zoom, ni con qué app: verificado por EXIF, faltaban
+     * LensModel, Software, DigitalZoomRatio, SubjectDistance y UserComment en toda foto
+     * normal. Aquí se añaden esos —y solo esos— sin tocar ni un dato del HAL.
+     *
+     * NO se toca la ORIENTACIÓN a propósito. En la ruta directa los píxeles salen tal cual
+     * los entrega el HAL, con su etiqueta (medido: Orientation=6); ponerla a NORMAL sin girar
+     * el buffer dejaría la foto tumbada en cualquier visor. La política de "orientación
+     * NORMAL en todas las rutas" solo vale donde los píxeles se giran de verdad.
+     */
+    private fun stampDescriptiveExif(ex: ExifInterface) {
+        ex.setAttribute(ExifInterface.TAG_SOFTWARE, "CamaraMacro $appVersion")
+        ex.setAttribute(
+            ExifInterface.TAG_LENS_MODEL,
+            "ID$cameraId " + String.format(java.util.Locale.US, "%.2f", activeFocalMm) +
+                " mm ($activeEquivMm mm eq 35)"
+        )
+        ex.setAttribute(
+            ExifInterface.TAG_DIGITAL_ZOOM_RATIO, "${(zoomRatio * 100).toInt()}/100"
+        )
+        if (lastFocusDistance > 0f) {
+            val metros = 1f / lastFocusDistance
+            ex.setAttribute(ExifInterface.TAG_SUBJECT_DISTANCE, "${(metros * 100).toInt()}/100")
+        }
+        geoLocation?.let { loc ->
+            ex.setLatLong(loc.latitude, loc.longitude)
+            if (loc.hasAltitude()) ex.setAltitude(loc.altitude)
+        }
+        ex.setAttribute(
+            ExifInterface.TAG_USER_COMMENT,
+            "Lente física ID$cameraId, zoom " +
+                String.format(java.util.Locale.US, "%.2f", zoomRatio) + "x."
+        )
+        ex.saveAttributes()
+    }
+
+    /** Sella las descriptivas por MediaStore (Android 10+). */
+    private fun stampDescriptiveExif(uri: Uri?) {
+        if (uri == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        try {
+            activity.contentResolver.openFileDescriptor(uri, "rw")?.use { pfd ->
+                stampDescriptiveExif(ExifInterface(pfd.fileDescriptor))
+            }
+        } catch (e: Exception) {
+            Log.e("CamMacro", "stampDescriptiveExif(uri): ${e.message}")
+        }
+    }
+
+    /** Sella las descriptivas por fichero (ruta heredada, por debajo de Android 10). */
+    private fun stampDescriptiveExif(file: File) {
+        try {
+            stampDescriptiveExif(ExifInterface(file.absolutePath))
+        } catch (e: Exception) {
+            Log.e("CamMacro", "stampDescriptiveExif(file): ${e.message}")
+        }
+    }
+
     private fun saveImage(rawBytes: ByteArray, night: Boolean = false, frames: Int = 0): Boolean {
         // WYSIWYG: si el VISOR recorta (modo Llenar, o proporción FULL), la foto se recorta
         // igual. En Ultra HDR NO se toca NADA: recomprimir tira el mapa de ganancia embebido
@@ -4597,6 +4662,7 @@ class Camera2Controller(
                 // escribe ninguno) y la que se ha vuelto a codificar por recorte o filtro
                 // (Bitmap.compress genera un JPEG NUEVO sin un solo metadato).
                 if (night || reencoded) writeStillExif(uri, night, frames)
+                else stampDescriptiveExif(uri)
                 if (watermarkEnabled) {
                     // Segunda copia, con marca. La ORIGINAL nunca se altera: si el usuario se
                     // cansa de la marca no habrá perdido ninguna foto por el camino.
@@ -4634,6 +4700,7 @@ class Camera2Controller(
                 // filtro (Bitmap.compress genera un JPEG nuevo y pelado). Va ANTES del escaneo
                 // para que el índice del sistema vea ya los metadatos definitivos.
                 if (night || reencoded) writeStillExif(file, night, frames)
+                else stampDescriptiveExif(file)
                 MediaScannerConnection.scanFile(
                     activity, arrayOf(file.absolutePath), arrayOf("image/jpeg"), null
                 )
