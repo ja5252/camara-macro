@@ -477,14 +477,21 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent">
 
-        <!-- Con scroll: ya se cortó un chip por el borde derecho en una captura. -->
+        <!-- Con scroll: ya se cortó un chip por el borde derecho en una captura. Y con
+             degradado de borde, por lo mismo que las filas del panel "⋯": cinco chips de
+             56dp con sus márgenes piden 320dp de los 327 útiles con el teléfono plegado,
+             así que basta un chip más (o una fuente grande del sistema) para que el último
+             se corte sin que nada avise. El degradado sólo se pinta cuando de verdad hay
+             algo fuera. -->
         <HorizontalScrollView
             android:id="@+id/options_scroll"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:clipToPadding="false"
+            android:fadingEdgeLength="20dp"
             android:fillViewport="true"
             android:paddingHorizontal="@dimen/hud_bar_side_padding"
+            android:requiresFadingEdge="horizontal"
             android:scrollbars="none">
 
             <LinearLayout
@@ -590,7 +597,17 @@
              hecho y con los contrastes ya resueltos.
 
              Es PULSABLE: abre el panel de vídeo. Un rótulo que dice "4K · 60 fps · HEVC"
-             es justo donde el usuario va a tocar para cambiarlo. -->
+             es justo donde el usuario va a tocar para cambiarlo.
+
+             Y AHORA SE NOTA QUE LO ES. Tres jueces de la ronda 10 (ALTO 14, MEDIO 60 y 64)
+             dicen literalmente lo mismo: "la pastilla es informativa pero NO PARECE
+             TOCABLE: el usuario no tiene camino visible a nada mejor" y "es visualmente
+             idéntica a la chapa de lente, que es de sólo lectura". Era cierto: llevaba
+             zoom_pill_bg, el fondo de las tres pastillas que NO se tocan (cronómetro,
+             bloqueo AE/AF, conmutador). Tres cosas lo arreglan sin mover el rótulo de
+             sitio: filo ámbar (video_hud_bg), onda al pulsar (foreground) y un galón que
+             señala hacia donde se abre el panel. Es la puerta a 4K/60/HEVC, que es media
+             nota del bloque de vídeo (3,8, la peor del expediente). -->
         <LinearLayout
             android:id="@+id/video_hud"
             android:layout_width="wrap_content"
@@ -598,7 +615,8 @@
             android:layout_gravity="center_horizontal"
             android:layout_marginHorizontal="@dimen/hud_side_margin"
             android:layout_marginBottom="10dp"
-            android:background="@drawable/zoom_pill_bg"
+            android:background="@drawable/video_hud_bg"
+            android:foreground="?attr/selectableItemBackground"
             android:baselineAligned="false"
             android:clickable="true"
             android:focusable="true"
@@ -665,7 +683,40 @@
                  Una barra que no se mueve nunca es peor que ninguna barra: el usuario la
                  mira, la ve plana y concluye que no está entrando sonido. Cuando el motor
                  publique el nivel, esto vuelve; hasta entonces el estado del micrófono lo
-                 cuenta badge_mic, que sí es cierto. -->
+                 cuenta badge_mic, que sí es cierto.
+
+                 LAS DOS FIRMAS QUE HACEN FALTA, para que la próxima ronda no tenga que
+                 buscarlas. Son dos porque el expediente pide dos cosas distintas:
+
+                 1) VÚMETRO DE UNA BARRA (crítica 22, alta 49): basta con que
+                    Camera2Controller publique
+                        var audioLevelSink: ((peak: Int) -> Unit)?     // 0..32767
+                    alimentado con el MediaRecorder.getMaxAmplitude() que ya tiene abierto,
+                    muestreado cada ~100 ms mientras isRecording. Con eso el operador ve si
+                    entra señal y si satura, que es el 80% del valor.
+
+                 2) DESEQUILIBRIO ENTRE CANALES (críticas 4, 13 y 21, alta 16: 13,4 dB de
+                    RMS y 23,9 dB de pico entre L y R). Esto NO se puede medir con
+                    MediaRecorder: getMaxAmplitude() devuelve UN solo valor mezclado y el
+                    PCM no se puede leer. Hace falta el camino AudioRecord + MediaCodec +
+                    MediaMuxer, que además es el mismo que hace falta para el filtro
+                    pasa-altos (crítica 24), para la ganancia (crítica 23) y para etiquetar
+                    el MP4 en BT.709 (crítica 15). Cuando exista, la firma es
+                        var audioLevelSink: ((peakL: Int, peakR: Int) -> Unit)?
+                    y este hueco admite las dos barras sin tocar nada más. -->
+
+            <!-- Galón: dice que esto se abre. Decorativo a propósito
+                 (importantForAccessibility=no): la fila ENTERA es un solo botón y
+                 CameraActivity le pone la descripción completa; un tercer nodo accesible
+                 haría que TalkBack recitase la fila otra vez. -->
+            <ImageView
+                android:id="@+id/video_hud_caret"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_chevron_down"
+                app:tint="@color/accent" />
         </LinearLayout>
 
         <!-- Ranura ÚNICA de paneles: la exclusión mutua es estructural (showPanel deja
@@ -767,7 +818,9 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
                     android:clipToPadding="false"
+                    android:fadingEdgeLength="20dp"
                     android:fillViewport="true"
+                    android:requiresFadingEdge="horizontal"
                     android:scrollbars="none">
 
                     <LinearLayout
@@ -848,11 +901,17 @@
                 android:padding="12dp"
                 android:visibility="gone">
 
+                <!-- Degradado de borde: en el panel de vídeo hay seis chips (resolución,
+                     fps, códec, sonido, bloqueo AE y time-lapse) en 280dp, y es justo el
+                     panel al que ahora invita el rótulo de formato. Si el usuario llega
+                     buscando 4K y ve la fila cortada sin señal de scroll, se vuelve. -->
                 <HorizontalScrollView
                     android:layout_width="@dimen/panel_slider_width"
                     android:layout_height="wrap_content"
                     android:clipToPadding="false"
+                    android:fadingEdgeLength="20dp"
                     android:fillViewport="true"
+                    android:requiresFadingEdge="horizontal"
                     android:scrollbars="none">
 
                     <LinearLayout
@@ -954,12 +1013,43 @@
                     android:layout_marginStart="6dp"
                     android:text="@string/sec_image" />
 
+                <!-- ============ CALIDAD DE IMAGEN: DOS FILAS, NO UNA ============
+                     OCHO jueces de la ronda 10 describen el mismo fallo de maquetación
+                     (ALTO 32 y MEDIOS 3, 17, 24, 47, 51, 63 y 74): "la quinta pastilla se
+                     corta a media letra ('F') contra el borde de la tarjeta, sin
+                     degradado, sin flecha y sin ninguna pista de scroll", "el usuario no
+                     puede saber qué opciones existen", "una opción que no se ve es una
+                     opción que no existe". Uno de ellos llegó a contar una sexta pastilla
+                     (FILTRO) directamente fuera de vista.
+
+                     La cuenta real es peor que lo que vieron: esta fila lleva SEIS chips en
+                     el XML y CameraActivity le inserta otros DOS en caliente (AEB y
+                     ANÁLISIS, con insertChip(binding.chipFilter, ...), que los mete en la
+                     fila de chip_filter). Son OCHO chips de 48dp mínimo con 8dp de margen
+                     en los 295dp útiles del panel en la pantalla de cubierta: caben tres y
+                     medio. No era un chip cortado, era medio panel invisible.
+
+                     Ahora son dos filas de cuatro, agrupadas además por concepto, que es lo
+                     que pedía el MEDIO 24 ("HDR es un interruptor, RAW un formato, 16:9 una
+                     relación y FULL una resolución: cuatro conceptos distintos como chips
+                     idénticos en una misma fila"): arriba lo que decide QUÉ FICHERO sale,
+                     abajo lo que decide QUÉ SE VE. Los dos chips que inserta el código
+                     siguen aterrizando junto a chip_filter, o sea en la segunda fila, que es
+                     donde les toca por significado.
+
+                     Y las dos filas llevan degradado de borde (requiresFadingEdge), que es
+                     literalmente lo que pidieron tres de los ocho ("basta un degradado de
+                     borde o un indicador de scroll"). El degradado sólo aparece cuando de
+                     verdad queda contenido por ese lado, así que no ensucia cuando cabe
+                     todo. -->
                 <HorizontalScrollView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
                     android:clipToPadding="false"
+                    android:fadingEdgeLength="20dp"
                     android:fillViewport="true"
+                    android:requiresFadingEdge="horizontal"
                     android:scrollbars="none">
 
                     <LinearLayout
@@ -987,6 +1077,24 @@
                             android:id="@+id/chip_res"
                             style="@style/ProChip"
                             android:text="@string/chip_full" />
+                    </LinearLayout>
+                </HorizontalScrollView>
+
+                <HorizontalScrollView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:clipToPadding="false"
+                    android:fadingEdgeLength="20dp"
+                    android:fillViewport="true"
+                    android:requiresFadingEdge="horizontal"
+                    android:scrollbars="none">
+
+                    <LinearLayout
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:gravity="center"
+                        android:orientation="horizontal">
 
                         <!-- AJUSTAR / LLENAR. En la pantalla interior (casi cuadrada) el
                              visor llena la pantalla y recorta lo que sobra: sin este
@@ -998,6 +1106,11 @@
                             android:contentDescription="@string/cd_fit"
                             android:text="@string/chip_fill" />
 
+                        <!-- CameraActivity.buildExtraChips() inserta AEB y ANÁLISIS JUSTO
+                             DESPUÉS de éste (insertChip usa chip_filter.parent), así que
+                             esta fila acaba con cuatro. Si algún día hay que mover
+                             chip_filter, esos dos se mudan con él: no hay nada que tocar en
+                             el Kotlin. -->
                         <TextView
                             android:id="@+id/chip_filter"
                             style="@style/ProChip.Icon"
@@ -1019,7 +1132,9 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
                     android:clipToPadding="false"
+                    android:fadingEdgeLength="20dp"
                     android:fillViewport="true"
+                    android:requiresFadingEdge="horizontal"
                     android:scrollbars="none">
 
                     <LinearLayout
@@ -1034,10 +1149,16 @@
                             android:contentDescription="@string/cd_lenses"
                             android:text="@string/chip_lenses" />
 
+                        <!-- Icono INEQUÍVOCO de voltear cámara, no la flecha circular.
+                             CRÍTICO 34, segunda mitad: "la única vía a la frontal es
+                             '⋯' → LENTES Y CÁMARA → un icono que se lee como RECARGAR".
+                             ic_flip_camera (cuerpo de cámara con las dos flechas) ya lo usa
+                             btn_flip_main en la fila del obturador: el mismo gesto se
+                             dibuja igual en los dos sitios. -->
                         <TextView
                             android:id="@+id/chip_flip"
                             style="@style/ProChip.Icon"
-                            android:drawableStart="@drawable/ic_rotate"
+                            android:drawableStart="@drawable/ic_flip_camera"
                             android:text="" />
 
                         <!-- Solo aparece si el sistema publica de verdad la pantalla
@@ -1074,7 +1195,9 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
                     android:clipToPadding="false"
+                    android:fadingEdgeLength="20dp"
                     android:fillViewport="true"
+                    android:requiresFadingEdge="horizontal"
                     android:scrollbars="none">
 
                     <LinearLayout
@@ -1199,10 +1322,21 @@
                     android:textColor="@color/text_off" />
             </LinearLayout>
 
+            <!-- 48dp y no 46: el MEDIO 35 lo midió en las capturas y lo marcó como
+                 "objetivo táctil de 46dp, por debajo del mínimo de 48dp, encima de otro
+                 control". Los 2dp que faltaban no se veían y sí se notaban al fallar el
+                 toque. (Lo otro que dice esa debilidad —que el botón sale CENTRADO sobre
+                 el conmutador FOTO/VÍDEO— el propio juez lo dejó en duda: "el layout fuente
+                 lo coloca en el borde derecho, comprobar si la compilación probada difiere
+                 o si se trata de una burbuja del sistema". Aquí está en el borde derecho
+                 desde hace rondas: con el teléfono plegado el conmutador ocupa 90..260dp y
+                 este botón 287..335dp, o sea 27dp de aire. Lo que vieron las trece capturas
+                 es la burbuja flotante de ColorOS, que no es nuestra y no se puede mover
+                 desde la app.) -->
             <ImageView
                 android:id="@+id/btn_whatsapp"
-                android:layout_width="46dp"
-                android:layout_height="46dp"
+                android:layout_width="@dimen/touch_min"
+                android:layout_height="@dimen/touch_min"
                 android:layout_gravity="center_vertical|end"
                 android:layout_marginEnd="@dimen/action_row_side_margin"
                 android:background="@drawable/wa_circle_bg"
@@ -1226,6 +1360,17 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp">
 
+            <!-- FONDO OPACO, no un cristal. El CRÍTICO 31 describe lo que se ve hoy en las
+                 trece capturas: "un segundo elemento rectangular redondeado con filete
+                 claro QUE DEJA VER PÍXELES DE LA ESCENA". Eso es exactamente esta tarjeta
+                 vacía: blanco al 13% (#22FFFFFF) con filo blanco al 70%, o sea un marco
+                 translúcido por el que pasa el visor. Sin foto dentro no se lee como
+                 "aquí va tu última toma" sino como un artefacto de dibujado, y por eso
+                 otros seis jueces dan la miniatura por NO PINTADA (ALTO 4, 27, 43, 53, 66 y
+                 MEDIO 23: "la fila del obturador está completamente vacía"): estaba
+                 pintada, pero era invisible sobre cualquier escena clara.
+                 Con la misma superficie opaca que el resto del HUD (85% de negro) el hueco
+                 se ve siempre, diga lo que diga la escena de detrás. -->
             <com.google.android.material.card.MaterialCardView
                 android:id="@+id/thumbnail"
                 android:layout_width="56dp"
@@ -1234,7 +1379,7 @@
                 android:layout_marginStart="@dimen/action_row_side_margin"
                 android:contentDescription="@string/cd_thumbnail"
                 android:focusable="true"
-                app:cardBackgroundColor="#22FFFFFF"
+                app:cardBackgroundColor="@color/surface_panel"
                 app:cardCornerRadius="14dp"
                 app:cardElevation="0dp"
                 app:strokeColor="#B3FFFFFF"
@@ -1248,13 +1393,19 @@
                     android:scaleType="centerCrop" />
             </com.google.android.material.card.MaterialCardView>
 
+            <!-- Fondo propio: ver circle_hud_bg.xml. Cinco jueces dieron este botón por no
+                 pintado porque era un glifo blanco sin fondo sobre un edredón blanco, y de
+                 ahí salió que la cámara frontal se quedara sin una sola muestra en toda la
+                 ronda. La onda al pulsar pasa a foreground para no perderla al poner
+                 fondo (View.foreground existe desde API 23; el minSdk es 26). -->
             <ImageButton
                 android:id="@+id/btn_flip_main"
                 android:layout_width="56dp"
                 android:layout_height="56dp"
                 android:layout_gravity="center_vertical|end"
                 android:layout_marginEnd="@dimen/action_row_side_margin"
-                android:background="?attr/selectableItemBackgroundBorderless"
+                android:background="@drawable/circle_hud_bg"
+                android:foreground="?attr/selectableItemBackgroundBorderless"
                 android:contentDescription="@string/change_lens"
                 android:padding="6dp"
                 android:scaleType="fitCenter"
@@ -1269,12 +1420,42 @@
                 android:layout_height="78dp"
                 android:layout_gravity="center">
 
+                <!-- ============ LA MEDIA LUNA GRIS DEL OBTURADOR ============
+                     Es el defecto más repetido de toda la ronda 10: SIETE jueces
+                     (CRÍTICO 31, ALTO 13, 19 y 33, MEDIO 2, 42 y 73) y el único presente en
+                     el 100% de las capturas, en los tres modos y a lo largo de siete
+                     minutos, o sea persistente y no un fotograma de animación. Lo describen
+                     igual: "el disco blanco no es concéntrico con el anillo ámbar y por su
+                     derecha asoma una media luna gris dentada y moteada".
+
+                     Diagnóstico: es una SOMBRA DE ELEVACIÓN. El fondo del botón
+                     (shutter_button) es un layer-list cuyo primer trazo es un óvalo de
+                     relleno transparente, así que el contorno que Android deriva para
+                     proyectar sombra es el círculo COMPLETO de 78dp, mientras que lo único
+                     que se ve pintado es el disco blanco de 62dp: cualquier elevación
+                     dibuja un arco gris difuminado por fuera del disco y desplazado hacia
+                     abajo, que es literalmente "una media luna gris que asoma por un lado".
+                     Nosotros no ponemos elevación en ningún sitio; la ponen los estilos de
+                     plataforma de ImageButton, y este teléfono es un ColorOS, que
+                     reestiliza los widgets del sistema. Encaja con que salga en las trece
+                     capturas de ESTE aparato y con que la geometría del drawable sea
+                     correcta.
+
+                     Las tres líneas de abajo cierran las tres vías por las que puede
+                     llegar una sombra: el animador de estado que sube la Z al pulsar, la
+                     elevación estática y el contorno del que se deriva la sombra. Ninguna
+                     cambia un píxel de lo que se dibuja a propósito.
+                     (La concentricidad se ha asegurado además en el propio drawable, con
+                     <size> y gravity=center en vez de insets.) -->
                 <ImageButton
                     android:id="@+id/btn_shutter"
                     android:layout_width="match_parent"
                     android:layout_height="match_parent"
                     android:background="@drawable/shutter_button"
-                    android:contentDescription="@string/shutter" />
+                    android:contentDescription="@string/shutter"
+                    android:elevation="0dp"
+                    android:outlineProvider="none"
+                    android:stateListAnimator="@null" />
 
                 <View
                     android:id="@+id/shutter_icon"

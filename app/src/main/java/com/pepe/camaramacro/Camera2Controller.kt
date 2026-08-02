@@ -308,12 +308,47 @@ class Camera2Controller(
     private var toneCurve: TonemapCurve? = null
     /**
      * Compensación de exposición propia de la LENTE FÍSICA activa, en pasos de EV del HAL.
-     * Medido: con BrightnessValue casi idéntico (6,85 en el gran angular contra 6,19 en el
-     * tele) el tele expone ~2 EV más y usa ISO 628 donde el gran angular usó ISO 100; su foto
-     * sale con mediana de luma 170 y el histograma aplastado (p1=52, p99=211) frente a 131 y
-     * (5, 234). No es un fallo del AE: cada módulo trae su calibración de fábrica.
+     * Cada módulo trae su calibración de fábrica y los dos fotómetros no se ponen de acuerdo:
+     * sobre la misma habitación el gran angular mide 5,20-5,69 EV de brillo y el tele
+     * 7,46-7,71, y el tele entrega mediana de luma 17 contra 119.
+     *
+     * OJO: hubo aquí una medición ANTIGUA que decía lo contrario (el tele saliendo con mediana
+     * 170 contra 131 y ~2 EV de más). Se conserva la advertencia y no el número: llevó a poner
+     * -1,0 EV en la ID6, o sea a oscurecer todavía más la lente que ya salía hundida. El valor
+     * y el porqué del actual están en DEFAULT_LENS_EV.
      */
     private var lensEvSteps = 0
+    /**
+     * TRASPASO DE EXPOSICIÓN AL CRUZAR DE LENTE. Corrección DINÁMICA en pasos de EV, encima de
+     * lensEvSteps, calculada midiendo lo que la lente saliente estaba entregando de verdad.
+     *
+     * Por qué hace falta además de la tabla fija: el desacuerdo medido entre los dos fotómetros
+     * (2,2-2,3 EV sobre la misma habitación) no es constante entre escenas, y una constante sola
+     * ya se equivocó una vez de SIGNO (ver DEFAULT_LENS_EV). Esto se remide en cada cruce y
+     * corrige en los dos sentidos, así que ninguna escena futura puede dejar la nueva lente
+     * 3 EV por debajo sin que nada reaccione.
+     */
+    private var lensEvHandoffSteps = 0
+    /**
+     * EV100 que estaba entregando la lente SALIENTE en el instante del cruce (NaN = no hay
+     * cruce en curso). Es la única referencia válida de "cuánta luz hay en esta escena de
+     * verdad", porque la calcula el AE que YA estaba convergido sobre ella.
+     */
+    @Volatile private var handoffEv100 = Float.NaN
+    /** Fotogramas que le quedan a la lente entrante para converger antes de medirla. */
+    private var handoffFramesLeft = 0
+    /**
+     * Última matriz de color que publicó el AWB automático. Se guarda junto con las ganancias
+     * porque COLOR_CORRECTION_GAINS sin su COLOR_CORRECTION_TRANSFORM no reproduce el color
+     * del HAL: hay que copiar las DOS o el viraje que se introduce es peor que el que se
+     * venía a corregir (ver applyLensWhiteBalance).
+     */
+    @Volatile private var lastPreviewAwbTransform: ColorSpaceTransform? = null
+    /**
+     * ¿Se guarda el recorte digital a su tamaño REAL en vez de interpolado hasta la resolución
+     * nominal? Se lee de la preferencia recorte_honesto (por defecto SÍ). Ver honestCropScale.
+     */
+    private var honestCrop = true
     // Detección de caras: sin esto el AF y el AE de una foto de personas van al centro.
     private var faceDetectMode = CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF
     /**
@@ -821,6 +856,19 @@ class Camera2Controller(
     val stillMp: Float get() = stillSizeReal.width.toFloat() * stillSizeReal.height / 1_000_000f
 
     /**
+     * Megapíxeles que va a tener el ARCHIVO de verdad, con el recorte digital ya deshecho.
+     * No es lo mismo que stillMp en cuanto hay zoom digital, y esa diferencia es exactamente
+     * lo que el jurado llamó "megapíxeles inventados": a 2x el stream declara 8,29 MP y el
+     * detalle óptico es de alrededor de 0,8 MP. La interfaz debería mostrar ESTE número junto
+     * a la pastilla naranja "DIGITAL", que ya avisa de que el encuadre no es óptico.
+     */
+    val deliveredMp: Float
+        get() {
+            val s = honestCropScale()
+            return stillMp * s * s
+        }
+
+    /**
      * true si el modo noche va a disparar a menos de la mitad de la resolución normal.
      * nightSize se elige por MEMORIA LIBRE y puede caer hasta la resolución del visor sin que
      * el usuario se entere: es la diferencia entre 12,6 y 2,1 MP.
@@ -860,8 +908,22 @@ class Camera2Controller(
 
     // ---------------------------------------------------------------- API pública
 
+    /**
+     * Olvida TODO lo que se arrastraba de la lente anterior: la referencia de exposición del
+     * cruce y la solución de color del AWB. Un dato de otra óptica no es una aproximación,
+     * es una mentira con la forma correcta, y aquí acabaría escrita dentro del JPEG.
+     */
+    private fun clearLensHandoff() {
+        handoffEv100 = Float.NaN
+        handoffFramesLeft = 0
+        lensEvHandoffSteps = 0
+        lastPreviewAwbGains = null
+        lastPreviewAwbTransform = null
+    }
+
     fun open(camId: String) {
         failed = false
+        clearLensHandoff()
         zoomRatio = 1f
         aeLocked = false
         afLocked = false
@@ -1314,6 +1376,10 @@ class Camera2Controller(
                     }
                 }
             }
+            // Perfil de color COMÚN entre las dos ópticas. Solo si no hay destello: cuando el
+            // LED dispara manda applyFlashWhiteBalance, que corrige el iluminante del propio
+            // flash —un problema distinto y mayor— y ya ha apagado el AWB con SU muestra.
+            if (!fireFlash) applyLensWhiteBalance(req)
             // El ISO REAL de esta foto, que puede no tener nada que ver con el del visor:
             // decidir el denoise con el del visor pedía detalle máximo para fotos que
             // acababan a ISO 3200 y denoise agresivo para fotos que salían a ISO 100.
@@ -1438,15 +1504,15 @@ class Camera2Controller(
         //    Y el recorte ya NO es fijo: se mide (ver flashAmbientEvSteps).
         val pasos = flashAmbientEvSteps()
         if (evMin < 0 && pasos != 0) {
-            // lensEvSteps VA TAMBIÉN. applyControls(still = true) acaba de poner
-            // (evSteps + lensEvSteps) quince líneas antes y esto lo pisa: sin sumarlo aquí, la
-            // calibración por lente física desaparecía SOLO en las fotos con destello. Con
-            // DEFAULT_LENS_EV["6"] = -1,0 EV, cada foto con flash del tele salía ~1 EV más clara
-            // que la misma escena sin flash — justo el desajuste entre módulos que lensEvSteps
-            // existe para corregir.
+            // LA CALIBRACIÓN POR LENTE VA TAMBIÉN. applyControls(still = true) acaba de poner
+            // (evSteps + lensEvSteps + lensEvHandoffSteps) quince líneas antes y esto lo pisa:
+            // sin sumarlos aquí, la calibración por lente física desaparecía SOLO en las fotos
+            // con destello. Cuando DEFAULT_LENS_EV["6"] valía -1,0 EV, cada foto con flash del
+            // tele salía ~1 EV más clara que la misma escena sin flash; ahora que vale +1,5 el
+            // error sería del mismo tamaño y del signo contrario.
             b.set(
                 CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION,
-                (evSteps + lensEvSteps + pasos).coerceIn(evMin, evMax)
+                (evSteps + lensEvSteps + lensEvHandoffSteps + pasos).coerceIn(evMin, evMax)
             )
         }
         // El aporte del LED se imprime como "SIN MEDIDA" y no como NaN: es el caso que hay que
@@ -1813,9 +1879,27 @@ class Camera2Controller(
             return globalZoom
         }
         val gmax = globalMaxZoom()
-        val gg = g.coerceIn(1f, gmax)
+        val pedido = g.coerceIn(1f, gmax)
+        // IMANTADO AL CRUCE ÓPTICO. El jurado señaló que "el cruce llega un paso tarde": el
+        // peor punto de todo el rango es el 2x y el 2,9x óptico es mejor. Adelantar el cruce
+        // POR DEBAJO de la focal nativa del tele es físicamente imposible —el tele no puede
+        // enseñar un campo más ancho del que tiene, y la principal que cubriría ese hueco
+        // (ID2, 5,0 mm) está averiada—, así que lo único que se puede adelantar es el último
+        // tramo: entre ZOOM_SNAP_MARGIN y 1,0 veces la parada óptica se salta ya a la óptica.
+        // Lo que se gana es enorme y lo que se paga es mínimo: en ese tramo el gran angular
+        // está recortando 4,1-4,6x (el 3,2x del 2x ya mide 0,35 xNyquist y −93% de energía de
+        // alta frecuencia), y el encuadre se cierra como mucho un 11%.
+        // Los cinco botones fijos NO se ven afectados: el 2x pide 3,2x internos y el umbral
+        // está en 4,13, así que esto solo actúa con el pellizco y el deslizador continuos.
         var ti = 0
-        for (i in zoomChain.indices) if (gg >= zoomChain[i].second - 0.01f) ti = i
+        for (i in zoomChain.indices) {
+            if (pedido >= zoomChain[i].second * ZOOM_SNAP_MARGIN - 0.01f) ti = i
+        }
+        // Y el zoom EFECTIVO sube hasta la parada óptica: si no, la pastilla de lente diría
+        // 2,7x mientras el sensor entrega 2,9x. Esa pastilla es lo mejor que tiene la app
+        // precisamente porque no miente, y un imantado silencioso la convertiría en un rótulo
+        // decorativo.
+        val gg = maxOf(pedido, zoomChain[ti].second)
         val residual = gg / zoomChain[ti].second
         Log.i("CamMacro", "setZoom g=$g gg=$gg ti=$ti chainIndex=$chainIndex residual=$residual switch=${ti != chainIndex}")
         if (ti != chainIndex) {
@@ -1922,6 +2006,21 @@ class Camera2Controller(
     private fun switchToLens(targetIndex: Int) {
         if (switching) return
         switching = true
+        // ANTES de cerrar nada: apuntar lo que esta lente estaba entregando de verdad. Es la
+        // referencia con la que la lente entrante igualará su exposición (ver
+        // maybeApplyAeHandoff), y hay que tomarla aquí porque setUpOutputs sustituye camChars
+        // —de donde sale el diafragma— en cuanto se abra la nueva.
+        handoffEv100 = if (manualExposure || aeLocked) Float.NaN else currentEv100()
+        handoffFramesLeft = if (handoffEv100.isNaN()) 0 else HANDOFF_SETTLE_FRAMES
+        lensEvHandoffSteps = 0
+        // Y el estado del AE se declara desconocido: heredar el CONVERGED de la lente que se
+        // va daría por bueno el primer fotograma de la nueva, que es justo el que todavía no
+        // ha medido nada.
+        lastAeState = -1
+        // El color SÍ se olvida entero: las ganancias del AWB son de un sensor distinto y
+        // aplicarlas a la lente nueva metería justo el viraje que se viene a quitar.
+        lastPreviewAwbGains = null
+        lastPreviewAwbTransform = null
         // Igual que en close(): invalidar la generación ANTES de cerrar nada, o un onOpened
         // tardío de la lente anterior se asigna encima de la nueva y quedan dos abiertas.
         cameraGen++
@@ -1958,6 +2057,11 @@ class Camera2Controller(
      */
     fun switchToCamera(camId: String) {
         if (camId == cameraId && cameraDevice != null) return
+        // Aquí NO hay traspaso de exposición: pasar de la trasera a la frontal es cambiar de
+        // escena entera, no de encuadre, así que igualar el brillo con la anterior sería
+        // exactamente lo contrario de lo que hay que hacer. Y el color del AWB de la lente
+        // vieja tampoco vale para la nueva.
+        clearLensHandoff()
         cameraGen++
         activity.runOnUiThread { onLensSwitching?.invoke() }
         cameraId = camId
@@ -2501,6 +2605,71 @@ class Camera2Controller(
         return if (sh > 0f) sw / sh else 0f
     }
 
+    /**
+     * RECORTE DIGITAL HONESTO: cuánto hay que reducir el archivo para que sus píxeles sean
+     * información óptica y no interpolación. 1 = no tocar nada.
+     *
+     * El defecto medido (ronda 10): los CINCO pasos de zoom entregan siempre un archivo de
+     * 3840x2160 (8,29 MP), pero la frecuencia de corte espectral en el centro va
+     * 0,84 -> 0,64 -> 0,35 -> 0,70 -> 0,53 xNyquist en 0.6x/1x/2x/2.9x/5x, y la energía de alta
+     * frecuencia cae de 0,0376 (nativo) a 0,0028 en el 2x: un −93%. Es decir, el paso 2x pesa y
+     * declara 8,29 MP y lleva alrededor de 1 MP de detalle real. El rótulo naranja "DIGITAL"
+     * del visor es honesto; el archivo no lo era.
+     *
+     * ELECCIÓN, Y POR QUÉ ESTA: de las tres salidas posibles —(a) guardar el recorte a su
+     * tamaño real, (b) super-resolución multi-fotograma, (c) limitarse a declarar la resolución
+     * verdadera en los metadatos— se hace (a) y además (c).
+     *   - (b) es la única que AÑADE detalle, pero exige apilar varios fotogramas con alineación
+     *     subpíxel en la ruta de foto normal, y el apilado que ya existe (NightStacker) fue
+     *     precisamente lo que el jurado midió que ABLANDA la imagen: laplaciano 125,4 contra
+     *     298,9 de la toma única. Meter esa maquinaria en el disparo normal cambiaría un
+     *     defecto medido por otro defecto medido.
+     *   - (c) sola deja la foto igual de blanda: informa del problema en vez de arreglarlo.
+     *   - (a) es gratis, no puede empeorar nada (reducir NO inventa píxeles: pliega hacia atrás
+     *     justo la interpolación que había metido el HAL) y devuelve un archivo que a tamaño
+     *     real se ve nítido en vez de a acuarela, además de pesar bastante menos.
+     * EL FACTOR, Y POR QUÉ LLEVA UN MARGEN. La geometría dice 1/zoomRatio: el HAL recorta esa
+     * fracción del array activo y la estira hasta el tamaño del stream, así que deshacer el
+     * estirado devuelve los píxeles que el sensor entregó de verdad. La medida dice otra cosa
+     * parecida pero no idéntica: la frecuencia de corte del archivo (0,64 a 1x, 0,35 a 2x, 0,53
+     * a 5x, en fracción del Nyquist DEL PROPIO ARCHIVO) es exactamente el factor por el que se
+     * puede reducir sin perder NADA. Comparadas: 1x 0,625 contra 0,64; 2x 0,3125 contra 0,35;
+     * 5x 0,573 contra 0,53. La geometría se pasa hasta un 11% en el 2x, así que se le añade ese
+     * 10% de margen (HONEST_SAFETY): entre dejar un pelo de interpolación y tirar detalle real,
+     * se deja la interpolación, que es el error reversible. Con el margen puesto, el 2x sale a
+     * ~1320x743 = 0,98 MP, que es justo el "alrededor de 1 MP de detalle real" que midió el
+     * jurado sobre ese mismo archivo.
+     *
+     * Se puede desactivar sin recompilar con la preferencia recorte_honesto = false.
+     */
+    private fun honestCropScale(): Float {
+        if (!honestCrop) return 1f
+        // isDigitalCrop usa el mismo umbral: por debajo de 1,02x el recorte es ruido de
+        // redondeo del propio zoom y reducir la foto sería peor que dejarla.
+        if (zoomRatio <= 1.02f) return 1f
+        val ladoLargo = maxOf(stillSizeReal.width, stillSizeReal.height)
+        if (ladoLargo <= 0) return 1f
+        val suelo = HONEST_MIN_LONG_SIDE.toFloat() / ladoLargo
+        if (suelo >= 1f) return 1f // el archivo ya es más pequeño que el suelo: no se toca
+        return (HONEST_SAFETY / zoomRatio).coerceIn(suelo, 1f)
+    }
+
+    /**
+     * Frase para el EXIF cuando la foto sale de un recorte digital. Va en UserComment porque es
+     * el único sitio que sobrevive en TODAS las rutas, incluida la de Ultra HDR, que no se
+     * puede recodificar (tocar los bytes rompe el índice MPF que apunta al mapa de ganancia) y
+     * por tanto es la única que sigue guardando la resolución nominal.
+     */
+    private fun textoRecorteDigital(): String {
+        if (zoomRatio <= 1.02f) return ""
+        val w = Math.round(stillSizeReal.width / zoomRatio)
+        val h = Math.round(stillSizeReal.height / zoomRatio)
+        val mp = w.toLong() * h / 1_000_000f
+        return " Recorte digital " + String.format(java.util.Locale.US, "%.2f", zoomRatio) +
+            "x: el detalle óptico real equivale a ${w}x$h px (" +
+            String.format(java.util.Locale.US, "%.1f", mp) + " MP)."
+    }
+
     /** Reconstruye toda la sesión (recrea ImageReaders según los flags actuales). */
     private fun postRebuildSession() {
         val h = backgroundHandler
@@ -2998,17 +3167,29 @@ class Camera2Controller(
      * cada una. Ahora: un decode, un Canvas, una compresión.
      *
      * `cropRatio` es la proporción ancho/alto de la CAJA VISIBLE del visor (0 = no recortar).
+     * `scale` es la reducción del recorte digital honesto (1 = no reducir; ver honestCropScale).
      */
     private fun transformStillJpeg(
         bytes: ByteArray,
         cropRatio: Float,
-        cm: ColorMatrix?
+        cm: ColorMatrix?,
+        scale: Float = 1f
     ): ByteArray? {
-        if (cropRatio <= 0f && cm == null) return bytes
+        if (cropRatio <= 0f && cm == null && scale >= 0.999f) return bytes
         var base: Bitmap? = null
         var dst: Bitmap? = null
         return try {
-            val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+            // Si además hay que REDUCIR, se decodifica ya submuestreado: a 2x el factor honesto
+            // es 1/3,2, así que con inSampleSize 2 se ahorran tres cuartas partes de la memoria
+            // y del tiempo de decodificación de una foto de 8,29 MP (que en ARGB_8888 son
+            // 33 MB por bitmap, y aquí conviven dos). El resto de la reducción lo hace el
+            // Canvas con filtrado bilineal, que es lo que ya se usaba para el recorte.
+            var sub = 1
+            if (scale < 0.999f && scale > 0f) {
+                while (sub * 2 <= (1f / scale).toInt()) sub *= 2
+            }
+            val opts = BitmapFactory.Options().apply { inSampleSize = sub }
+            val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: return null
             // Hay que enderezar ANTES de recortar o el recorte saldría en el eje equivocado.
             val deg = exifDegrees(bytes)
             base = if (deg == 0) decoded else {
@@ -3042,13 +3223,21 @@ class Camera2Controller(
                     cy = (b.height - chPx) / 2
                 }
             }
-            val salida = Bitmap.createBitmap(cwPx, chPx, Bitmap.Config.ARGB_8888)
+            // Reducción que QUEDA por hacer: la decodificación submuestreada ya se comió un
+            // factor `sub`, así que pedir aquí `scale` otra vez encogería de más.
+            val resto = if (scale < 0.999f) (scale * sub).coerceIn(0.05f, 1f) else 1f
+            val outW = Math.round(cwPx * resto).coerceIn(1, cwPx)
+            val outH = Math.round(chPx * resto).coerceIn(1, chPx)
+            val salida = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
             dst = salida
             val paint = Paint(Paint.FILTER_BITMAP_FLAG)
             if (cm != null) paint.colorFilter = ColorMatrixColorFilter(cm)
             Canvas(salida).drawBitmap(
-                b, Rect(cx, cy, cx + cwPx, cy + chPx), Rect(0, 0, cwPx, chPx), paint
+                b, Rect(cx, cy, cx + cwPx, cy + chPx), Rect(0, 0, outW, outH), paint
             )
+            if (outW != cwPx || outH != chPx) {
+                Log.i("CamMacro", "recorte honesto: ${cwPx}x$chPx -> ${outW}x$outH")
+            }
             val bos = ByteArrayOutputStream(bytes.size)
             salida.compress(Bitmap.CompressFormat.JPEG, JPEG_Q, bos)
             bos.toByteArray()
@@ -3139,6 +3328,13 @@ class Camera2Controller(
     private fun buildXmp(night: Boolean, frames: Int): String {
         val f = String.format(java.util.Locale.US, "%.2f", activeFocalMm)
         val z = String.format(java.util.Locale.US, "%.2f", zoomRatio)
+        // Resolución ÓPTICA real bajo el recorte digital, en píxeles. Con el recorte honesto
+        // activado coincide con el tamaño del archivo; si alguien lo desactiva, o en Ultra HDR
+        // (que no se puede recodificar), esto es lo único que dice cuánto detalle hay de verdad.
+        val opW = if (zoomRatio > 1.02f) Math.round(stillSizeReal.width / zoomRatio)
+        else stillSizeReal.width
+        val opH = if (zoomRatio > 1.02f) Math.round(stillSizeReal.height / zoomRatio)
+        else stillSizeReal.height
         return "<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:RDF " +
             "xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>" +
             "<rdf:Description rdf:about='' xmlns:tiff='http://ns.adobe.com/tiff/1.0/' " +
@@ -3146,7 +3342,8 @@ class Camera2Controller(
             "tiff:Make='${xmlEsc(Build.MANUFACTURER)}' tiff:Model='${xmlEsc(Build.MODEL)}' " +
             "cam:LensId='${xmlEsc(cameraId)}' cam:FocalLengthMm='$f' " +
             "cam:Focal35mm='$activeEquivMm' " +
-            "cam:ZoomRatio='$z' cam:Mode='${if (night) "noche" else "normal"}' " +
+            "cam:ZoomRatio='$z' cam:OpticalWidth='$opW' cam:OpticalHeight='$opH' " +
+            "cam:Mode='${if (night) "noche" else "normal"}' " +
             "cam:Frames='${if (night) frames else 1}'/></rdf:RDF></x:xmpmeta>"
     }
 
@@ -3432,6 +3629,154 @@ class Camera2Controller(
     }
 
     /**
+     * Corrección de color de ESTA lente física: (ganancia de R, ganancia de B). Igual que
+     * ev_offset_<id> y tone_negro_<id>, se afina desde preferencias sin recompilar.
+     */
+    private fun lensWbCalibration(): Pair<Float, Float> {
+        val def = DEFAULT_LENS_WB[cameraId] ?: return Pair(1f, 1f)
+        return try {
+            val p = activity.getSharedPreferences("camara", Context.MODE_PRIVATE)
+            Pair(
+                p.getFloat("wb_r_$cameraId", def.first),
+                p.getFloat("wb_b_$cameraId", def.second)
+            )
+        } catch (e: Exception) {
+            def
+        }
+    }
+
+    /**
+     * IGUALAR EL COLOR ENTRE LENTES. Aplica a la FOTO la corrección medida de esta lente
+     * física, encima de la solución que el AWB del propio aparato acaba de calcular.
+     *
+     * El problema medido (ronda 10, misma escena, mismos segundos): B/G = 0,966-0,973 en el
+     * gran angular contra 1,081 en el tele, o sea 11% de viraje azul al cruzar de óptica (18%
+     * contra el 2x, que da 0,917). No hay ni un perfil de color común entre los dos módulos.
+     *
+     * POR QUÉ SOLO EN LA FOTO, y esto es una limitación del API, no una decisión estética:
+     * COLOR_CORRECTION_GAINS y COLOR_CORRECTION_TRANSFORM solo los mira el HAL cuando
+     * CONTROL_AWB_MODE está en OFF. Para corregir también el VISOR habría que apagar el AWB de
+     * forma permanente, y entonces el balance dejaría de adaptarse al pasar de interior a
+     * exterior: se cambiaría un salto de 11% al cruzar de lente por un balance clavado en el
+     * iluminante de hace media hora. Se aplica donde se puede medir el resultado y donde vive
+     * el daño duradero, que es el archivo.
+     *
+     * Es EXACTAMENTE la misma mecánica de applyFlashWhiteBalance —copiar la solución del HAL y
+     * empujarla lo justo— y por eso las dos no se pisan: cuando dispara el destello manda la
+     * del flash, que corrige el iluminante del LED, un problema distinto y mayor.
+     */
+    private fun applyLensWhiteBalance(b: CaptureRequest.Builder) {
+        if (manualWb || !awbOffSupported) return
+        val (gR, gB) = lensWbCalibration()
+        if (gR == 1f && gB == 1f) return
+        val g = lastPreviewAwbGains ?: return
+        val t = lastPreviewAwbTransform ?: return
+        // Una muestra corrupta (cero, infinito o negativo) apagaría el AWB y dejaría el viraje
+        // clavado dentro del JPEG para siempre: mismo criterio que flashAwbSampleUsable.
+        if (awbRatios(g) == null) return
+        b.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF)
+        b.set(
+            CaptureRequest.COLOR_CORRECTION_MODE,
+            CameraMetadata.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX
+        )
+        b.set(CaptureRequest.COLOR_CORRECTION_TRANSFORM, t)
+        b.set(
+            CaptureRequest.COLOR_CORRECTION_GAINS,
+            RggbChannelVector(g.red * gR, g.greenEven, g.greenOdd, g.blue * gB)
+        )
+        Log.i("CamMacro", "lente $cameraId: color R x$gR, B x$gB (perfil común entre ópticas)")
+    }
+
+    /**
+     * EV100 que está entregando el AE AHORA MISMO: EV100 = log2(N²/t) - log2(ISO/100).
+     *
+     * Es la única cifra comparable entre dos módulos distintos, porque lleva dentro el
+     * diafragma (f/2,05 en el gran angular contra f/2,7 en el tele son 0,8 EV de diferencia
+     * que no tienen nada que ver con la calibración del fotómetro). Devuelve NaN si todavía no
+     * hay una medición real del visor.
+     */
+    private fun currentEv100(): Float {
+        val t = lastAeExpNs
+        val iso = lastAeIso
+        if (t <= 0L || iso <= 0) return Float.NaN
+        val n = camChars?.get(CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES)?.firstOrNull()
+        // Sin diafragma publicado no se inventa uno: sin él la comparación entre lentes deja
+        // de ser válida y es mejor no tocar la exposición que corregirla con un dato falso.
+        if (n == null || n <= 0f) return Float.NaN
+        val segundos = t / 1_000_000_000.0
+        if (segundos <= 0.0) return Float.NaN
+        return (
+            Math.log(n.toDouble() * n / segundos) / LN2 - Math.log(iso / 100.0) / LN2
+            ).toFloat()
+    }
+
+    /**
+     * TRASPASO DE EXPOSICIÓN AL CRUZAR DE LENTE, medido en la escena que hay delante.
+     *
+     * El defecto: al pasar de 2x (gran angular con recorte) a 2,9x (tele óptico) la luminancia
+     * mediana medida cae de 121,8 a 16,8 —factor 7,2, unos 2,9 EV— y el usuario ve que la foto
+     * "se le va a negro" por tocar la pastilla de al lado. Cada lente es coherente CONSIGO
+     * MISMA (angular 119/129/122, tele 17,0/17,1): lo que no existe es una conversación entre
+     * las dos.
+     *
+     * Cómo funciona: switchToLens apunta el EV100 que la lente saliente estaba entregando (su
+     * AE llevaba rato convergido sobre esta escena, así que es la mejor referencia que hay).
+     * Cuando la lente entrante converge, se compara su EV100 con aquél; la diferencia es, por
+     * definición, desacuerdo entre fotómetros y no diferencia de escena, y se compensa.
+     *
+     * Se aplica UNA vez por cruce y acotado: la medida se toma DESPUÉS de la corrección fija
+     * de DEFAULT_LENS_EV, así que lo que se corrige aquí es el residuo, y el bucle converge en
+     * lugar de oscilar. Con el AE bloqueado o en manual no se toca nada: ahí manda el usuario.
+     */
+    private fun maybeApplyAeHandoff(session: CameraCaptureSession) {
+        if (handoffFramesLeft <= 0) return
+        // SOLO fotogramas de la sesión VIVA. Al cerrar la lente saliente siguen llegando
+        // resultados suyos por el hilo de cámara durante unos milisegundos: contarlos gastaría
+        // el plazo de convergencia y, peor, mediría el EV100 de la lente que se acaba de ir
+        // contra sí misma (delta 0) y daría el cruce por igualado sin haber igualado nada.
+        if (session !== captureSession) return
+        handoffFramesLeft--
+        val ref = handoffEv100
+        if (ref.isNaN() || manualExposure || aeLocked || lastAeExpNs <= 0L || lastAeIso <= 0) {
+            handoffFramesLeft = 0
+            handoffEv100 = Float.NaN
+            return
+        }
+        val convergido = lastAeState == CameraMetadata.CONTROL_AE_STATE_CONVERGED ||
+            lastAeState == CameraMetadata.CONTROL_AE_STATE_LOCKED ||
+            lastAeState == CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED
+        // Mientras quede plazo se espera a la convergencia; agotado el plazo se mide igual,
+        // porque un HAL que nunca reporta CONVERGED no puede dejar el cruce sin corregir.
+        if (!convergido && handoffFramesLeft > 0) return
+        handoffFramesLeft = 0
+        handoffEv100 = Float.NaN
+        val ahora = currentEv100()
+        if (ahora.isNaN()) return
+        // > 0: la lente nueva cree que la escena es MÁS clara que lo que medía la anterior,
+        // o sea que va a entregar una foto más OSCURA. Se compensa hacia arriba.
+        val delta = ahora - ref
+        if (kotlin.math.abs(delta) < HANDOFF_MIN_EV) {
+            Log.i(
+                "CamMacro",
+                "cruce de lente: los dos AE coinciden " +
+                    "(${String.format(java.util.Locale.US, "%.2f", delta)} EV)"
+            )
+            return
+        }
+        val paso = evStepValue
+        if (paso <= 0f) return
+        val corr = delta.coerceIn(-HANDOFF_MAX_EV, HANDOFF_MAX_EV)
+        lensEvHandoffSteps = Math.round(corr / paso)
+        Log.i(
+            "CamMacro",
+            "cruce de lente $cameraId: EV100 ${String.format(java.util.Locale.US, "%.2f", ref)}" +
+                " -> ${String.format(java.util.Locale.US, "%.2f", ahora)}; se corrigen " +
+                "${String.format(java.util.Locale.US, "%.2f", corr)} EV ($lensEvHandoffSteps pasos)"
+        )
+        applyAndUpdate()
+    }
+
+    /**
      * Cronómetro de las rutas caras. Solo había Log.i sueltos: sin números de apertura,
      * captura, guardado ni apilado, cada arreglo de rendimiento era una apuesta. Imprime en
      * logcat (adb logcat -s CamPerf) y además abre una sección de traza, así que un
@@ -3624,10 +3969,13 @@ class Camera2Controller(
                 }
             )
             b.set(CaptureRequest.CONTROL_AE_LOCK, aeLocked)
-            // El EV del usuario MÁS el de calibración de ESTA lente física.
+            // El EV del usuario MÁS el de calibración de ESTA lente física MÁS el residuo
+            // medido al cruzar de óptica. El coerceIn no es decorativo: este HAL publica
+            // CONTROL_AE_COMPENSATION_RANGE [-18,+18] con paso 1/6 EV, o sea ±3,0 EV en total,
+            // y los tres sumandos juntos pueden pasarse.
             b.set(
                 CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION,
-                (evSteps + lensEvSteps).coerceIn(evMin, evMax)
+                (evSteps + lensEvSteps + lensEvHandoffSteps).coerceIn(evMin, evMax)
             )
             // El rango de FPS es para el VISOR. En la foto lo omitimos: si no, ata la
             // exposición al ritmo del preview en vez de dejar que el AE elija bien.
@@ -3747,6 +4095,11 @@ class Camera2Controller(
             // la que se valida después la muestra del pre-flash (ver applyFlashWhiteBalance).
             val gainsAhora = result.get(CaptureResult.COLOR_CORRECTION_GAINS)
             if (gainsAhora != null) lastPreviewAwbGains = gainsAhora
+            // La matriz va con las ganancias: applyLensWhiteBalance necesita las DOS para
+            // copiar la solución del HAL y solo empujarla lo medido.
+            result.get(CaptureResult.COLOR_CORRECTION_TRANSFORM)?.let {
+                lastPreviewAwbTransform = it
+            }
             // Ganancias reales del preajuste de balance de blancos que se acaba de pedir.
             val anclaK = awbAnchorPending
             if (anclaK > 0 && gainsAhora != null) {
@@ -3773,6 +4126,9 @@ class Camera2Controller(
             // ¿Hay una foto esperando a que el AE (y el flash) terminen la pre-captura?
             val ae = result.get(CaptureResult.CONTROL_AE_STATE)
             if (ae != null) lastAeState = ae
+            // ¿Acabamos de cruzar de lente? Iguala la exposición con la que traía la anterior.
+            // Va DESPUÉS de leer el estado del AE porque necesita saber si ya convergió.
+            maybeApplyAeHandoff(session)
             // Solo valen los resultados POSTERIORES al disparador (ver aeTriggerFrame).
             if (aeWaitAction != null && result.frameNumber >= aeTriggerFrame) {
                 // MÁQUINA DE DOS FASES. Justo después de AE_PRECAPTURE_TRIGGER_START el HAL
@@ -4561,6 +4917,14 @@ class Camera2Controller(
         if (lensEvSteps != 0) {
             Log.i("CamMacro", "lente $cameraId: offset AE $ajusteEv EV ($lensEvSteps pasos)")
         }
+        // Recorte digital honesto (ver honestCropScale). Por defecto SÍ: el jurado midió que
+        // el 2x entrega 8,29 MP con ~1 MP de detalle real. Se apaga con recorte_honesto=false.
+        honestCrop = try {
+            activity.getSharedPreferences("camara", Context.MODE_PRIVATE)
+                .getBoolean("recorte_honesto", true)
+        } catch (e: Exception) {
+            true
+        }
         // El zoom máximo de ESTA lente también entra en la tabla: si el usuario abre
         // directamente una lente que no está en la cadena, tailDigitalZoom la encuentra.
         lensMaxZoom[cameraId] = maxZoom.coerceAtLeast(1f)
@@ -5081,7 +5445,8 @@ class Camera2Controller(
                     "${expNs / 1_000_000} ms a ISO $iso (exposición total equivalente " +
                     "${frames * expNs / 1_000_000} ms). Lente ID$cameraId."
             else "Lente física ID$cameraId, zoom " +
-                String.format(java.util.Locale.US, "%.2f", zoomRatio) + "x."
+                String.format(java.util.Locale.US, "%.2f", zoomRatio) + "x." +
+                textoRecorteDigital()
         )
         ex.saveAttributes()
     }
@@ -5123,7 +5488,8 @@ class Camera2Controller(
         ex.setAttribute(
             ExifInterface.TAG_USER_COMMENT,
             "Lente física ID$cameraId, zoom " +
-                String.format(java.util.Locale.US, "%.2f", zoomRatio) + "x."
+                String.format(java.util.Locale.US, "%.2f", zoomRatio) + "x." +
+                textoRecorteDigital()
         )
         ex.saveAttributes()
     }
@@ -5156,10 +5522,16 @@ class Camera2Controller(
         // comprimida una sola vez desde el apilado, y no se recodifica por nada del mundo.
         val ultraHdr = hdrEnabled && hdrSupported
         val cropRatio = if (night) 0f else cropRatioForSave()
-        val reencoded = !ultraHdr && !night && (cropRatio > 0f || captureMatrix != null)
+        // Recorte digital a su tamaño REAL: nunca en Ultra HDR (recomprimir tira el mapa de
+        // ganancia) ni en la de noche (llega ya girada y comprimida una sola vez), igual que
+        // el recorte de proporción y el filtro. Esas dos rutas lo declaran en el UserComment.
+        val escalaHonesta = if (ultraHdr || night) 1f else honestCropScale()
+        val reencoded = !ultraHdr && !night &&
+            (cropRatio > 0f || captureMatrix != null || escalaHonesta < 0.999f)
         var bytes = rawBytes
         if (reencoded) {
-            bytes = transformStillJpeg(rawBytes, cropRatio, captureMatrix) ?: rawBytes
+            bytes = transformStillJpeg(rawBytes, cropRatio, captureMatrix, escalaHonesta)
+                ?: rawBytes
         }
         // En Ultra HDR tampoco se limpian segmentos: el índice MPF del APP2 apunta a
         // desplazamientos ABSOLUTOS del archivo, así que quitar un APP4 de en medio dejaría
@@ -5168,8 +5540,20 @@ class Camera2Controller(
         // Miniatura inmediata: no esperamos a que MediaStore indexe el archivo.
         onPhotoThumb?.let { cb ->
             try {
+                // El submuestreo ya NO es 16 fijo. Con el recorte digital honesto el archivo
+                // puede salir a 1200 px de lado largo en vez de a 3840, y /16 dejaba una
+                // miniatura de 75 px: un borrón en el hueco de 56dp de la fila del obturador.
+                // Se lee la cabecera (inJustDecodeBounds no decodifica píxeles, solo el SOF)
+                // y se apunta a ~250 px, que es lo que la miniatura mide de verdad.
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                val ladoLargo = maxOf(bounds.outWidth, bounds.outHeight)
+                // Si la cabecera no se pudo leer (outWidth = -1) se vuelve al 16 de siempre:
+                // dejar muestreo = 1 decodificaría los 8,29 MP enteros solo para una miniatura.
+                var muestreo = if (ladoLargo <= 0) 16 else 1
+                while (ladoLargo / (muestreo * 2) >= 250 && muestreo < 32) muestreo *= 2
                 val opts = BitmapFactory.Options().apply {
-                    inSampleSize = 16
+                    inSampleSize = muestreo
                     // La miniatura mide ~250 px: ARGB_8888 no aporta nada y duplica la
                     // memoria justo en el momento de mayor presión.
                     inPreferredConfig = Bitmap.Config.RGB_565
@@ -5850,11 +6234,117 @@ class Camera2Controller(
         /** Puntos de la curva de tono. Ver buildToneCurve: 512 dejó las fotos en negro. */
         private const val TONE_POINTS = 64
         /**
-         * Calibración medida en el CPH2765: la foto del tele (ID6) salía con mediana de luma
-         * 170 frente a 131 del gran angular en la misma escena. Se arranca en -1,0 EV y se
-         * afina desde la preferencia ev_offset_6 sin recompilar.
+         * Calibración de exposición por lente física, en EV. POSITIVO = aclarar esa lente.
+         *
+         * OJO AL SIGNO: hasta la ronda 10 esto valía -1,0 EV para la ID6 por una medición
+         * ANTIGUA (el tele salía con mediana de luma 170 contra 131 del gran angular). Con
+         * evidencia limpia y aislada, la ronda 10 midió exactamente lo contrario y el -1,0
+         * estaba EMPUJANDO EN LA DIRECCIÓN EQUIVOCADA:
+         *
+         *   - misma habitación, mismos segundos: el gran angular (ID3) mide brillo 5,20-5,69 EV
+         *     y el tele (ID6) 7,46-7,71 EV. Son 2,2-2,3 EV de desacuerdo entre los DOS
+         *     FOTÓMETROS sobre la misma escena, que es el defecto de calibración de módulo que
+         *     esta tabla existe para corregir.
+         *   - entregado: ID3 a ISO 139-142 y 1/100 s (luminancia media 124,5-138,4, mediana 119)
+         *     contra ID6 a ISO 100 y 1/507-1/530 s (luminancia media 50,5 y 33,8, mediana 17,
+         *     con el 69% de los píxeles en el octavo inferior del histograma).
+         *   - en EV100 eso es 8,23 para el ID3 y 11,88 para el ID6 (calculado con f/2,05 y
+         *     f/2,7, o sea con la diferencia de diafragma ya descontada): 3,65 EV de hueco, de
+         *     los cuales 1,0 EV lo ponía esta tabla. El EXIF lo confirma: ExposureBiasValue
+         *     -1,0 en TODAS las tomas ID6 y 0,0 en las ID3.
+         *
+         * POR QUÉ +1,5 Y NO +2,65 (que es lo que cerraría el hueco entero):
+         *   - el margen de compensación del HAL es CONTROL_AE_COMPENSATION_RANGE [-18,+18] con
+         *     paso 1/6 EV, o sea ±3,0 EV EN TOTAL. Gastar 2,65 aquí dejaría al usuario sin
+         *     rueda de exposición y sin margen para el ajuste dinámico de abajo.
+         *   - el tele mide p99 = 187,9: a +1,0 EV ya empieza a recortar el 1% de altas luces.
+         *     Un empujón fijo grande es irreversible (un blanco recortado no vuelve), mientras
+         *     que quedarse corto lo termina de cerrar handoffEv100, que SÍ mide la escena.
+         *   - el resto lo pone el traspaso de exposición al cruzar de lente (ver
+         *     maybeApplyAeHandoff), que corrige en los dos sentidos y por tanto también protege
+         *     del caso histórico contrario.
+         *
+         * CÓMO SE RECALIBRA (sin recompilar, que es lo único viable con el compilador en la
+         * nube): se fotografía la MISMA escena con las dos lentes seguidas, se mide la
+         * luminancia mediana de cada JPEG y se ajusta
+         *     ev_offset_<id> += log2(mediana_referencia / mediana_de_esta_lente)
+         * en las preferencias "camara" (SettingsActivity), hasta que las medianas queden dentro
+         * de ±0,3 EV. La referencia es el gran angular ID3 (ev_offset_3 = 0 por definición).
+         * El logcat imprime "lente <id>: offset AE <x> EV (<n> pasos)" en cada apertura.
          */
-        private val DEFAULT_LENS_EV = mapOf("6" to -1.0f)
+        private val DEFAULT_LENS_EV = mapOf("6" to 1.5f)
+
+        /** ln(2). Se usa para pasar razones de luz a pasos de EV sin recalcularlo cada vez. */
+        private const val LN2 = 0.6931471805599453
+
+        /**
+         * Suelo del lado largo del archivo cuando se guarda el recorte digital a su tamaño
+         * REAL (ver honestCropScale). Con el 2x medido —recorte de 3,2x sobre 3840x2160— el
+         * tamaño honesto son 1200 px de lado largo, así que este suelo no lo toca casi nunca;
+         * está para que un zoom digital al máximo (que el HAL declara mucho más allá de 5x) no
+         * acabe entregando una miniatura de 400 px que nadie puede usar para nada.
+         */
+        private const val HONEST_MIN_LONG_SIDE = 1280
+        /**
+         * Margen del recorte honesto sobre el factor geométrico puro (ver honestCropScale).
+         * 1,10 porque la frecuencia de corte medida del 2x (0,35 xNyquist) queda un 11% por
+         * encima de lo que predice la geometría (1/3,2 = 0,3125): sin el margen se tiraría ese
+         * detalle real. En 1x y 5x el margen solo deja un poco de interpolación, que no rompe
+         * nada.
+         */
+        private const val HONEST_SAFETY = 1.10f
+
+        /**
+         * Imantado al cruce óptico (ver setZoom). A partir del 90% de la parada óptica se salta
+         * ya a la óptica en vez de seguir recortando: en ese tramo el gran angular va a 4,1-4,6x
+         * de recorte digital —peor que el 2x, que ya mide 0,35 xNyquist— y el encuadre solo se
+         * cierra un 11% como mucho. Con 0,80 el salto de encuadre empezaría a notarse; con 0,97
+         * el tramo rescatado sería tan estrecho que no valdría la pena.
+         */
+        private const val ZOOM_SNAP_MARGIN = 0.90f
+
+        /**
+         * Traspaso de exposición al CRUZAR de lente. Tope de la corrección dinámica, en EV.
+         * 1,5 EV sumado a los 1,5 EV fijos de DEFAULT_LENS_EV agota justo el ±3,0 EV que
+         * publica este HAL, que es todo lo que se puede pedir por compensación de exposición.
+         */
+        private const val HANDOFF_MAX_EV = 1.5f
+        /**
+         * Por debajo de esto no se toca nada. El jurado pidió que la lente entrante quedara
+         * "dentro de ±0,3 EV de la saliente"; 0,35 EV deja ese margen y evita que el ajuste
+         * persiga el ruido del propio fotómetro entre fotogramas.
+         */
+        private const val HANDOFF_MIN_EV = 0.35f
+        /**
+         * Fotogramas de gracia para que el AE de la lente nueva converja antes de medirlo.
+         * A 30 fps son 0,6 s: más que suficiente para una convergencia normal y poco bastante
+         * como para no dejar el ajuste colgado si el HAL nunca reporta CONVERGED.
+         */
+        private const val HANDOFF_SETTLE_FRAMES = 18
+
+        /**
+         * Corrección de color por lente física: (ganancia de R, ganancia de B) sobre las
+         * ganancias que el propio AWB del aparato ya calculó. 1,0 = no tocar.
+         *
+         * Medido en la ronda 10 sobre medios tonos casi neutros de la MISMA escena:
+         *   B/G = 0,966-0,973 en el gran angular (ID3) contra 1,081 en el tele (ID6).
+         * Son 11% de exceso de azul en el tele (y 18% contra el 2x concreto, que da 0,917).
+         * En R/G el tele se queda corto: 0,958 contra 0,985 del gran angular a 1x.
+         *
+         * Los factores son el inverso de lo medido, con el criterio conservador de siempre:
+         *   B: 0,970 / 1,081 = 0,897  ->  se aplica 0,92 (unas tres cuartas partes)
+         *   R: 0,985 / 0,958 = 1,028  ->  se aplica 1,03 (la corrección entera; es pequeña)
+         * El azul se corrige a tres cuartos y no entero a propósito: la medida de B/G se toma
+         * sobre el contenido de la escena, y a 2,9x el tele encuadra follaje, así que parte de
+         * ese 11% puede ser el sujeto y no el módulo. Pasarse de magenta es un defecto tan
+         * visible como el azul que se viene a quitar.
+         *
+         * Se afina por lente sin recompilar con wb_r_<id> y wb_b_<id>. Para recalibrar:
+         * fotografiar una pared blanca o una carta gris con las dos lentes en la misma luz,
+         * medir R/G y B/G de cada archivo y multiplicar el valor actual por
+         * (ratio_referencia / ratio_de_esta_lente).
+         */
+        private val DEFAULT_LENS_WB = mapOf("6" to Pair(1.03f, 0.92f))
 
         /**
          * Calibración de TONO por lente física: (resta de velo, ganancia del hombro).

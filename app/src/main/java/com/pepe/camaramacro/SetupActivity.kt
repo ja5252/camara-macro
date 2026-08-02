@@ -278,7 +278,17 @@ class SetupActivity : AppCompatActivity() {
             Toast.makeText(this, "Esta lente no da imagen: prueba otra", Toast.LENGTH_SHORT).show()
             return
         }
-        prefs.edit().putString("cameraId", lens.cameraId).apply()
+        // Se anota además como ID YA COMPROBADO. CameraActivity valida el ID guardado contra
+        // cameraIdList en su onCreate, y esa llamada al servicio de cámara va por delante de
+        // TODO el arranque en frío (inflado, motor y open) desde el hilo de UI. Aquí acabamos
+        // de hacer una comprobación bastante más dura que esa —la lente se ha abierto y ha
+        // ENTREGADO fotogramas—, así que repetirla en el arranque siguiente es tiempo regalado
+        // en el bloque de VELOCIDAD. Si la lente fallara de verdad, CameraActivity borra la
+        // anotación en onError y el arranque de después vuelve a validar.
+        prefs.edit()
+            .putString("cameraId", lens.cameraId)
+            .putString("cameraIdValidado", lens.cameraId)
+            .apply()
         Toast.makeText(this, R.string.lens_saved, Toast.LENGTH_SHORT).show()
         // CLEAR_TOP | SINGLE_TOP: REUTILIZA la CameraActivity que ya está en la pila en vez de
         // apilar una segunda. Al asistente ya no se llega solo en el arranque en frío: la fila

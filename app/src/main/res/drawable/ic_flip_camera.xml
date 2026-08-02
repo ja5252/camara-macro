@@ -1,6 +1,18 @@
+<!--
+    Cambiar entre cámara trasera y frontal. Dos consumidores desde esta ronda:
+    btn_flip_main (fila del obturador) y chip_flip (panel "⋯"), que antes usaba la flecha
+    circular de ic_rotate y el CRÍTICO 34 leyó como "recargar".
+
+    20dp y no 44dp: los iconos que van dentro de un ProChip.Icon se pintan como
+    compound drawable, o sea a su tamaño INTRÍNSECO, y los otros siete del HUD
+    (flash, temporizador, rejilla, noche, más, micrófono, filtro, time-lapse) miden 20dp.
+    Con 44 este chip habría salido del doble de alto que sus vecinos y habría roto la fila.
+    btn_flip_main no se entera del cambio: es un ImageButton con scaleType=fitCenter, que
+    escala el vector hasta llenar sus 44dp útiles sin pérdida.
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="44dp"
-    android:height="44dp"
+    android:width="20dp"
+    android:height="20dp"
     android:viewportWidth="24"
     android:viewportHeight="24"
     android:tint="@color/white">

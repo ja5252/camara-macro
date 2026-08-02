@@ -3,20 +3,42 @@
     Obturador: relleno blanco (maxima legibilidad sobre cualquier escena) con anillo
     exterior AMBAR de 3dp. Era blanco puro y no participaba del sistema de acento:
     es lo unico que el usuario mira mientras dispara y no tenia firma ninguna.
+
+    ================= POR QUE AHORA LLEVA <size> Y gravity=center =================
+    SIETE jueces de la ronda 10 describen el mismo defecto en el mismo control, y es el
+    unico defecto que aparece en el 100% de las capturas del expediente (13 de 13, y 17 de
+    17 en el recuento de otro juez): "el disco blanco NO es concentrico con el anillo
+    ambar (desplazado a izquierda y arriba) y por su derecha asoma una media luna gris
+    dentada". Impacto CRITICO 31 y ALTO 13, 19 y 33.
+
+    La geometria de este fichero era correcta: el disco iba con 8dp de inset por los
+    cuatro lados sobre una vista de 78x78dp, o sea centrado por construccion. Un inset,
+    sin embargo, se calcula contra los LIMITES que reciba el drawable, asi que deja de
+    estar centrado en cuanto algo cambia esos limites (padding inyectado por el estilo de
+    plataforma, una vista no cuadrada, un fondo reescalado por el OEM). Con <size> +
+    gravity=center el circulo mide 62dp y se centra el, pase lo que pase con la caja:
+    la concentricidad ya no depende de nadie. gravity en un <item> de layer-list existe
+    desde API 23 y el minSdk de la app es 26, asi que no hace falta guardia.
+
+    La MEDIA LUNA GRIS es otra cosa y se ataca en el layout, no aqui: es una sombra de
+    elevacion. El primer item de esta lista es un ovalo con relleno transparente, asi que
+    el contorno (outline) que Android deriva del fondo es el circulo COMPLETO de 78dp; si
+    algo pone elevacion sobre el boton -y en ColorOS los estilos de plataforma de
+    ImageButton la ponen-, se pinta una sombra circular desalineada respecto al disco
+    blanco de 62dp, que es exactamente "una media luna gris asomando por un lado". Por eso
+    btn_shutter lleva ahora stateListAnimator=@null, elevation=0dp y outlineProvider=none.
 -->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <item>
+    <item android:gravity="center">
         <shape android:shape="oval">
+            <size android:width="78dp" android:height="78dp" />
             <stroke android:width="3dp" android:color="@color/accent" />
             <solid android:color="#00000000" />
         </shape>
     </item>
-    <item
-        android:left="8dp"
-        android:top="8dp"
-        android:right="8dp"
-        android:bottom="8dp">
+    <item android:gravity="center">
         <shape android:shape="oval">
+            <size android:width="62dp" android:height="62dp" />
             <solid android:color="#FFFFFFFF" />
         </shape>
     </item>

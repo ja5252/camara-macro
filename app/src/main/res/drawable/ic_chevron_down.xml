@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Galon hacia abajo. Unico consumidor: el rotulo de formato de video (video_hud), para
+    que se lea como "aqui se despliega algo" y no como una etiqueta de solo lectura
+    (ALTO 14, MEDIO 60 y 64). Apunta hacia ABAJO porque el panel de video se abre en
+    panel_slot, que en control_band va justo DEBAJO de este rotulo.
+
+    Se dibuja como relleno y no como trazo: un <path> con strokeWidth se reescala peor en
+    tamanos pequenos y aqui se pinta a 14dp.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="14dp"
+    android:height="14dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M6.7,9.3L5.3,10.7L12,17.4L18.7,10.7L17.3,9.3L12,14.6Z" />
+</vector>

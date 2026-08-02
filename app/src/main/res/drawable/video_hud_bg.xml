@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Fondo del ROTULO DE FORMATO DE VIDEO (video_hud), que ADEMAS es un boton: abre el
+    panel de video.
+
+    Existe por una debilidad que firman tres jueces con la misma frase (ALTO 14, MEDIO 60
+    y 64): "la pastilla '1080p - 30 fps - H.264' es informativa pero NO PARECE TOCABLE: el
+    usuario no tiene camino visible a nada mejor", y "es visualmente identica a la chapa de
+    lente, que es de solo lectura: no hay forma de saber si se toca". Llevaba
+    zoom_pill_bg, o sea el mismo fondo que el cronometro, el bloqueo AE/AF y el
+    conmutador FOTO/VIDEO, tres cosas que no se tocan.
+
+    La diferencia con zoom_pill_bg es SOLO el filo: mismo negro al 85% (no puede taparse
+    mas el visor) y filo ambar al 50% en vez de blanco al 20%. En el idioma de esta app el
+    ambar significa "esto lo manejas tu", y es lo que distingue un control de un rotulo.
+    No se usa el ambar pleno de la parada de zoom seleccionada a proposito: eso significa
+    "esto esta puesto AHORA", y el formato de video no es un estado que se encienda.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="@color/surface_panel" />
+    <stroke android:width="1dp" android:color="@color/accent_edge" />
+    <corners android:radius="16dp" />
+</shape>

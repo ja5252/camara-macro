@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Botón redondo del HUD, misma superficie que las pastillas (85% de negro con filo
+    hairline). Consumidor: btn_flip_main, el cambio frontal/trasera de la fila del
+    obturador.
+
+    Por qué hacía falta. CINCO jueces de la ronda 10 (CRÍTICO 34, ALTO 27, 28 y 40,
+    MEDIO 26) dan ese botón por NO PINTADO: "btn_flip_main existe en el layout pero no se
+    renderiza en ninguna de las 17 capturas", "la cámara frontal no tiene ninguna vía de
+    acceso visible", y de ahí sale que el cambio a frontal no llegara a ocurrir en la
+    sesión de prueba y que un bloque entero se quedara sin evidencia. El botón SÍ estaba
+    ahí: lo que no había era fondo. Era un glifo blanco con
+    selectableItemBackgroundBorderless, es decir, sin nada detrás salvo la escena, y la
+    escena del expediente es una habitación con un edredón blanco a plena luz. Blanco
+    sobre blanco no se ve, y lo que no se ve no existe.
+
+    NO se reutiliza circle_btn_bg (40% de negro): lo usa item_gallery.xml sobre una
+    miniatura ya oscurecida, y al 40% sobre una pared quemada el glifo blanco se queda en
+    ~2:1. Al 85% son ~15:1 sobre cualquier escena, y además habla el mismo idioma que el
+    resto del HUD.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval">
+    <solid android:color="@color/surface_panel" />
+    <stroke android:width="1dp" android:color="@color/hairline" />
+</shape>

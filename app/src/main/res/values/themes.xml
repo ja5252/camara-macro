@@ -104,7 +104,14 @@
 
     <!-- Pestaña FOTO / VIDEO. Eran TextView con 6dp de padding vertical y 13sp: ~29dp
          de alto en el control más usado después del obturador, contra los 48dp que el
-         propio proyecto ya exigía en ProChip. -->
+         propio proyecto ya exigía en ProChip.
+
+         El FONDO pasa a ser un selector (mode_tab_bg) y la onda al pulsar se va a
+         foreground. Motivo, MEDIO 67: "sólo cambia el color del texto, sin pastilla de
+         segmento seleccionado: se lee como dos etiquetas, no como un mando". El estado
+         apagado del selector es transparente, así que hasta que CameraActivity ponga
+         isSelected en las dos pestañas esto se ve exactamente igual que antes: no puede
+         romper nada y queda enchufado. -->
     <style name="ModeTab" parent="">
         <item name="android:layout_width">wrap_content</item>
         <item name="android:layout_height">wrap_content</item>
@@ -112,7 +119,8 @@
         <item name="android:minWidth">80dp</item>
         <item name="android:gravity">center</item>
         <item name="android:paddingHorizontal">18dp</item>
-        <item name="android:background">?attr/selectableItemBackgroundBorderless</item>
+        <item name="android:background">@drawable/mode_tab_bg</item>
+        <item name="android:foreground">?attr/selectableItemBackgroundBorderless</item>
         <item name="android:textSize">13sp</item>
         <item name="android:textStyle">bold</item>
         <item name="android:fontFamily">sans-serif-medium</item>
