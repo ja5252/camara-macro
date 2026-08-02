@@ -1162,10 +1162,27 @@ class Camera2Controller(
             nightTarget = NIGHT_FRAMES
             nightStacker = NightStacker(nightSize.width, nightSize.height)
 
-            // Exposición a bloquear: manual si está activa, si no la última auto medida.
-            val iso = if (manualExposure) manualIso else lastAeIso
-            val expNs = if (manualExposure) manualExpNs
-                else lastAeExpNs.coerceAtMost(125_000_000L) // tope 1/8s por frame contra movimiento
+            // Exposición a bloquear. Copiar tal cual la del visor era el gran fallo del
+            // modo noche: el visor va acotado por el rango de FPS, así que cada fotograma
+            // salía a 1/30 s con el ISO por las nubes y apilar siete copias de una foto
+            // ruidosa y oscura no la ilumina. Aquí se REPARTE al revés que en una foto
+            // normal: se conserva la luz medida (tiempo x ISO) pero cargándola en el
+            // TIEMPO y bajando el ISO todo lo que se pueda. Misma exposición, mucho menos
+            // grano; del temblor ya se encarga el apilado.
+            val iso: Int
+            val expNs: Long
+            if (manualExposure) {
+                iso = manualIso; expNs = manualExpNs
+            } else {
+                val luz = lastAeExpNs.toDouble() * lastAeIso
+                val techo = minOf(NIGHT_MAX_EXP_NS, expMaxNs)
+                var e = luz / isoMin.coerceAtLeast(50) // el tiempo que pediría el ISO base
+                if (e > techo) e = techo.toDouble()
+                if (e < lastAeExpNs) e = lastAeExpNs.toDouble() // nunca menos que el visor
+                expNs = e.toLong().coerceIn(expMinNs.coerceAtLeast(1L), expMaxNs)
+                iso = Math.round(luz / expNs).toInt().coerceIn(isoMin, isoMax)
+            }
+            Log.i("CamMacro", "noche: ${expNs / 1000}us ISO$iso (visor ${lastAeExpNs / 1000}us ISO$lastAeIso)")
 
             val requests = ArrayList<CaptureRequest>(NIGHT_FRAMES)
             for (n in 0 until NIGHT_FRAMES) {
@@ -1427,21 +1444,35 @@ class Camera2Controller(
         if (shutterFloorNs <= 0L || manualExposure || !manualSensorSupported) return false
         if (flashMode == 1 || flashMode == 2) return false // con flash manda el AE del HAL
         if (lastAeExpNs <= 0L || lastAeIso <= 0) return false
-        var targetExp = shutterFloorNs.coerceAtLeast(if (expMinNs > 0) expMinNs else 1L)
-        if (lastAeExpNs <= targetExp) return false // el AE ya es suficientemente rápido
-        // Conserva la exposición total: al acortar el tiempo, sube el ISO en la misma proporción.
-        var iso = Math.round(lastAeIso * (lastAeExpNs.toDouble() / targetExp)).toInt()
-        // Preferimos algo de trepidación antes que una foto llena de grano: si congelar
-        // el movimiento exige pasar del techo de ISO, se cede exposición en vez de ruido.
+        val floor = shutterFloorNs.coerceAtLeast(if (expMinNs > 0) expMinNs else 1L)
+        if (lastAeExpNs <= floor) return false // el AE ya es suficientemente rápido
+
         val ceiling = minOf(isoMax, isoCeilingForFloor)
+        // REGLA DE ORO: este piso NUNCA puede entregar una foto más oscura que el visor.
+        // Si el AE ya está pidiendo tanto ISO como el que estamos dispuestos a dar, es de
+        // noche: no hay movimiento que congelar, solo luz que perder. Se deja al AE del
+        // HAL, que en la foto (sin rango de FPS) puede llegar a 1/4 s o más.
+        // Sin esta salida, en un cuarto a oscuras se disparaba a 1/30 s con el ISO
+        // recortado de 6400 a 3200: un stop menos que el visor y la foto salía negra.
+        if (lastAeIso >= ceiling) return false
+
+        // Luz que midió el AE (tiempo x sensibilidad). Es lo que hay que conservar exacto.
+        val luz = lastAeExpNs.toDouble() * lastAeIso
+        var iso = Math.round(luz / floor).toInt()
+        var targetExp = floor
         if (iso > ceiling) {
+            // No cabe en el techo de ISO: se alarga el tiempo lo justo para conservar
+            // TODA la luz. Preferimos algo de trepidación antes que grano... o negro.
             iso = ceiling
-            targetExp = (lastAeExpNs.toDouble() * lastAeIso / ceiling)
-                .toLong().coerceIn(targetExp, lastAeExpNs)
+            targetExp = Math.round(luz / iso)
+            if (targetExp >= lastAeExpNs) return false // no ganaríamos nada: fuera
         }
         b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
         b.set(CaptureRequest.SENSOR_SENSITIVITY, iso.coerceIn(isoMin, isoMax))
-        b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, targetExp)
+        b.set(
+            CaptureRequest.SENSOR_EXPOSURE_TIME,
+            targetExp.coerceIn(expMinNs.coerceAtLeast(1L), expMaxNs)
+        )
         return true
     }
 
@@ -1827,13 +1858,16 @@ class Camera2Controller(
         if (evR != null) { evMin = evR.lower; evMax = evR.upper }
         evStepRational = characteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)
 
-        // FPS del PREVIEW. Antes se elegía el de cota inferior más alta (típicamente 60,60),
-        // que oscurece el visor en interiores y no garantiza nada de la foto. Preferimos
-        // 30 fijos: visor estable y un lastAeExpNs bien definido para el piso de obturación.
+        // FPS del PREVIEW. Fijarlo en [30,30] parecía lo más estable, pero ATA EL AE: con
+        // 30 fps garantizados la exposición no puede pasar de 1/30 s, así que en un cuarto
+        // a oscuras el AE se queda sin recorrido, sube el ISO al tope y lastAeExpNs miente
+        // (dice 1/30 cuando la escena pedía 1/4). De ahí salían el visor sucio y la foto
+        // negra. Elegimos el rango de tope 30 con la cota INFERIOR más baja ([10,30] en
+        // este sensor): con luz sigue a 30 fps y a oscuras el AE puede bajar a 1/10 s.
         val fpsRanges = characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
-        aeFpsRange = fpsRanges?.firstOrNull { it.lower == 30 && it.upper == 30 }
-            ?: fpsRanges?.filter { it.upper <= 30 }?.maxByOrNull { it.lower }
-            ?: fpsRanges?.maxByOrNull { it.lower }
+        aeFpsRange = fpsRanges?.filter { it.upper == 30 }?.minByOrNull { it.lower }
+            ?: fpsRanges?.filter { it.upper <= 30 }?.maxByOrNull { it.upper }
+            ?: fpsRanges?.minByOrNull { it.lower }
         val manualCaps = characteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: IntArray(0)
         manualSensorSupported =
             manualCaps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)
@@ -2514,5 +2548,8 @@ class Camera2Controller(
         /** Si el HAL no entrega la foto en este tiempo, se libera el obturador igualmente. */
         private const val CAPTURE_TIMEOUT_MS = 4000L
         private const val NIGHT_FRAMES = 7
+
+        /** Tope de exposición POR FOTOGRAMA en modo noche: 1/8 s, lo que aguanta el OIS a pulso. */
+        private const val NIGHT_MAX_EXP_NS = 125_000_000L
     }
 }
