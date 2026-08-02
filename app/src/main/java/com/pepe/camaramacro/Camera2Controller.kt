@@ -3358,17 +3358,22 @@ class Camera2Controller(
      * medios y las luces se quedan donde estaban.
      * Si las sombras se ven lechosas, la marcha atrás es poner TONE_FLOOR a 0f.
      *
-     * LOS PUNTOS NO VAN EQUIESPACIADOS, y esto es lo que hacía que la curva empeorara justo lo
-     * que venía a arreglar. El HAL interpola LINEALMENTE entre puntos de control, y el pie de
-     * la sRGB es lo más curvo que hay: con 32 puntos uniformes el primer tramo iba de x=0 a
-     * x=0,0323 y la cuerda que dibuja el HAL en su punto medio vale 0,123 donde la curva real
-     * vale 0,171 — un 28% MÁS OSCURO en la zona de sombras que el jurado midió. Con
-     * x = u^TONE_X_GAMMA los puntos se amontonan cerca del cero (el primer tramo pasa a ser
-     * ~1e-6 de ancho) y el error de interpolación desaparece. Y se usan TODOS los puntos que
-     * declara el HAL (512 en esta lente), no 32.
+     * PUNTOS EQUIESPACIADOS Y SOLO 64, y esto tiene su historia. El HAL interpola LINEALMENTE
+     * entre puntos de control y el pie de la sRGB es lo más curvo que hay, así que con 32
+     * puntos el primer tramo iba de x=0 a x=0,0323 y la cuerda del HAL valía 0,123 donde la
+     * curva real vale 0,171: un 28% más oscuro en las sombras. El arreglo fue amontonar los
+     * puntos cerca del cero (x = u^2,2) y pedir los 512 que declara el HAL. El resultado en el
+     * teléfono fue CATASTRÓFICO: toda la foto pegada a TONE_FLOOR, luminancia media 2,0 y
+     * percentil 99,5 también 2,0 —negro absoluto— con la exposición correcta (ISO 100 a
+     * 1/686 s a plena luz). Con una rejilla degenerada, donde 511 de 512 puntos caen en el
+     * primer 2,5% del rango, este HAL se queda con el primer punto y devuelve su valor para
+     * toda la imagen.
+     * Con 64 puntos regulares el primer tramo mide 0,0159 y el error de interpolación en el
+     * pie queda por debajo de 1/255: se gana lo que se buscaba sin pedirle al HAL una rejilla
+     * que no sabe digerir.
      */
     private fun buildToneCurve(points: Int, negro: Float, ganancia: Float): TonemapCurve {
-        val n = points.coerceIn(8, 512)
+        val n = points.coerceIn(8, TONE_POINTS)
         val c = FloatArray(n * 2)
         // Acotados a lo razonable: nadie puede meter aquí por preferencia una curva que
         // destruya la foto. negro = 0 y ganancia = 1 dejan la curva EXACTAMENTE como estaba.
@@ -3376,7 +3381,17 @@ class Camera2Controller(
         val g = ganancia.coerceIn(1f, 2.5f)
         for (i in 0 until n) {
             val u = i.toDouble() / (n - 1)
-            val x = Math.pow(u, TONE_X_GAMMA).toFloat()
+            // ESPACIADO UNIFORME. Antes era x = u^2.2 para amontonar puntos cerca del cero,
+            // porque el pie de la sRGB es la parte más curva y con 32 puntos rectos el HAL
+            // interpolaba mal. La idea era correcta y el resultado, catastrófico: con 512
+            // puntos apiñados en el primer 2,5% del rango, ESTE HAL devolvió TODA la foto
+            // pegada a TONE_FLOOR — medido en el teléfono, luminancia media 2,0 y percentil
+            // 99,5 también 2,0, o sea negro absoluto con la exposición correcta (ISO 100 a
+            // 1/686 s a plena luz). El HAL espera una rejilla regular; con una degenerada se
+            // queda con el primer punto y ya. Se vuelve a lo que funcionaba, subiendo los
+            // puntos de 32 a 64: con la curva repartida el error de interpolación en el pie
+            // baja por debajo de 1/255 sin pedirle al HAL nada raro.
+            val x = u.toFloat()
             val s = if (x <= 0.0031308f) 12.92f * x
             else (1.055f * Math.pow(x.toDouble(), 1.0 / 2.4).toFloat() - 0.055f)
             // RESTA DEL VELO. El tele entrega p1 = 34-35 y p99 = 150,6: NO HAY NEGROS y falta
@@ -4483,11 +4498,14 @@ class Camera2Controller(
         val tmPoints = characteristics.get(CameraCharacteristics.TONEMAP_MAX_CURVE_POINTS) ?: 0
         toneCurveSupported =
             tmModes.contains(CameraMetadata.TONEMAP_MODE_CONTRAST_CURVE) && tmPoints >= 8
-        // Se usan TODOS los puntos que publica el HAL: capar a 32 con reparto uniforme dejaba el
-        // pie de la curva a merced de la interpolación lineal del HAL (ver buildToneCurve).
+        // 64 puntos, NO los 512 que publica el HAL. Pedir el máximo con reparto no uniforme
+        // devolvió toda la foto en negro absoluto en este aparato (medido: luminancia 2,0 con
+        // la exposición correcta). 64 puntos regulares dan un error de interpolación por
+        // debajo de 1/255 y son una rejilla que cualquier HAL digiere.
         val toneCal = lensToneCalibration()
         toneCurve =
-            if (toneCurveSupported) buildToneCurve(tmPoints, toneCal.first, toneCal.second)
+            if (toneCurveSupported)
+                buildToneCurve(minOf(tmPoints, TONE_POINTS), toneCal.first, toneCal.second)
             else null
         Log.i(
             "CamMacro",
@@ -5811,7 +5829,8 @@ class Camera2Controller(
          * lineal del HAL se equivoca. Con 1.0 (reparto uniforme) vuelve el fallo de las
          * sombras aplastadas.
          */
-        private const val TONE_X_GAMMA = 2.2
+        /** Puntos de la curva de tono. Ver buildToneCurve: 512 dejó las fotos en negro. */
+        private const val TONE_POINTS = 64
         /**
          * Calibración medida en el CPH2765: la foto del tele (ID6) salía con mediana de luma
          * 170 frente a 131 del gran angular en la misma escena. Se arranca en -1,0 EV y se
