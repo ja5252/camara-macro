@@ -280,7 +280,21 @@ class SetupActivity : AppCompatActivity() {
         }
         prefs.edit().putString("cameraId", lens.cameraId).apply()
         Toast.makeText(this, R.string.lens_saved, Toast.LENGTH_SHORT).show()
-        startActivity(Intent(this, CameraActivity::class.java))
+        // CLEAR_TOP | SINGLE_TOP: REUTILIZA la CameraActivity que ya está en la pila en vez de
+        // apilar una segunda. Al asistente ya no se llega solo en el arranque en frío: la fila
+        // «Elegir otra lente» de Ajustes también trae aquí, y Ajustes se abrió DESDE
+        // CameraActivity, que sigue viva debajo (se lanzó con settingsLauncher, no con
+        // finish()). Sin estas banderas quedaban DOS CameraActivity apiladas: tras cambiar de
+        // lente, el botón Atrás no salía de la app, devolvía a una cámara rancia que además
+        // reabría la lente en su onResume.
+        // Inocuo en el arranque en frío: ahí CameraActivity ya se cerró sola antes de venir y
+        // no hay nada que limpiar. Y en la ruta nueva la instancia viva se entera por
+        // onNewIntent, que hace disarmIntentCapture(); startCamera() relee prefs("cameraId")
+        // en CADA onResume, así que la lente recién elegida sí se aplica.
+        startActivity(
+            Intent(this, CameraActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        )
         finish()
     }
 

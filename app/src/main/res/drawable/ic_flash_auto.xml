@@ -1,8 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    Flash AUTOMÁTICO: el rayo con una "A" al lado. Faltaba el tercer estado del ciclo
-    (off / auto / on / linterna) y el chip enseñaba el mismo icono para AUTO que para ON,
-    así que no había manera de saber si el flash iba a dispararse o no.
+    Flash AUTOMÁTICO: el rayo con una "A" al lado. Es el icono que le falta al tercer
+    estado del ciclo (off / auto / on / linterna).
+
+    PENDIENTE DE CONECTAR: hoy applyFlashChip() resuelve el modo AUTO por la rama
+    `else -> R.drawable.ic_flash_on`, así que el chip sigue enseñando el MISMO icono para
+    AUTO que para ON y solo los distingue la letra "AUTO" que se le pone al lado. Para que
+    este dibujo llegue a la pantalla hace falta una línea en CameraActivity.kt, dentro del
+    `when (flashMode)` de applyFlashChip: `1 -> R.drawable.ic_flash_auto`. Mientras esa
+    línea no exista, shrinkResources tira este fichero del APK y no se dibuja nunca.
+
     Sin android:tint fijo a propósito: el tinte lo pone setChipState() con un
     ColorStateList para poder teñirlo de ámbar cuando el estado está activo. Un tint en el
     vector GANA sobre el del compound drawable y dejaba el icono blanco para siempre.

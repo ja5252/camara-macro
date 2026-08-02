@@ -99,6 +99,25 @@ class CameraActivity : AppCompatActivity() {
     private var disabledLenses = HashSet<String>()
     private var nightOn = false
 
+    /**
+     * Hay un apilado NOCTURNO en marcha y el rótulo central es suyo. night_label lo comparten
+     * tres operaciones (noche, apilado de enfoque y horquillado) y cada una escribe su propio
+     * contador encima: sin esta marca, el progreso que manda el motor por onNightProgress
+     * pisaría el "Apilado de enfoque 3/5" del apilado de enfoque.
+     */
+    private var nightStacking = false
+
+    /**
+     * Última parada de zoom que se centró en la tira. highlightZoomStrip() se llama en CADA
+     * fotograma del pellizco y lanzar un smoothScrollTo por fotograma da tirones: solo se
+     * recentra cuando la parada resaltada CAMBIA de verdad.
+     */
+    private var lastZoomActive = -1
+
+    /** Estado ya pintado del fondo de la pastilla de zoom: evita reinflar el drawable en
+     *  cada fotograma del pellizco. */
+    private var zoomPillDigital = false
+
     // Lector de códigos: ahora lo sirve el stream YUV del motor (qrReader + ML Kit sobre la
     // Image, sin copia ni readback). El camino bueno llevaba implementado desde el
     // principio y NADIE llamaba a setQrEnabled: cero coincidencias en el grep. Lo que
@@ -418,6 +437,22 @@ class CameraActivity : AppCompatActivity() {
             bounceThumbnail()
         }
         controller.onLensSwitching = { freezeForLensSwitch() }
+        // Progreso REAL del apilado nocturno. El motor lo dispara en CADA fotograma apilado
+        // y no lo escuchaba nadie: el rótulo se quedaba en un "Apilando…" fijo y, con 7
+        // fotogramas a 12,6 MP, el proceso dura segundos y el usuario no sabía si la app se
+        // había colgado. Ese es literalmente el fallo que el callback venía a cerrar.
+        controller.onNightProgress = { hechos, total ->
+            runOnUiThread {
+                // night_label es una vista COMPARTIDA: stackNext() (apilado de enfoque) y
+                // bracketNext() (horquillado) escriben ahí sus propios contadores. Sin la
+                // guarda, un apilado nocturno les pisaría el rótulo. nightStacking distingue
+                // de quién es el rótulo AHORA; la visibilidad sola no bastaría.
+                if (nightStacking && binding.nightLabel.visibility == View.VISIBLE) {
+                    binding.nightLabel.text =
+                        getString(R.string.night_stacking) + "  $hechos/$total"
+                }
+            }
+        }
 
         scaleDetector = ScaleGestureDetector(
             this,
@@ -476,13 +511,26 @@ class CameraActivity : AppCompatActivity() {
         // esto solo escucha. En ACTION_DOWN se precalienta el autofoco, que es el único
         // adelanto real de latencia posible sin reprocesado, y se corta el escaneo de
         // códigos mientras el dedo está puesto.
-        binding.btnShutter.setOnTouchListener { _, ev ->
+        binding.btnShutter.setOnTouchListener { v, ev ->
             when (ev.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     shutterHeld = true
                     if (mode == "photo" && !capturing) controller.prewarmAf()
                 }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> shutterHeld = false
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    shutterHeld = false
+                    // Pulsación ABORTADA: el dedo se arrastró fuera del botón y se soltó
+                    // ahí (ACTION_UP sin clic), o un padre se llevó el gesto (ACTION_CANCEL).
+                    // El AF_TRIGGER_START que salió en ACTION_DOWN se quedaba entonces sin su
+                    // CANCEL y el visor dejaba de reenfocar hasta que saltaba la
+                    // auto-cancelación del motor, 1,5 s después. El motor dejó
+                    // cancelPrewarmAf() pública justo para que la cablease la interfaz: es
+                    // idempotente y no toca nada si hay una captura en vuelo.
+                    val fuera = ev.x < 0f || ev.y < 0f || ev.x > v.width || ev.y > v.height
+                    if (fuera || ev.actionMasked == MotionEvent.ACTION_CANCEL) {
+                        controller.cancelPrewarmAf()
+                    }
+                }
             }
             false
         }
@@ -669,14 +717,30 @@ class CameraActivity : AppCompatActivity() {
      * abajo, que es lo que cualquiera espera al encuadrar.
      */
     private fun syncPreviewGravity() {
-        // Mismo criterio que usa el motor al configurar las salidas, con su API pública:
-        // el recorte se aplica si el usuario pidió LLENA o si la pantalla lo pide.
-        // values-sw600dp/bools.xml forzaba preview_fills_screen=true sin avisar ni ofrecer
-        // alternativa: en la pantalla interior el usuario no tenía forma de recuperar el
-        // fotograma COMPLETO. Ahora su elección (Ajustes) manda sobre la del aparato.
-        val cover = controller.currentAspect == AspectRatio.FULL ||
-            (if (previewFillPref < 0) resources.getBoolean(R.bool.preview_fills_screen)
-            else previewFillPref == 1)
+        // UN SOLO DUEÑO del recorte del visor, y es el motor.
+        //
+        // Antes esto lo decidía la Activity por su cuenta (calculaba el criterio aquí y
+        // escribía binding.texture.coverMode a mano) y NADIE llamaba jamás a
+        // setPreviewFill: Camera2Controller.previewFill se quedaba en null para siempre, o
+        // sea que su coverWanted() seguía usando el criterio DEL APARATO
+        // (values-sw600dp/bools.xml: preview_fills_screen=true), ignorando lo que el usuario
+        // había elegido en el chip AJUSTAR/LLENAR. Y setUpOutputs lo REIMPONE: pone
+        // coverMode = coverWanted() y acto seguido recalcula previewCropRatio, que es
+        // EXACTAMENTE el número con el que se recorta la foto GUARDADA. Eso corre en cada
+        // apertura, flip, cambio de lente, de proporción o de resolución, y en cada
+        // encendido/apagado de RAW, Ultra HDR, noche o QR. Efecto real en la pantalla
+        // interior con el usuario en AJUSTAR: el visor saltaba a LLENAR y una foto disparada
+        // en esa ventana se recortaba como si estuviera en LLENAR mientras el chip decía
+        // AJUSTAR, que es justo el fallo que el chip venía a arreglar.
+        //
+        // Se le pasa la preferencia CRUDA del usuario: coverWanted() ya hace por su cuenta el
+        // OR con aspect == FULL, y pasarle el resultado dejaría previewFill=true pegado al
+        // salir de la proporción LLENA. Es seguro llamarlo antes de open(): applyPreviewBox()
+        // postea configureTransform, que corta en seco si el texture todavía mide 0.
+        controller.setPreviewFill(previewFillEffective())
+        // Y el criterio se LEE de vuelta del texture, que es lo que el motor acaba de fijar,
+        // en lugar de recalcularlo: recalcularlo aquí es como volvían a separarse los dos.
+        val cover = binding.texture.coverMode
         val g = if (cover) android.view.Gravity.CENTER
         else android.view.Gravity.TOP or android.view.Gravity.CENTER_HORIZONTAL
         (binding.texture.layoutParams as? FrameLayout.LayoutParams)?.let {
@@ -685,7 +749,6 @@ class CameraActivity : AppCompatActivity() {
                 binding.texture.layoutParams = it
             }
         }
-        if (binding.texture.coverMode != cover) binding.texture.coverMode = cover
     }
 
     /** El chip de proporción nacía con "16:9" escrito en el XML mientras las fotos
@@ -976,6 +1039,9 @@ class CameraActivity : AppCompatActivity() {
         // open() resetea el enfoque manual en el motor: el chip no puede seguir mintiendo.
         mfOn = false
         updateMfChip()
+        // Un apilado nocturno interrumpido por un onPause no llega a devolver su callback:
+        // sin esto, la marca del rótulo se quedaría puesta con la cámara ya reabierta.
+        nightStacking = false
         // El estado del HUD tiene que volver atrás con la cámara. Tras bloquear la
         // pantalla estando en la frontal, se reabría la trasera pero el chip seguía
         // diciendo "frontal", y la insignia AE/AF BLOQUEADO se quedaba encendida con
@@ -1596,6 +1662,9 @@ class CameraActivity : AppCompatActivity() {
     private fun buildZoomStrip() {
         val stops = controller.zoomStops()
         binding.zoomStrip.removeAllViews()
+        // La tira se reconstruye entera: el centrado tiene que volver a hacerse aunque la
+        // parada activa sea la misma que antes (las píldoras son vistas NUEVAS).
+        lastZoomActive = -1
         if (stops.size < 2) return // con una sola lente no aporta nada
         // TODAS las píldoras EXACTAMENTE iguales, con ancho y alto fijos de dimens.
         // La queja literal del usuario fue "botones de zoom disparejos": eran
@@ -1658,6 +1727,25 @@ class CameraActivity : AppCompatActivity() {
                     else -> cOff            // zoom digital: atenuado
                 }
             )
+        }
+        // CENTRAR la parada activa en la ventana visible. La tira vive dentro de un
+        // HorizontalScrollView justo porque con 6 paradas mide 384dp (56dp + 8dp por
+        // píldora) sobre 351dp útiles, pero nadie la desplazaba nunca: el scroll arreglaba el
+        // recorte y no el problema de fondo, porque la píldora resaltada podía quedarse FUERA
+        // de la vista. El usuario pellizcaba, el HUD marcaba una parada que no veía y seguía
+        // sin saber en qué óptica estaba.
+        if (active >= 0 && active != lastZoomActive) {
+            lastZoomActive = active
+            val idx = active
+            // Dentro de un post porque highlightZoomStrip() se llama también desde
+            // buildZoomStrip(), o sea ANTES de que el scroll tenga ancho medido, y
+            // smoothScrollTo con width == 0 no desplaza nada.
+            binding.zoomScroll.post {
+                val v = binding.zoomStrip.getChildAt(idx) ?: return@post
+                binding.zoomScroll.smoothScrollTo(
+                    v.left - (binding.zoomScroll.width - v.width) / 2, 0
+                )
+            }
         }
     }
 
@@ -1749,6 +1837,29 @@ class CameraActivity : AppCompatActivity() {
         highlightZoomStrip()
         binding.zoomPill.text =
             String.format(Locale.US, "%.1fx", currentZoom * controller.zoomDisplayFactor)
+        // Fondo ACTIVO de la pastilla en cuanto la cifra ya es recorte DIGITAL sobre la lente
+        // física en uso. zoom_pill_active_bg se dibujó exactamente para esto («mismo lenguaje
+        // que el chip activo y que la parada de zoom seleccionada, con el radio de pastilla»)
+        // y no lo usaba nadie: era un recurso que shrinkResources iba a tirar. El criterio es
+        // el MISMO que el del chip de lente (ámbar por encima de 1,05x sobre la óptica
+        // activa), porque dos avisos que se contradijeran sobre la misma cifra es justo lo que
+        // este HUD lleva media docena de rondas quitando.
+        val digital = lensCropFactor() > 1.05f
+        if (digital != zoomPillDigital) {
+            zoomPillDigital = digital
+            // El padding se repone a mano: los dos fondos son formas SIN <padding> propio, así
+            // que hoy View lo conserva, pero la pastilla vive de sus 16dp/7dp del XML y si un
+            // día dejara de conservarlo se quedaría en un rectángulo pegado a la cifra.
+            val v = binding.zoomPill
+            val pi = v.paddingLeft
+            val ps = v.paddingTop
+            val pd = v.paddingRight
+            val pb = v.paddingBottom
+            v.setBackgroundResource(
+                if (digital) R.drawable.zoom_pill_active_bg else R.drawable.zoom_pill_bg
+            )
+            v.setPadding(pi, ps, pd, pb)
+        }
         binding.zoomPill.animate().cancel()
         binding.zoomPill.alpha = 1f
         ui.removeCallbacks(hideZoom)
@@ -1767,6 +1878,7 @@ class CameraActivity : AppCompatActivity() {
             }.start()
         val cb: (Boolean) -> Unit = { ok ->
             capturing = false
+            nightStacking = false
             if (binding.nightLabel.visibility == View.VISIBLE) showCenterSlot(null)
             if (ok) {
                 // La miniatura YA la pintó onPhotoThumb desde el JPEG en memoria, al
@@ -1786,6 +1898,12 @@ class CameraActivity : AppCompatActivity() {
         }
         if (nightOn) {
             // Apilado multi-frame: sin destello, con indicador de procesado.
+            // El rótulo se REPONE antes de enseñarlo: stackNext() y bracketNext() lo dejan
+            // escrito con SU contador ("Apilado de enfoque 5/5", "Horquillado 3/3") y no lo
+            // devuelven nunca a su texto, así que la siguiente foto de noche arrancaba
+            // anunciando la operación anterior hasta que llegase el primer progreso.
+            nightStacking = true
+            binding.nightLabel.setText(R.string.night_stacking)
             showCenterSlot(binding.nightLabel)
             playShutterSound()
             controller.takeNightPhoto(cb)
@@ -1822,6 +1940,15 @@ class CameraActivity : AppCompatActivity() {
     }
 
     // ---- Ráfaga (mantener pulsado el obturador) ----
+    // PENDIENTE, y a propósito: el motor tiene desde esta ronda una ráfaga de verdad
+    // —fun takeBurst(count: Int, onProgress: (Int, Int) -> Unit, onDone: (Int) -> Unit)—
+    // que hace UNA sola captureBurst con el 3A congelado, y este encadenado de takePhoto()
+    // con 60 ms de espera es exactamente lo que ella viene a sustituir (unlockFocusAfterShot
+    // manda AF_TRIGGER_CANCEL tras cada foto, así que el HAL rebarre el foco entre tomas:
+    // 2-3 fps y cada foto con una nitidez distinta). No se cablea aquí porque takeBurst
+    // guarda por su cuenta con saveImage y NO pasa por jpegSink, así que en modo intent la
+    // foto se iría a la galería en vez de al llamador: hay que decidir antes qué hace una
+    // pulsación larga con un IMAGE_CAPTURE en curso. Va en su propia ronda.
     private fun startBurst() {
         if (mode != "photo" || nightOn || capturing || burstRemaining > 0) return
         burstRemaining = 7
@@ -1953,19 +2080,49 @@ class CameraActivity : AppCompatActivity() {
     }
 
     private fun pintarMiniatura(uri: Uri) {
-        ioExec.execute {
-            val esVideo = (try { contentResolver.getType(uri) } catch (e: Exception) { null }
-                ?: "").startsWith("video")
-            if (esVideo && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val bmp = try {
-                    contentResolver.loadThumbnail(uri, android.util.Size(256, 256), null)
-                } catch (e: Exception) {
-                    null
-                }
-                if (bmp != null) runOnUiThread { binding.thumbnailImage.setImageBitmap(bmp) }
-            } else {
-                runOnUiThread { binding.thumbnailImage.load(uri) }
+        ioExec.execute { pintarEnHiloIo(uri, recuperar = true) }
+    }
+
+    /**
+     * Ya en el hilo de E-S.
+     *
+     * [recuperar] permite UNA sola vuelta a MediaStore si la URI está muerta. Hacía falta
+     * porque la preferencia "ultimaFoto" no se borraba NUNCA y la galería sí tiene botón de
+     * borrar: en cuanto el usuario borraba esa foto, refreshThumbnail seguía confiando en la
+     * URI cacheada, la miniatura se quedaba en un recuadro vacío y latestMediaUri() ya no se
+     * consultaba jamás, ni saliendo y volviendo a entrar en la app. Solo se recuperaba
+     * tomando otra foto. getType() devolviendo null es la señal exacta de que la fila ya no
+     * está. La bandera evita el bucle si la de MediaStore también fallara.
+     */
+    private fun pintarEnHiloIo(uri: Uri, recuperar: Boolean) {
+        val tipo = try { contentResolver.getType(uri) } catch (e: Exception) { null }
+        if (tipo == null) {
+            prefs.edit().remove("ultimaFoto").apply()
+            if (!recuperar) {
+                runOnUiThread { binding.thumbnailImage.setImageDrawable(null) }
+                return
             }
+            val nueva = latestMediaUri()
+            if (nueva == null) {
+                runOnUiThread { binding.thumbnailImage.setImageDrawable(null) }
+                return
+            }
+            prefs.edit().putString("ultimaFoto", nueva.toString()).apply()
+            // Llamada DIRECTA, no otro ioExec.execute: ya estamos en ese hilo y onDestroy
+            // hace ioExec.shutdown(), con lo que reencolar aquí podía lanzar
+            // RejectedExecutionException al salir de la app.
+            pintarEnHiloIo(nueva, recuperar = false)
+            return
+        }
+        if (tipo.startsWith("video") && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val bmp = try {
+                contentResolver.loadThumbnail(uri, android.util.Size(256, 256), null)
+            } catch (e: Exception) {
+                null
+            }
+            if (bmp != null) runOnUiThread { binding.thumbnailImage.setImageBitmap(bmp) }
+        } else {
+            runOnUiThread { binding.thumbnailImage.load(uri) }
         }
     }
 
@@ -2517,8 +2674,13 @@ class CameraActivity : AppCompatActivity() {
     }
 
     private fun applyFlashChip() {
+        // El ciclo tiene CUATRO estados (apagado / automático / encendido / linterna) y el
+        // chip pintaba el MISMO icono para automático que para encendido, así que no había
+        // manera de saber si el flash iba a dispararse o no. ic_flash_auto (el rayo con la A)
+        // ya existía dibujado y no lo referenciaba nadie.
         val icon = when (flashMode) {
             0 -> R.drawable.ic_flash_off
+            1 -> R.drawable.ic_flash_auto
             3 -> R.drawable.ic_torch
             else -> R.drawable.ic_flash_on
         }
@@ -2530,8 +2692,12 @@ class CameraActivity : AppCompatActivity() {
                 else -> R.string.state_off
             }
         )
-        // Solo el modo AUTO necesita letra: el icono ya dice si está encendido o no.
-        binding.chipFlash.text = if (flashMode == 1) "AUTO" else ""
+        // Sin letra: la "AUTO" estaba ahí PORQUE el icono no distinguía automático de
+        // encendido, y ahora sí lo distingue. Además chip_flash es un ProChip.Icon (56dp de
+        // ancho mínimo, como los otros cuatro de la barra) y con el rótulo se iba a ~73dp,
+        // rompiendo la única fila del HUD que sí era uniforme. El estado sigue anunciándose
+        // entero por contentDescription, que es donde hace falta.
+        binding.chipFlash.text = ""
         setChipState(binding.chipFlash, flashMode != 0, R.string.cd_flash, estado, icon)
     }
 

@@ -123,6 +123,9 @@
     <string name="cd_countdown">Timer countdown</string>
     <string name="cd_photo_full">Photo, full screen</string>
     <string name="cd_media_cell">Open</string>
+    <!-- Ver el comentario de values/strings.xml: %1$d = celda (desde 1), %2$d = total. -->
+    <string name="cd_media_cell_foto">Photo %1$d of %2$d</string>
+    <string name="cd_media_cell_video">Video %1$d of %2$d</string>
     <string name="cd_lens_chip">Lens %1$s: %2$s</string>
     <string name="state_on">on</string>
     <string name="state_off">off</string>

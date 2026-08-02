@@ -5,9 +5,19 @@
     android:background="@color/black"
     android:padding="1dp">
 
-    <!-- Las cien celdas del carrete reutilizaban cd_thumbnail ("Ver última foto"), así
-         que el lector decía exactamente lo mismo en todas y el carrete no se podía
-         navegar: no había forma de saber en cuál estabas. -->
+    <!-- Las cien celdas del carrete reutilizaban cd_thumbnail ("Ver última foto"), que es
+         la acción del botón de OTRA pantalla: el lector anunciaba una acción falsa.
+         cd_media_cell ("Abrir") al menos dice lo que la celda hace de verdad, pero es un
+         valor FIJO del layout: sigue siendo el mismo en las cien celdas, así que el
+         carrete todavía no se puede navegar a ciegas (no hay forma de saber en cuál
+         estás). Esto de aquí es solo el respaldo por si el enlace no lo pisa.
+         Lo que falta es una descripción POR CELDA, y eso lo tiene que poner quien enlaza:
+         en GalleryActivity.GridAdapter.onBindViewHolder, junto al resto del enlazado,
+             holder.b.cellImage.contentDescription = getString(
+                 if (item.isVideo) R.string.cd_media_cell_video else R.string.cd_media_cell_foto,
+                 position + 1, items.size)
+         con las cadenas cd_media_cell_foto / cd_media_cell_video que ya están en
+         strings.xml esperando ("Foto %1$d de %2$d"). -->
     <ImageView
         android:id="@+id/cell_image"
         android:layout_width="match_parent"

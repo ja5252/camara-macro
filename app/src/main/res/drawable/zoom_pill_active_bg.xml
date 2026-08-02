@@ -1,15 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    Versión ACTIVA de la pastilla (nivel 2 de la escala 8 / 16 / 28dp): mismo lenguaje
-    que el chip activo (chip_bg con state_selected) y que la parada de zoom seleccionada
-    (zoom_stop_bg), pero con el radio de pastilla en vez del radio de chip.
+    Fondo de la PASTILLA DEL NIVEL DE ZOOM (nivel 2 de la escala 8 / 16 / 28dp).
+    Mismo lenguaje que la parada de zoom seleccionada (zoom_stop_bg) y que el chip activo
+    (chip_bg con state_selected), pero con radio de pastilla en vez de radio de chip.
 
-    Existe como drawable suelto, y no como estado de zoom_pill_bg, porque quien la pone
-    es el código en una vista que NO tiene estado seleccionado: la pastilla del nivel de
-    zoom se enciende y se apaga sola con una animación de alpha.
+    Por qué es un drawable aparte y no un estado de zoom_pill_bg: zoom_pill_bg viste otras
+    cuatro pastillas que están SIEMPRE en pantalla (bloqueo AE/AF, cronómetro de grabación,
+    conmutador FOTO/VÍDEO y el aviso de la pantalla de cubierta), y ninguna de ellas debe
+    llevar ámbar: el ámbar significa "esto está puesto ahora". La pastilla del zoom sí, y
+    además no tiene estado apagado que dibujar, porque cuando no está en curso no está: se
+    enciende y se apaga sola con una animación de alpha (showZoom / hideZoom).
+    Por eso se aplica DIRECTAMENTE en activity_camera.xml y no desde el código.
 
-    El fondo es 85% de negro bajo el lavado ámbar del 18%: sobre una escena quemada, el
-    texto ámbar sobre el 80% se queda en 4,36:1 y sobre el 85% sube a 5,12:1.
+    Lo que aporta de verdad es el FILO. El fondo negro no cambia (los dos drawables usan el
+    mismo @color/surface_panel al 85%): lo que cambia es que el filo de zoom_pill_bg es
+    hairline al 20% de blanco, que sobre una escena quemada se pierde y deja la pastilla
+    sin borde, flotando. El filo ámbar de 1,5dp separa la pastilla del visor tanto sobre
+    una pared blanca como sobre una habitación oscura.
+    El lavado ámbar del 18% sube algo la luminancia del fondo: el texto de la pastilla es
+    BLANCO (Hud.Value → text_primary), y en el peor caso (escena blanca quemada bajo el
+    85% de negro) queda en unos 10,6:1, muy por encima del 4,5:1 exigible.
 -->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
     <item>

@@ -117,10 +117,18 @@
     <string name="cd_fit">Ver el fotograma entero o llenar la pantalla</string>
 
     <!-- La foto a pantalla completa y cada celda del carrete reutilizaban cd_thumbnail
-         ("Ver última foto"), que es la acción de un botón de OTRA pantalla: el lector
-         decía lo mismo en las cien celdas del carrete y no se podía navegar. -->
+         ("Ver última foto"), que es la acción de un botón de OTRA pantalla. -->
     <string name="cd_photo_full">Foto a pantalla completa</string>
+    <!-- Respaldo del layout: es el mismo en las cien celdas, así que dice QUÉ hace la
+         celda pero no en cuál estás. -->
     <string name="cd_media_cell">Abrir</string>
+    <!-- Descripción real de cada celda del carrete, CON la posición: es lo único que
+         permite navegar la cuadrícula a ciegas. PENDIENTE de consumidor: las pone
+         GalleryActivity.GridAdapter.onBindViewHolder con
+         getString(res, position + 1, items.size). Los dos argumentos son enteros y van
+         en este orden: %1$d = número de la celda (empezando en 1), %2$d = total. -->
+    <string name="cd_media_cell_foto">Foto %1$d de %2$d</string>
+    <string name="cd_media_cell_video">Vídeo %1$d de %2$d</string>
     <string name="state_on">activado</string>
     <string name="state_off">desactivado</string>
     <string name="state_auto">automático</string>

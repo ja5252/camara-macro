@@ -27,9 +27,19 @@
         @xml/backup_rules y @xml/data_extraction_rules excluyendo camara.xml) exige dos
         ficheros nuevos en res/xml; mientras no existan, referenciarlos rompe la
         compilación en AAPT2. Con "false" el efecto práctico es el mismo salvo la
-        transferencia directa entre teléfonos (Android 12+), que allowBackup no gobierna:
-        ese hueco se cierra en código, validando el ID guardado contra cameraIdList al
-        arrancar CameraActivity antes de abrir nada.
+        transferencia directa entre teléfonos (Android 12+), que allowBackup NO gobierna.
+
+        AVISO: ese hueco de la transferencia directa SIGUE ABIERTO. Aquí decía que "se
+        cierra en código validando el ID contra cameraIdList", y esa validación no existe:
+        CameraActivity.onCreate solo mira si el ID guardado es null o "0", y startCamera()
+        se lo pasa tal cual a controller.open(). Con un ID restaurado que en este aparato
+        no exista, la apertura se muere en el vigilante de 5 s y el usuario ve "Esta lente
+        no respondió" en CADA arranque, sin camino de vuelta al asistente. Para cerrarlo
+        hace falta, en onCreate y justo después de leer savedId:
+            if (savedId != null && CameraInfoUtil.listLenses(this).none { it.cameraId == savedId })
+                savedId = null
+        y dejar que el flujo ya escrito mande al asistente (o elija la primera trasera
+        válida en modo intent). Mientras esa línea no esté, no escribir aquí que lo está.
     -->
     <application
         android:allowBackup="false"

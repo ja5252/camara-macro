@@ -343,6 +343,16 @@ class GalleryActivity : AppCompatActivity() {
 
     /** Borra por URI (no por índice): siempre quita lo que el sistema confirmó. */
     private fun onDeletedByUri(uri: Uri) {
+        // La cámara cachea en prefs("ultimaFoto") la URI de lo último guardado para pintar su
+        // miniatura sin preguntarle nada a MediaStore en el arranque en frío. Si lo que se
+        // acaba de borrar es JUSTO esa, la caché apunta a una fila que ya no existe y la
+        // miniatura del visor se queda en un recuadro vacío. Aquí es donde se sabe: se
+        // invalida en el acto. (CameraActivity además se defiende sola si la URI muere por
+        // otra vía —la cámara de fábrica, un gestor de archivos—, pero esto se lo ahorra.)
+        val camPrefs = getSharedPreferences("camara", MODE_PRIVATE)
+        if (camPrefs.getString("ultimaFoto", null) == uri.toString()) {
+            camPrefs.edit().remove("ultimaFoto").apply()
+        }
         val i = items.indexOfFirst { it.uri == uri }
         Toast.makeText(this, R.string.deleted, Toast.LENGTH_SHORT).show()
         if (i < 0) return
@@ -485,6 +495,15 @@ class GalleryActivity : AppCompatActivity() {
                 if (lp.height != alto) { lp.height = alto; holder.b.root.layoutParams = lp }
             }
             holder.b.cellPlay.visibility = if (item.isVideo) View.VISIBLE else View.GONE
+            // Descripción POR CELDA. El layout pone "Abrir" como respaldo, pero es un valor
+            // FIJO: era el mismo en las cien celdas del carrete, así que un lector de
+            // pantalla no daba forma de saber en cuál estabas y la cuadrícula no se podía
+            // navegar a ciegas. Las cadenas llevan dos enteros en este orden: %1$d = número
+            // de celda empezando en 1, %2$d = total.
+            holder.b.cellImage.contentDescription = getString(
+                if (item.isVideo) R.string.cd_media_cell_video else R.string.cd_media_cell_foto,
+                position + 1, items.size
+            )
             holder.b.cellImage.tag = null
             if (item.isVideo) {
                 loadVideoThumb(item.uri, holder.b.cellImage)

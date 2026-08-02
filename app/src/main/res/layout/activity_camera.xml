@@ -836,7 +836,13 @@
 
         <!-- Indicador de zoom: fila propia. Estaba a la misma cota que los cuatro
              paneles y por debajo de ellos, así que al pellizcar con un panel abierto
-             el nivel de zoom era sencillamente invisible. -->
+             el nivel de zoom era sencillamente invisible.
+             El fondo de REPOSO es zoom_pill_bg. El dueño del fondo es el código, no este
+             XML: CameraActivity lo cambia a zoom_pill_active_bg (filo ámbar) SOLO cuando el
+             zoom es recorte digital, para distinguirlo del óptico. Poner aquí el ámbar como
+             estado inicial contradecía a `zoomPillDigital = false`, que nace apagado: la
+             pastilla salía en ámbar -o sea, anunciando recorte digital- también con la lente
+             óptica, hasta el primer cambio de estado. -->
         <TextView
             android:id="@+id/zoom_pill"
             style="@style/Hud.Value"

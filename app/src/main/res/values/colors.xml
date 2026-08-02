@@ -22,10 +22,16 @@
     <color name="text_primary">#FFFFFFFF</color>
     <color name="text_dim">#E6FFFFFF</color>
     <color name="text_off">#99FFFFFF</color>
-    <!-- Paso intermedio para lo que está apagado pero no desactivado (paradas de zoom
-         digital, rótulos secundarios). Estaba escrito a mano en Kotlin como
-         Color.parseColor("#8CFFFFFF"). -->
-    <color name="text_faint">#8CFFFFFF</color>
+    <!--
+        Aquí vivió un cuarto escalón, text_faint (#8CFFFFFF), para "apagado pero no
+        desactivado". Se retiró: no lo usaba nadie y no había a quién dárselo. Su único
+        consumidor posible eran las paradas de zoom digital de highlightZoomStrip(), que
+        van con text_off, y el salto de #99 (60% de blanco) a #8C (55%) no se distingue a
+        ojo mientras que sí baja el contraste de unas CIFRAS que hay que leer sobre el
+        visor en vivo. Tres escalones (primary / dim / off) son los que el HUD sabe
+        distinguir de verdad. Si vuelve a hacer falta, que vuelva con su consumidor
+        escrito en el mismo cambio.
+    -->
 
     <!--
         Verde y rojo del anillo de enfoque. Los anteriores (#4CD964 y #FF3B30) eran
