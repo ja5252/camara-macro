@@ -1106,11 +1106,24 @@ class CameraActivity : AppCompatActivity() {
         // Migración de una sola vez, con el mismo criterio que la de 16:9 a la que sustituye:
         // solo se mueve a quien sigue en el valor que aquélla puso. A partir de aquí manda el
         // usuario y esto no vuelve a ejecutarse.
-        if (!prefs.getBoolean("migrNativa", false)) {
-            prefs.edit().putBoolean("migrNativa", true).apply()
-            if (prefs.getInt("capRatio", 2) == 2) prefs.edit().putInt("capRatio", 0).apply()
+        // REVERTIDA. La migración de arriba movía a todo el mundo de 16:9 a la proporción
+        // NATIVA del sensor (4:3), y su argumento tiene su lógica: capturar en nativo no tira
+        // píxeles. Pero el dueño del proyecto pidió 16:9 por defecto, con estas palabras y por
+        // este motivo: "16:9 por defecto me hace sentido, usa el estándar de la industria".
+        // Una decisión ya tomada por quien manda no se cambia desde dentro sin preguntar.
+        //
+        // Y en este teléfono además se notaba: en la pantalla de cubierta, que es muy
+        // alargada, un visor 4:3 mide 1140x1520 contra los 1140x2027 del 16:9. Son 507 px
+        // menos de imagen, o sea casi el 20% de la pantalla convertido en franja negra, que
+        // es exactamente la queja que llegó al probarlo.
+        //
+        // A quien la migración ya movió se le devuelve a 16:9 UNA sola vez; a partir de ahí
+        // manda el usuario y esto no vuelve a tocar nada.
+        if (prefs.getBoolean("migrNativa", false) && !prefs.getBoolean("migrNativaDesecha", false)) {
+            prefs.edit().putBoolean("migrNativaDesecha", true).apply()
+            if (prefs.getInt("capRatio", 2) == 0) prefs.edit().putInt("capRatio", 2).apply()
         }
-        ratioIndex = prefs.getInt("capRatio", 0).coerceIn(0, ratioLabels.size - 1)
+        ratioIndex = prefs.getInt("capRatio", 2).coerceIn(0, ratioLabels.size - 1)
         binding.chipRatio.text = ratioLabels[ratioIndex]
         setChipState(binding.chipRatio, ratioIndex != 0, R.string.cd_ratio, ratioLabels[ratioIndex])
 
