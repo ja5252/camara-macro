@@ -4496,7 +4496,25 @@ class Camera2Controller(
             CameraCharacteristics.TONEMAP_AVAILABLE_TONE_MAP_MODES
         ) ?: IntArray(0)
         val tmPoints = characteristics.get(CameraCharacteristics.TONEMAP_MAX_CURVE_POINTS) ?: 0
-        toneCurveSupported =
+        // APAGADA POR DEFECTO, y esto es una decisión tomada CON el teléfono en la mano.
+        // La curva propia dejó TODAS las fotos en negro: luminancia media 2,0 con la exposición
+        // correcta (ISO 100 a 1/686 s a plena luz). Se corrigió la rejilla degenerada que la
+        // causaba —511 de 512 puntos dentro del primer 2,5% del rango— y con 64 puntos
+        // regulares la foto mejoró, pero SIGUIÓ saliendo casi negra: percentil 99,5 en 28,7
+        // sobre 255 con ISO 100 a 1/631 s. O sea que este HAL no aplica CONTRAST_CURVE como
+        // dice la documentación, y sin poder medir cada iteración en el aparato no se puede
+        // seguir a ciegas.
+        // Una cámara que funciona vale más que unas sombras mejor levantadas. Queda toda la
+        // maquinaria montada y se enciende con la preferencia 'tono_propio' cuando se pueda
+        // depurar contra el dispositivo; mientras tanto manda el tone mapping del HAL, que
+        // aplasta el pie de las sombras pero entrega fotos.
+        val tonoPropio = try {
+            activity.getSharedPreferences("camara", Context.MODE_PRIVATE)
+                .getBoolean("tono_propio", false)
+        } catch (e: Exception) {
+            false
+        }
+        toneCurveSupported = tonoPropio &&
             tmModes.contains(CameraMetadata.TONEMAP_MODE_CONTRAST_CURVE) && tmPoints >= 8
         // 64 puntos, NO los 512 que publica el HAL. Pedir el máximo con reparto no uniforme
         // devolvió toda la foto en negro absoluto en este aparato (medido: luminancia 2,0 con
