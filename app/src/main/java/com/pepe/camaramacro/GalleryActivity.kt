@@ -5,6 +5,7 @@ import android.app.RecoverableSecurityException
 import android.content.ContentUris
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.net.Uri
@@ -102,12 +103,72 @@ class GalleryActivity : AppCompatActivity() {
     private fun loadAndShow() {
         loadMedia()
         binding.pager.adapter = Adapter()
-        binding.grid.layoutManager = GridLayoutManager(this, 3)
+        binding.grid.layoutManager = GridLayoutManager(this, gridColumns())
         binding.grid.adapter = GridAdapter()
+        // La rejilla se remide cuando cambia su ANCHO REAL, no solo al plegar: al
+        // desplegar, onConfigurationChanged llega antes de que la ventana se haya
+        // vuelto a medir, así que gridColumns() todavía leería el ancho viejo.
+        binding.grid.addOnLayoutChangeListener { _, izq, _, der, _, izqAnt, _, derAnt, _ ->
+            if (der - izq != derAnt - izqAnt) binding.grid.post { syncGridMetrics() }
+        }
         val start = intent.getIntExtra(EXTRA_INDEX, 0).coerceIn(0, (items.size - 1).coerceAtLeast(0))
         if (items.isNotEmpty()) binding.pager.setCurrentItem(start, false)
         applyEmptyState()
         updateCounter()
+    }
+
+    /**
+     * Ancho real de la rejilla; antes de estar colocada, el de la VENTANA. Nunca el de
+     * la PANTALLA: en el plegable abierto la ventana puede no ocupar toda la pantalla y
+     * displayMetrics.widthPixels devolvía un ancho que no era el de la lista.
+     */
+    private fun gridWidthPx(): Int {
+        if (binding.grid.width > 0) return binding.grid.width
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            return windowManager.currentWindowMetrics.bounds.width()
+        }
+        return resources.displayMetrics.widthPixels
+    }
+
+    /**
+     * Una columna por cada ~132dp. Con 3 columnas fijas, la pantalla interior daba
+     * celdas de 231dp (enormes) y la de cubierta 117dp: el número de columnas tiene
+     * que salir del ancho, no de una constante.
+     */
+    private fun gridColumns(): Int {
+        val target = 132f * resources.displayMetrics.density
+        return (gridWidthPx() / target).toInt().coerceIn(3, 8)
+    }
+
+    /** Lado de la celda con el ancho y las columnas que hay AHORA (celda cuadrada). */
+    private fun cellSizePx(): Int = gridWidthPx() / gridColumns()
+
+    /** Recoloca columnas y altura de celda con el ancho que tiene la rejilla en este momento. */
+    private fun syncGridMetrics() {
+        // notifyDataSetChanged en mitad de una pasada de medida lanza IllegalStateException
+        // ("Cannot call this method while RecyclerView is computing a layout"): se reintenta
+        // en el siguiente ciclo en vez de tumbar la galería.
+        if (binding.grid.isComputingLayout) {
+            binding.grid.post { syncGridMetrics() }
+            return
+        }
+        val lm = binding.grid.layoutManager as? GridLayoutManager ?: return
+        val cols = gridColumns()
+        if (lm.spanCount != cols) lm.spanCount = cols
+        // notifyDataSetChanged y no notifyItemChanged: cambia la geometría de TODAS
+        // las celdas, incluidas las recicladas que ya tienen altura asignada.
+        binding.grid.adapter?.notifyDataSetChanged()
+    }
+
+    /**
+     * GalleryActivity ya declara smallestScreenSize|screenLayout en el manifiesto, así
+     * que NO se recrea al plegar: si no recalculamos aquí, las celdas se quedan con el
+     * tamaño de la pantalla anterior (al abrir el teléfono el ancho pasaba de 1140 a
+     * 2248 px con la altura de fila clavada: miniaturas aplastadas 2:1).
+     */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        binding.grid.post { syncGridMetrics() }
     }
 
     private var gridShown = false
@@ -393,18 +454,36 @@ class GalleryActivity : AppCompatActivity() {
     // ---------------------------------------------------------------- Carrete (grid)
 
     private inner class GridAdapter : RecyclerView.Adapter<GVH>() {
-        private val cell = resources.displayMetrics.widthPixels / 3
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): GVH {
             val b = ItemGalleryGridBinding.inflate(LayoutInflater.from(parent.context), parent, false)
-            b.root.layoutParams = b.root.layoutParams.apply { height = cell }
+            // La celda se mide AQUÍ, con el ancho que tiene el RecyclerView en este
+            // momento. Antes se cacheaba una sola vez con la pantalla física dividida
+            // entre 3: al abrir el plegable el ancho pasaba de 1140 a 2248 px, las
+            // columnas se ensanchaban a 749 px y la altura de fila seguía clavada en
+            // 380 px (miniaturas 2:1 aplastadas).
+            b.root.layoutParams = b.root.layoutParams.apply { height = celdaDe(parent) }
             return GVH(b)
         }
 
         override fun getItemCount() = items.size
 
+        /** Lado de la celda a partir del ancho REAL del RecyclerView y sus columnas. */
+        private fun celdaDe(parent: ViewGroup): Int {
+            val cols = ((parent as? RecyclerView)?.layoutManager as? GridLayoutManager)?.spanCount
+                ?: gridColumns()
+            return (if (parent.width > 0) parent.width else gridWidthPx()) / cols.coerceAtLeast(1)
+        }
+
         override fun onBindViewHolder(holder: GVH, position: Int) {
             val item = items[position]
+            // Y también al enlazar: los holders que ya existían se RECICLAN al plegar
+            // (onCreateViewHolder no se vuelve a llamar) y se quedaban con la altura
+            // de la pantalla anterior.
+            val alto = cellSizePx()
+            holder.b.root.layoutParams?.let { lp ->
+                if (lp.height != alto) { lp.height = alto; holder.b.root.layoutParams = lp }
+            }
             holder.b.cellPlay.visibility = if (item.isVideo) View.VISIBLE else View.GONE
             holder.b.cellImage.tag = null
             if (item.isVideo) {

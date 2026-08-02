@@ -44,4 +44,26 @@
          debajo de esa barra (chip de lente, aviso de bloqueo) se separa esto del
          borde superior del visor, no del borde de la PANTALLA. -->
     <dimen name="hud_top_offset">76dp</dimen>
+
+    <!--
+        Ranura útil de la lupa de enfoque. CameraActivity la manda al cuadrante OPUESTO
+        al dedo, así que hacen falta los DOS márgenes y los dos tienen que dejar libre
+        algo distinto:
+
+          · magnifier_bottom_inset (cuando el usuario toca la mitad de ARRIBA): con los
+            20dp que había, la tarjeta acababa en y≈484..604dp y caía entera dentro de
+            control_band (≈289dp de alto, y=469..758dp), que se dibuja después. La lupa
+            era invisible en la mitad de los toques. 168dp la dejan justo encima:
+            624 - 168 - 120 = y 336..456, con la banda empezando en 469.
+          · magnifier_top_inset (cuando toca la mitad de ABAJO): 150dp dejan libres la
+            barra de opciones (≈58dp) y el chip de lente, que con un nombre largo llega
+            a 240dp de ancho y se metía debajo de la tarjeta.
+
+        Se miden contra la IMAGEN, no contra la pantalla, porque el padre es
+        PreviewFrameLayout. Por eso NO pueden ser mucho mayores: con relación 1:1 el
+        fotograma sólo mide 351dp de alto en la pantalla de cubierta y un margen
+        inferior de 300dp dejaría la tarjeta fuera del visor por arriba.
+    -->
+    <dimen name="magnifier_top_inset">150dp</dimen>
+    <dimen name="magnifier_bottom_inset">168dp</dimen>
 </resources>

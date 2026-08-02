@@ -30,4 +30,14 @@
 
     <dimen name="touch_min">48dp</dimen>
     <dimen name="hud_top_offset">84dp</dimen>
+
+    <!--
+        Aquí el visor LLENA la pantalla (preview_fills_screen=true), así que la imagen
+        mide siempre los 790dp de alto y la banda de controles ocupa los ≈293dp de
+        abajo: la lupa necesita 320dp de margen inferior para no caer dentro de ella.
+        Con los 168dp de la pantalla de cubierta se metería 152dp por debajo del borde
+        de control_band y volvería a ser invisible.
+    -->
+    <dimen name="magnifier_top_inset">170dp</dimen>
+    <dimen name="magnifier_bottom_inset">320dp</dimen>
 </resources>

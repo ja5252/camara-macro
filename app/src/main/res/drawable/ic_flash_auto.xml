@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Flash AUTOMÁTICO: el rayo con una "A" al lado. Faltaba el tercer estado del ciclo
+    (off / auto / on / linterna) y el chip enseñaba el mismo icono para AUTO que para ON,
+    así que no había manera de saber si el flash iba a dispararse o no.
+    Sin android:tint fijo a propósito: el tinte lo pone setChipState() con un
+    ColorStateList para poder teñirlo de ámbar cuando el estado está activo. Un tint en el
+    vector GANA sobre el del compound drawable y dejaba el icono blanco para siempre.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="20dp"
+    android:height="20dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M3,2v12h3v9l7,-12h-4l4,-9H3zM19,2h-2l-3.2,9h1.9l0.7,-2h3.2l0.7,2h1.9L19,2zM16.85,7.65L18,4l1.15,3.65H16.85z" />
+</vector>

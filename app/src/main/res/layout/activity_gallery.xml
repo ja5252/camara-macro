@@ -75,26 +75,38 @@
         android:paddingTop="14dp"
         android:paddingBottom="36dp">
 
+        <!-- La etiqueta va en el CONTENEDOR, que es el que recibe el clic, y los hijos se
+             callan. Antes el icono y el rótulo eran importantes por separado: el lector
+             hacía tres paradas de foco por botón, decía "Compartir" dos veces y en ningún
+             momento anunciaba que aquello fuese pulsable. Los dos únicos botones de acción
+             de la galería, y no se sabía que lo eran.
+             minWidth/minHeight de 48dp: con wrap_content el objetivo táctil dependía de lo
+             largo que fuese el rótulo traducido. -->
         <LinearLayout
             android:id="@+id/btn_share"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginHorizontal="28dp"
             android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/share"
+            android:focusable="true"
             android:gravity="center"
+            android:minWidth="48dp"
+            android:minHeight="48dp"
             android:orientation="vertical"
             android:padding="8dp">
 
             <ImageView
                 android:layout_width="26dp"
                 android:layout_height="26dp"
-                android:contentDescription="@string/share"
+                android:importantForAccessibility="no"
                 android:src="@drawable/ic_share" />
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
+                android:importantForAccessibility="no"
                 android:text="@string/share"
                 android:textColor="@color/white"
                 android:textSize="12sp" />
@@ -106,20 +118,25 @@
             android:layout_height="wrap_content"
             android:layout_marginHorizontal="28dp"
             android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/delete"
+            android:focusable="true"
             android:gravity="center"
+            android:minWidth="48dp"
+            android:minHeight="48dp"
             android:orientation="vertical"
             android:padding="8dp">
 
             <ImageView
                 android:layout_width="26dp"
                 android:layout_height="26dp"
-                android:contentDescription="@string/delete"
+                android:importantForAccessibility="no"
                 android:src="@drawable/ic_delete" />
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
+                android:importantForAccessibility="no"
                 android:text="@string/delete"
                 android:textColor="@color/white"
                 android:textSize="12sp" />

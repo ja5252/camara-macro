@@ -29,6 +29,7 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import android.view.animation.OvershootInterpolator
@@ -97,6 +98,15 @@ class CameraActivity : AppCompatActivity() {
     private var fullRes = true
     private var disabledLenses = HashSet<String>()
     private var nightOn = false
+
+    // Lector de códigos: ahora lo sirve el stream YUV del motor (qrReader + ML Kit sobre la
+    // Image, sin copia ni readback). El camino bueno llevaba implementado desde el
+    // principio y NADIE llamaba a setQrEnabled: cero coincidencias en el grep. Lo que
+    // corría de verdad era un getBitmap() del TextureView cada 1,1 s EN EL HILO DE UI, en
+    // todos los modos, hasta con el dedo en el obturador. Apagado por defecto: escanear
+    // cuesta un stream (es excluyente con RAW, Ultra HDR y noche) y batería, y la inmensa
+    // mayoría de las veces el usuario solo quiere hacer una foto. Se enciende en Ajustes.
+    private var qrOn = false
     private var qrValue: String? = null
     // Lista, no un solo valor: con una sola variable el aviso volvía a saltar en cuanto
     // entraba en cuadro un código distinto del que se acababa de descartar.
@@ -124,6 +134,124 @@ class CameraActivity : AppCompatActivity() {
 
     private val ui = Handler(Looper.getMainLooper())
     private val prefs by lazy { getSharedPreferences("camara", MODE_PRIVATE) }
+
+    /**
+     * Hilo de E-S. Copiar un mp4 de 4K, escribir varios MB en la Uri de otra app o
+     * consultar MediaStore desde el hilo de UI bloquea la interfaz el tiempo suficiente
+     * para que el sistema marque un ANR; y en onResume esa consulta iba POR DELANTE del
+     * arranque de la cámara, robándole justo los primeros milisegundos.
+     */
+    private val ioExec by lazy { java.util.concurrent.Executors.newSingleThreadExecutor() }
+
+    // ---- Enfoque manual (MF) ----
+    // El motor tenía setManualFocusDistance() y hasManualFocus desde el primer día, pero
+    // NINGÚN control los llamaba: en una app cuyo propósito declarado es el macro, el
+    // enfoque fino era literalmente inalcanzable desde la interfaz. El chip se crea por
+    // código (ver buildExtraChips) porque activity_camera.xml es de otro integrador.
+    private var mfOn = false
+    private var mfDiopters = 0f
+    private var lastMagnifierMs = 0L
+    private var chipMf: TextView? = null
+
+    // Horquillado de exposición (AEB). La serie se guarda entera: la fusión la hace el
+    // usuario en el ordenador, que es donde tiene sentido, y aquí no cuesta ni memoria ni
+    // riesgo. Sin esto no había forma de asegurar una escena a contraluz: o se quema el
+    // cielo o se tapa la sombra, y eso se descubre en casa.
+    private var chipAeb: TextView? = null
+    private var bracketQueue = ArrayDeque<Int>()
+    private var bracketBase = 0
+
+    // Apilado de enfoque: a 5 cm la profundidad de campo son milímetros y una sola toma
+    // NUNCA tiene el bicho entero enfocado, por buena que sea la lente.
+    private var stackQueue = ArrayDeque<Float>()
+    private var stackTotal = 0
+
+    // ---- Herramientas de análisis (histograma / cebras / realce de enfoque) ----
+    // No abren ningún stream nuevo: se analiza un fotograma DIMINUTO (160 px) del propio
+    // visor. Un stream YUV extra habría chocado con el límite de 3 streams del HAL, que es
+    // justo lo que ya obliga a que RAW, Ultra HDR, noche y QR sean excluyentes entre sí.
+    private var analysisOverlay: AnalysisOverlayView? = null
+    private var chipTools: TextView? = null
+    private var toolsOn = false
+    private var toolHist = true
+    private var toolZebra = false
+    private var toolPeak = false
+    private var analysisBmp: Bitmap? = null
+    private var maskBmp: Bitmap? = null
+    private var analysisPx: IntArray? = null
+    private var lumaBuf: IntArray? = null
+    private var maskPx: IntArray? = null
+    private val histBins = IntArray(64)
+
+    private val analysisTick = object : Runnable {
+        override fun run() {
+            analyzeFrame()
+            ui.postDelayed(this, 400)
+        }
+    }
+
+    // Sonido de captura. Sin esto, disparar solo daba un golpe háptico: no había ninguna
+    // confirmación audible de que la foto existiera, que es justo el detalle que hace que
+    // una cámara se sienta cara. No hay ni una referencia a SoundPool ni a MediaActionSound
+    // en todo el proyecto (verificado por grep): se usa el sonido del SISTEMA, así que cero
+    // peso en el APK, cero assets y cero licencias.
+    private var shutterSound: android.media.MediaActionSound? = null
+    private var soundOn = true
+
+    /** Qué hacen las teclas de volumen: 0 disparar, 1 zoom, 2 exposición. */
+    private var volAction = 0
+
+    /**
+     * Piso de velocidad de obturación para congelar el movimiento. Estaba escrito a fuego
+     * en el motor (1/60) y setShutterFloorNs no se llamaba desde NINGÚN sitio de la
+     * interfaz, así que no había manera de congelar un colibrí ni de relajarlo cuando
+     * sobraba. Se elige en Ajustes: es un ajuste de "poner y olvidar".
+     */
+    private val floorList = longArrayOf(0L, 16_666_667L, 8_000_000L, 4_000_000L, 2_000_000L)
+    private var floorIndex = 1
+
+    /** -1 = automático (lo que diga la pantalla), 0 = AJUSTAR, 1 = LLENAR. */
+    private var previewFillPref = -1
+
+    /**
+     * Guarda de reentrada. El resultado del permiso llega ANTES de onResume, así que
+     * startCamera() se ejecutaba dos veces seguidas y quedaban DOS manager.openCamera() del
+     * mismo ID en vuelo: con la ID0 dañada, abrir dos veces es exactamente lo que cuelga el
+     * HAL. De paso evita que currentZoom y zoomRestored se reseteen dos veces, que era por
+     * lo que el zoom guardado se perdía en el primer arranque tras conceder el permiso.
+     */
+    private var cameraOpening = false
+
+    // Reapertura automática tras un error transitorio. En ColorOS es habitual que otra app
+    // se lleve la cámara y, al volver, el visor se quedaba negro con un aviso y había que
+    // salir y entrar de la app a mano.
+    private var resumed = false
+    private var reopenTries = 0
+    private val reopenCamera = Runnable {
+        if (resumed) { controller.close(); cameraOpening = false; startCamera() }
+    }
+
+    /**
+     * Bitmap REUTILIZADO del fotograma congelado del cambio de lente. getBitmap(w, h) pedía
+     * el TextureView a resolución COMPLETA: en el plegable desplegado son 2248x3998, o sea
+     * 35,9 MB de ARGB_8888 asignados EN EL HILO DE UI justo en el instante que la animación
+     * pretendía suavizar, y una vez por CADA cruce de parada óptica durante un pellizco.
+     * A un cuarto de lado (1/16 de memoria) se ve igual: dura 140 ms, va desenfocado por
+     * definición y se escala al tamaño del visor.
+     */
+    private var freezeBitmap: Bitmap? = null
+
+    /**
+     * Bitmap REUTILIZADO de la lupa. Antes cada toque de enfoque pedía getBitmap(tw, th) a
+     * resolución completa (hasta 35,9 MB) solo para recortar un 12 %, en el hilo de UI y en
+     * el gesto MÁS FRECUENTE de una app macro; y si getBitmap o createBitmap lanzaban, el
+     * catch dejaba ese bitmap enorme sin reciclar.
+     */
+    private var magBitmap: Bitmap? = null
+
+    /** Tope de ancho de la lectura de la lupa: por encima no se gana nitidez visible en una
+     *  tarjeta de 120 dp y sí se paga la lectura completa del panel interior. */
+    private val magMaxW = 1440
 
     private lateinit var scaleDetector: ScaleGestureDetector
     private lateinit var gestureDetector: GestureDetector
@@ -162,8 +290,20 @@ class CameraActivity : AppCompatActivity() {
 
     private val requestCamera =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) startCamera()
-            else Toast.makeText(this, R.string.need_camera_permission, Toast.LENGTH_LONG).show()
+            // NO se llama a startCamera aquí: este resultado se entrega en ON_START, ANTES
+            // de onResume, que ya comprueba el permiso y abre. Llamar en los dos sitios
+            // dejaba DOS openCamera() del mismo ID en vuelo, que es el escenario que cuelga
+            // este HAL, y reseteaba currentZoom dos veces (zoom guardado perdido).
+            if (!granted) {
+                Toast.makeText(this, R.string.need_camera_permission, Toast.LENGTH_LONG).show()
+            }
+        }
+
+    private val settingsLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+            // Al volver de Ajustes hay que releer TODO: si no, el usuario apagaba el sonido
+            // o encendía el histograma y no pasaba nada hasta reiniciar la app entera.
+            if (::controller.isInitialized) applyPrefs()
         }
 
     private val requestAudio =
@@ -176,14 +316,7 @@ class CameraActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
 
         // ¿Nos invoca OTRA app para capturar? (banca, archivos, formularios...)
-        val act = intent?.action
-        captureVideo = act == MediaStore.ACTION_VIDEO_CAPTURE
-        // GET_CONTENT/PICK: otra app pide una imagen (adjuntar documento, formularios,
-        // subidas web...). Respondemos capturandola con la lente que SI funciona.
-        pickContent = act == Intent.ACTION_GET_CONTENT || act == Intent.ACTION_PICK
-        captureIntent = captureVideo || act == MediaStore.ACTION_IMAGE_CAPTURE || pickContent
-        @Suppress("DEPRECATION")
-        captureOutput = intent?.getParcelableExtra(MediaStore.EXTRA_OUTPUT) as? Uri
+        readCaptureIntent(intent)
         if (captureIntent) setResult(RESULT_CANCELED) // contrato por defecto si el usuario sale
 
         var savedId = prefs.getString("cameraId", null)
@@ -210,6 +343,16 @@ class CameraActivity : AppCompatActivity() {
             runOnUiThread {
                 Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
                 binding.btnChangeLens.setColorFilter(ContextCompat.getColor(this, R.color.accent))
+                cameraOpening = false
+                // Reintento con espera. ColorOS quita la cámara al pasar a segundo plano y
+                // la devuelve al volver: sin reintento el usuario se quedaba con el visor
+                // negro y tenía que salir y entrar de la app a mano. Tope de dos intentos
+                // para no quedarnos reabriendo en bucle una lente que de verdad no está.
+                if (resumed && reopenTries < 2) {
+                    reopenTries++
+                    ui.removeCallbacks(reopenCamera)
+                    ui.postDelayed(reopenCamera, 600L * reopenTries) // 600 ms, luego 1200 ms
+                }
             }
         }
         controller.onReady = {
@@ -219,6 +362,13 @@ class CameraActivity : AppCompatActivity() {
                 if (z > 1.01f) currentZoom = controller.setZoom(z)
             }
             runOnUiThread {
+                cameraOpening = false
+                reopenTries = 0
+                // Confirmado: la sesión arrancó. El aviso ámbar del botón de ajustes se
+                // pone ante CUALQUIER error y NADA lo limpiaba nunca; tras un "Otra app
+                // tomó la cámara" (lo normal en ColorOS al volver de otra aplicación)
+                // quedaba marcado para siempre, sugiriendo una avería que no existía.
+                binding.btnChangeLens.clearColorFilter()
                 syncPreviewGravity()
                 syncRatioChip()
                 updateLensChip()
@@ -267,7 +417,6 @@ class CameraActivity : AppCompatActivity() {
             binding.thumbnailImage.setImageBitmap(bmp)
             bounceThumbnail()
         }
-        if (captureIntent) armIntentCapture()
         controller.onLensSwitching = { freezeForLensSwitch() }
 
         scaleDetector = ScaleGestureDetector(
@@ -296,6 +445,15 @@ class CameraActivity : AppCompatActivity() {
                 }
 
                 override fun onDoubleTap(e: MotionEvent): Boolean {
+                    // Doble toque en manual = volver a AF continuo. Sin esto, la única
+                    // salida del enfoque manual era encontrar otra vez el chip MF.
+                    if (mfOn) {
+                        mfOn = false
+                        controller.setAutoFocus()
+                        if (proParam == "mf") selectParam("ev")
+                        updateMfChip()
+                        return true
+                    }
                     currentZoom = if (currentZoom > 1.05f) controller.setZoom(1f)
                     else controller.setZoom(minOf(2f, controller.maxZoomRatio))
                     showZoom()
@@ -328,11 +486,25 @@ class CameraActivity : AppCompatActivity() {
             }
             false
         }
-        binding.btnChangeLens.setOnClickListener { goToSetup() }
+        // El icono es un engranaje: debe abrir AJUSTES. El cambio de lente pasa a ser una
+        // fila dentro de Ajustes, que es donde la gente lo busca. Si el manifiesto todavía
+        // no declara SettingsActivity (la declara otro integrador), NO se puede dejar al
+        // usuario sin el selector de lente: se cae con elegancia al asistente de siempre.
+        binding.btnChangeLens.setOnClickListener {
+            try {
+                settingsLauncher.launch(Intent(this, SettingsActivity::class.java))
+            } catch (e: Exception) {
+                goToSetup()
+            }
+        }
         binding.thumbnail.setOnClickListener { openGallery() }
         // El hueco junto al obturador es el sitio canónico del cambio de cámara, no de una
         // marca de terceros (el botón verde de WhatsApp rompía la paleta y confundía).
         binding.btnFlipMain.setOnClickListener { flipCamera() }
+        // Dos entradas al MISMO atajo: el círculo junto a FOTO/VIDEO, que es el que se usa
+        // con el pulgar sin soltar el encuadre, y la pastilla del panel "⋯", que se queda
+        // por costumbre de quien ya la buscaba ahí.
+        binding.btnWhatsapp.setOnClickListener { shootAndShareWhatsApp() }
         binding.chipWa.setOnClickListener { shootAndShareWhatsApp() }
         binding.tabPhoto.setOnClickListener { setMode("photo") }
         binding.tabVideo.setOnClickListener { setMode("video") }
@@ -349,7 +521,11 @@ class CameraActivity : AppCompatActivity() {
                 if (fromUser) applyParam(progress)
             }
             override fun onStartTrackingTouch(s: SeekBar) {}
-            override fun onStopTrackingTouch(s: SeekBar) {}
+            override fun onStopTrackingTouch(s: SeekBar) {
+                // Se recuerda el VALOR del enfoque manual entre sesiones, pero NO el estado
+                // (ver restoreSettings). Se guarda al soltar y no en cada píxel arrastrado.
+                if (proParam == "mf") prefs.edit().putFloat("mfDiopters", mfDiopters).apply()
+            }
         })
 
         binding.chipGrid.setOnClickListener { toggleGrid() }
@@ -368,6 +544,8 @@ class CameraActivity : AppCompatActivity() {
         binding.chipFilter.setOnClickListener { cycleFilter() }
         binding.chipMore.setOnClickListener { toggleMorePanel() }
         binding.chipHdr.setOnClickListener { toggleHdr() }
+        binding.chipQr.setOnClickListener { toggleQr() }
+        binding.chipFit.setOnClickListener { toggleFit() }
         binding.evSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(s: SeekBar, progress: Int, fromUser: Boolean) {
                 if (!fromUser) return
@@ -388,11 +566,69 @@ class CameraActivity : AppCompatActivity() {
         binding.chipTl.setOnClickListener { toggleTl() }
 
         setUpCoverMirror()
+        buildExtraChips()
         setUpAccessibility()
 
         // Si nos invoca otra app, el modo lo fija armIntentCapture: no pisarlo.
         if (!captureIntent) setMode(prefs.getString("mode", "photo") ?: "photo")
         restoreSettings()
+        applyPrefs()
+        // El armado del intent va DESPUÉS de restoreSettings A PROPÓSITO: cuando iba antes
+        // (estaba a mitad de onCreate), restoreSettings reaplicaba después el filtro y el
+        // Ultra HDR guardados, así que la foto que se le devolvía al banco o al formulario
+        // salía en blanco y negro o en JPEG_R sin que nadie lo hubiera pedido.
+        if (captureIntent) armIntentCapture()
+    }
+
+    /**
+     * Chips que NO están en activity_camera.xml y no pueden estarlo: ese fichero es de otro
+     * integrador y añadir un id nuevo por nuestra cuenta rompería su compilación. Se crean
+     * con el mismo estilo ProChip que usa buildLensChips() y se insertan en la fila del chip
+     * de referencia, así que sobreviven a cualquier reestructuración del panel mientras esos
+     * chips existan (el contrato prohíbe borrarlos o renombrarlos).
+     */
+    private fun buildExtraChips() {
+        // MF junto a AUTO, dentro del panel PRO: es donde vive el deslizador que lo mueve.
+        chipMf = insertChip(binding.chipAuto, "MF", antes = true)?.also { chip ->
+            chip.setOnClickListener { toggleMf() }
+            chip.setOnLongClickListener { startFocusStack(); true }
+        }
+        // AEB y herramientas, en la fila de HDR/RAW del panel "Más".
+        chipAeb = insertChip(binding.chipFilter, "AEB", antes = false)?.also { chip ->
+            chip.setOnClickListener { startBracket() }
+        }
+        chipTools = insertChip(binding.chipFilter, "ANÁLISIS", antes = false)?.also { chip ->
+            chip.setOnClickListener { toggleTools() }
+        }
+        // El overlay de análisis cuelga del HUD del visor, que PreviewFrameLayout coloca
+        // exactamente sobre el rectángulo VISIBLE de la imagen: así las cebras caen sobre
+        // los píxeles que de verdad se están quemando y no sobre la franja negra.
+        val hud = binding.previewHud
+        val v = AnalysisOverlayView(this)
+        v.layoutParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
+        )
+        v.isClickable = false
+        v.isFocusable = false
+        // Por encima de la cuadrícula pero por debajo de los chips y del destello: el
+        // histograma tiene que leerse sobre el degradado, no taparlo.
+        hud.addView(v, (hud.indexOfChild(binding.gridOverlay) + 1).coerceIn(0, hud.childCount))
+        analysisOverlay = v
+    }
+
+    /** Crea un chip ProChip y lo mete en la MISMA fila que [ref]. */
+    private fun insertChip(ref: TextView, texto: String, antes: Boolean): TextView? {
+        val fila = ref.parent as? ViewGroup ?: return null
+        val chip = TextView(this, null, 0, R.style.ProChip)
+        chip.text = texto
+        chip.setTextColor(cDim)
+        val lp = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { marginEnd = dp(6f).toInt() }
+        val i = fila.indexOfChild(ref).coerceAtLeast(0)
+        fila.addView(chip, if (antes) i else i + 1, lp)
+        markAsButton(chip)
+        return chip
     }
 
     // ================= PLEGABLE =================
@@ -435,8 +671,12 @@ class CameraActivity : AppCompatActivity() {
     private fun syncPreviewGravity() {
         // Mismo criterio que usa el motor al configurar las salidas, con su API pública:
         // el recorte se aplica si el usuario pidió LLENA o si la pantalla lo pide.
+        // values-sw600dp/bools.xml forzaba preview_fills_screen=true sin avisar ni ofrecer
+        // alternativa: en la pantalla interior el usuario no tenía forma de recuperar el
+        // fotograma COMPLETO. Ahora su elección (Ajustes) manda sobre la del aparato.
         val cover = controller.currentAspect == AspectRatio.FULL ||
-            resources.getBoolean(R.bool.preview_fills_screen)
+            (if (previewFillPref < 0) resources.getBoolean(R.bool.preview_fills_screen)
+            else previewFillPref == 1)
         val g = if (cover) android.view.Gravity.CENTER
         else android.view.Gravity.TOP or android.view.Gravity.CENTER_HORIZONTAL
         (binding.texture.layoutParams as? FrameLayout.LayoutParams)?.let {
@@ -472,6 +712,9 @@ class CameraActivity : AppCompatActivity() {
                 if (!available) setChipState(binding.chipMirror, false, R.string.cd_mirror)
             }
         }
+        // El bombeo del espejo hace una lectura síncrona GPU->CPU del visor: mientras se
+        // dispara compite con la propia captura, así que se calla.
+        m.isBusy = { capturing || shutterHeld || controller.isRecording }
         binding.chipMirror.setOnClickListener { toggleMirror() }
         mirror = m
     }
@@ -541,23 +784,145 @@ class CameraActivity : AppCompatActivity() {
         tlOn = prefs.getBoolean("tl", false)
         applyVideoSettings()
 
+        // Se recuerda el VALOR del enfoque manual entre sesiones, pero NO el estado:
+        // arrancar en manual dejaría al usuario con todo desenfocado sin saber por qué.
+        mfDiopters = prefs.getFloat("mfDiopters", 0f)
+        mfOn = false
+        updateMfChip()
+
         // Deja la ranura de paneles cerrada Y de paso pone el color y la descripción
         // accesible de los cuatro chips que abren panel, que si no arrancaban sin nada.
         showPanel(null)
     }
 
+    /**
+     * Relee de las preferencias todo lo que se configura desde la pantalla de Ajustes.
+     * Se llama al terminar onCreate y CADA vez que se vuelve de Ajustes: sin esto, apagar
+     * el sonido o encender el histograma no hacía nada hasta reiniciar la app entera.
+     */
+    private fun applyPrefs() {
+        soundOn = prefs.getBoolean("shutterSound", true)
+        if (soundOn) ensureShutterSound()
+        volAction = prefs.getInt("volAction", 0).coerceIn(0, 2)
+
+        toolHist = prefs.getBoolean("toolHist", true)
+        toolZebra = prefs.getBoolean("toolZebra", false)
+        toolPeak = prefs.getBoolean("toolPeak", false)
+        toolsOn = prefs.getBoolean("toolsOn", false)
+        analysisOverlay?.showHistogram = toolsOn && toolHist
+        chipTools?.let {
+            setExtraChip(
+                it, toolsOn,
+                "Herramientas de análisis: " +
+                    getString(if (toolsOn) R.string.state_on else R.string.state_off)
+            )
+        }
+        ui.removeCallbacks(analysisTick)
+        if (toolsOn && resumed) ui.post(analysisTick) else analysisOverlay?.setMask(null)
+
+        floorIndex = prefs.getInt("shutterFloor", 1).coerceIn(0, floorList.size - 1)
+        controller.setShutterFloorNs(floorList[floorIndex])
+
+        previewFillPref = prefs.getInt("previewFill", -1).coerceIn(-1, 1)
+        syncPreviewGravity()
+        applyFitChip()
+
+        applyQrSetting()
+    }
+
+    /**
+     * Enciende o apaga el lector de códigos por el camino BUENO (stream YUV del HAL +
+     * InputImage.fromMediaImage, sin copia ni readback). Es excluyente con RAW, Ultra HDR y
+     * modo noche porque el HAL solo admite 3 streams, así que el motor puede apagarlo por su
+     * cuenta: por eso el estado real se relee siempre de controller.qrEnabled.
+     */
+    private fun applyQrSetting() {
+        // En modo intent NUNCA: la tarjeta del código se desplegaba encima del flujo de
+        // captura de otra app (el usuario no sabía si estaba usando su cámara o la del
+        // banco) y gastaba CPU en un flujo que solo tiene que sacar una foto y volver.
+        val quiere = !captureIntent && prefs.getBoolean("qr", false)
+        if (quiere != controller.qrEnabled) controller.setQrEnabled(quiere)
+        qrOn = controller.qrEnabled
+        setChipState(binding.chipQr, qrOn, R.string.cd_qr)
+        if (!qrOn) {
+            ui.removeCallbacks(hideQrHint)
+            binding.qrHint.visibility = View.GONE
+            if (binding.qrCard.visibility == View.VISIBLE) showCenterSlot(null)
+        }
+    }
+
+    /**
+     * Chip del lector de códigos. Guarda la preferencia y deja que applyQrSetting la
+     * aplique: así el chip, la pantalla de Ajustes y el estado real del motor no pueden
+     * discrepar. Encenderlo apaga RAW, Ultra HDR y noche, porque el HAL de esta lente solo
+     * admite tres flujos y el escáner ocupa el tercero.
+     */
+    private fun toggleQr() {
+        if (controller.isRecording) return
+        qrOn = controller.setQrEnabled(!controller.qrEnabled)
+        setChipState(binding.chipQr, qrOn, R.string.cd_qr)
+        val ed = prefs.edit().putBoolean("qr", qrOn)
+        // Ultra HDR es el otro modo que SÍ se recuerda entre sesiones y compite por el mismo
+        // tercer flujo: si el motor acaba de apagarlo para hacerle sitio al escáner, la
+        // preferencia tiene que enterarse. Si no, al siguiente arranque volverían a
+        // encenderse los dos y uno de ellos moriría sin explicación.
+        if (qrOn) ed.putBoolean("hdr", false)
+        ed.apply()
+        syncCaptureModeChips()
+        if (!qrOn) {
+            ui.removeCallbacks(hideQrHint)
+            binding.qrHint.visibility = View.GONE
+            if (binding.qrCard.visibility == View.VISIBLE) showCenterSlot(null)
+        }
+        hint(if (qrOn) "Lector de códigos activado" else "Lector de códigos desactivado")
+    }
+
+    /**
+     * Ajustar / Llenar. values-sw600dp/bools.xml forzaba preview_fills_screen=true sin
+     * avisar ni ofrecer alternativa: en la pantalla interior el usuario no tenía forma de
+     * recuperar el fotograma COMPLETO, solo veía el recorte y encuadraba a ciegas.
+     * OJO, y hay que decirlo claro: esto cambia el ENCUADRE DEL VISOR, no el de la foto.
+     * Lo que se guarda lo decide la relación de aspecto (chip RATIO, opción LLENA).
+     */
+    private fun toggleFit() {
+        val lleno = previewFillEffective()
+        previewFillPref = if (lleno) 0 else 1
+        prefs.edit().putInt("previewFill", previewFillPref).apply()
+        syncPreviewGravity()
+        applyFitChip()
+    }
+
+    /** Lo que toca de verdad: la preferencia del usuario o, si no la hay, la del aparato. */
+    private fun previewFillEffective(): Boolean =
+        if (previewFillPref < 0) resources.getBoolean(R.bool.preview_fills_screen)
+        else previewFillPref == 1
+
+    private fun applyFitChip() {
+        val lleno = previewFillEffective()
+        binding.chipFit.setText(if (lleno) R.string.chip_fill else R.string.chip_fit)
+        // Ámbar solo en AJUSTAR: LLENAR es lo normal en esta pantalla y no es un aviso.
+        setChipState(
+            binding.chipFit, !lleno, R.string.cd_fit,
+            getString(if (lleno) R.string.chip_fill else R.string.chip_fit)
+        )
+    }
+
     override fun onResume() {
         super.onResume()
         if (!::controller.isInitialized) return
+        resumed = true
+        reopenTries = 0
         refreshThumbnail()
-        ui.removeCallbacks(autoScanTick)
-        ui.postDelayed(autoScanTick, 1200)
         // Vigila si aparece o desaparece la pantalla externa del plegable: el chip
         // "Espejo" solo debe existir cuando de verdad hay dónde pintarlo.
         mirror?.start()
-        sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)?.let {
-            sensorManager.registerListener(rotationListener, it, SensorManager.SENSOR_DELAY_UI)
-        }
+        // El sensor de rotación SOLO si el nivel de horizonte está visible. Antes se
+        // registraba en CADA onResume a SENSOR_DELAY_UI aunque la cuadrícula estuviera
+        // apagada (el caso por defecto): ~16 despertares por segundo del hilo principal,
+        // con dos cálculos de matriz por evento, para pintar algo que nadie ve.
+        startRollSensor()
+        ui.removeCallbacks(analysisTick)
+        if (toolsOn) ui.post(analysisTick)
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
             == PackageManager.PERMISSION_GRANTED
         ) {
@@ -568,10 +933,12 @@ class CameraActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
-        ui.removeCallbacks(autoScanTick)
-        sensorManager.unregisterListener(rotationListener)
+        resumed = false
+        ui.removeCallbacks(reopenCamera)
+        ui.removeCallbacks(analysisTick)
+        stopRollSensor()
         // El espejo copia fotogramas del visor: sin cámara no hay nada que copiar y
-        // dejarlo vivo sería una lectura de GPU cada 66 ms con la app en segundo plano.
+        // dejarlo vivo sería una lectura de GPU cada 160 ms con la app en segundo plano.
         mirror?.stop()
         // Ojo: onCreate puede terminar en finish() ANTES de inflar la vista (sin lente
         // guardada, o invocados por otra app sin cámara trasera válida), y onPause se
@@ -584,29 +951,67 @@ class CameraActivity : AppCompatActivity() {
         }
         if (::controller.isInitialized) {
             if (controller.isRecording) controller.stopVideo()
+            // Salir a mitad de una horquilla dejaría la compensación de exposición movida
+            // PARA SIEMPRE sin que el usuario sepa por qué sus fotos salen oscuras.
+            if (bracketQueue.isNotEmpty()) {
+                bracketQueue.clear()
+                controller.setEv(bracketBase)
+            }
+            stackQueue.clear()
             prefs.edit().putFloat("zoom", currentZoom).putString("mode", mode).apply()
+            cameraOpening = false
             controller.close()
         }
         super.onPause()
     }
 
     private fun startCamera() {
+        if (cameraOpening) return
         val id = prefs.getString("cameraId", null) ?: return goToSetup()
+        cameraOpening = true
         currentZoom = 1f
         zoomRestored = false
         camCycleIndex = 0
         facing = "back"
+        // open() resetea el enfoque manual en el motor: el chip no puede seguir mintiendo.
+        mfOn = false
+        updateMfChip()
         // El estado del HUD tiene que volver atrás con la cámara. Tras bloquear la
         // pantalla estando en la frontal, se reabría la trasera pero el chip seguía
         // diciendo "frontal", y la insignia AE/AF BLOQUEADO se quedaba encendida con
         // el bloqueo ya deshecho por la reapertura.
         setChipState(binding.chipFlip, false, R.string.cd_flip, getString(R.string.lens_back))
-        aeAfLocked = false
-        binding.aeLockBadge.visibility = View.GONE
+        clearAeAfLock()
         // Aplicar ajustes guardados ANTES de abrir (sin reconstruir): el primer setUpOutputs ya los usa.
         controller.presetCaptureSettings(AspectRatio.values()[ratioIndex], fullRes)
         controller.setDisabledLensIds(disabledLenses)
         controller.open(id)
+    }
+
+    /**
+     * Deshace el bloqueo AE/AF EN LA INTERFAZ. Camera2Controller.open() resetea aeLocked y
+     * afLocked a false, pero la Activity conservaba aeAfLocked=true y la insignia VISIBLE:
+     * tras un onPause/onResume, un flip o un cambio de lente la insignia mentía y, como el
+     * siguiente toque largo lo ponía a false, hacían falta DOS pulsaciones largas para
+     * volver a bloquear de verdad.
+     */
+    private fun clearAeAfLock() {
+        aeAfLocked = false
+        binding.aeLockBadge.visibility = View.GONE
+    }
+
+    /**
+     * Registra el sensor de vector de rotación SOLO si el nivel de horizonte está visible.
+     */
+    private fun startRollSensor() {
+        if (!gridOn) return
+        sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)?.let {
+            sensorManager.registerListener(rotationListener, it, SensorManager.SENSOR_DELAY_UI)
+        }
+    }
+
+    private fun stopRollSensor() {
+        try { sensorManager.unregisterListener(rotationListener) } catch (e: Exception) {}
     }
 
     private fun goToSetup() {
@@ -629,6 +1034,10 @@ class CameraActivity : AppCompatActivity() {
         binding.tabVideo.isSelected = !photo
         binding.shutterIcon.visibility = if (photo) View.GONE else View.VISIBLE
         binding.shutterIcon.setBackgroundResource(R.drawable.rec_dot)
+        // El MISMO botón dispara o graba según el modo: el lector debe decir "grabar
+        // vídeo", no "tomar foto".
+        binding.btnShutter.contentDescription =
+            getString(if (photo) R.string.shutter else R.string.cd_record)
         // El chip de ajustes de video solo aparece en modo video.
         binding.chipVid.visibility = if (photo) View.GONE else View.VISIBLE
         if (photo && binding.videoPanel.visibility == View.VISIBLE) showPanel(null)
@@ -644,6 +1053,9 @@ class CameraActivity : AppCompatActivity() {
     private fun focusAt(x: Float, y: Float) {
         val t = binding.texture
         if (t.width == 0 || t.height == 0) return
+        // Tocar para enfocar cancela el manual EN EL MOTOR (setFocusPoint lanza un barrido
+        // de AF), así que el chip no puede seguir diciendo que está en manual.
+        if (mfOn) { mfOn = false; updateMfChip() }
         // x,y llegan en coordenadas de gesture_area, que ES el rectángulo visible de la
         // imagen: PreviewFrameLayout lo coloca justo encima del fotograma. Para pasar a
         // coordenadas del TextureView basta con el desplazamiento entre ambos, que en
@@ -680,16 +1092,32 @@ class CameraActivity : AppCompatActivity() {
         val th = binding.texture.height
         if (tw == 0 || th == 0) return
         try {
-            val bmp = binding.texture.getBitmap(tw, th) ?: return
-            val crop = (tw * 0.12f).toInt().coerceAtLeast(40)
-            val cx = texX.toInt().coerceIn(crop / 2, (tw - crop / 2).coerceAtLeast(crop / 2))
-            val cy = texY.toInt().coerceIn(crop / 2, (th - crop / 2).coerceAtLeast(crop / 2))
-            val left = (cx - crop / 2).coerceIn(0, (tw - crop).coerceAtLeast(0))
-            val top = (cy - crop / 2).coerceIn(0, (th - crop).coerceAtLeast(0))
-            val w = crop.coerceAtMost(tw - left)
-            val h = crop.coerceAtMost(th - top)
-            if (w <= 0 || h <= 0) { bmp.recycle(); return }
-            val region = android.graphics.Bitmap.createBitmap(bmp, left, top, w, h)
+            // Bitmap de campo REUTILIZADO y con tope de ancho. Antes se pedía el texture a
+            // resolución COMPLETA (hasta 35,9 MB en la pantalla interior) en cada toque de
+            // enfoque, en el hilo de UI, solo para recortar un 12 %: ese era el tirón que se
+            // veía justo en el gesto más frecuente de una app macro. Además, si getBitmap o
+            // createBitmap lanzaban, el catch dejaba ese bitmap enorme sin reciclar.
+            val s = minOf(1f, magMaxW.toFloat() / tw)
+            val sw = (tw * s).toInt().coerceAtLeast(1)
+            val sh = (th * s).toInt().coerceAtLeast(1)
+            var bmp = magBitmap
+            if (bmp == null || bmp.width != sw || bmp.height != sh) {
+                bmp?.recycle()
+                bmp = Bitmap.createBitmap(sw, sh, Bitmap.Config.ARGB_8888)
+                magBitmap = bmp
+            }
+            if (binding.texture.getBitmap(bmp) == null) return
+            val crop = (sw * 0.12f).toInt().coerceAtLeast(40)
+            val cx = (texX * s).toInt().coerceIn(crop / 2, (sw - crop / 2).coerceAtLeast(crop / 2))
+            val cy = (texY * s).toInt().coerceIn(crop / 2, (sh - crop / 2).coerceAtLeast(crop / 2))
+            val left = (cx - crop / 2).coerceIn(0, (sw - crop).coerceAtLeast(0))
+            val top = (cy - crop / 2).coerceIn(0, (sh - crop).coerceAtLeast(0))
+            val w = crop.coerceAtMost(sw - left)
+            val h = crop.coerceAtMost(sh - top)
+            if (w <= 0 || h <= 0) return
+            // El RECORTE sí es una copia nueva: es el que se le entrega al ImageView, y el
+            // bitmap grande se queda de campo para el siguiente toque.
+            val region = Bitmap.createBitmap(bmp, left, top, w, h)
             // La lupa va al cuadrante OPUESTO al dedo. Clavada arriba a la derecha
             // tapaba justo lo que el usuario acababa de tocar en esa esquina, y encima
             // el panel "Más" se dibujaba encima de ella: parecía que no funcionaba.
@@ -709,8 +1137,9 @@ class CameraActivity : AppCompatActivity() {
             binding.magnifierCard.visibility = View.VISIBLE
             ui.removeCallbacks(hideMagnifier)
             ui.postDelayed(hideMagnifier, 1800)
-            bmp.recycle()
+            // OJO: ya NO se recicla bmp. Es de campo y se reutiliza en el siguiente toque.
         } catch (e: Exception) {
+            binding.magnifierCard.visibility = View.GONE
         }
     }
 
@@ -781,57 +1210,311 @@ class CameraActivity : AppCompatActivity() {
     private fun armIntentCapture() {
         // En modo intent no tiene sentido RAW, ni la galería, ni compartir.
         controller.setRawEnabled(false)
-        binding.thumbnail.visibility = View.GONE
+        // INVISIBLE y no GONE: la fila es (miniatura | obturador | voltear) con pesos, así
+        // que quitarla del todo descentraba el obturador ~28dp hacia un lado cada vez que
+        // otra app pedía una foto.
+        binding.thumbnail.visibility = View.INVISIBLE
         binding.modeToggle.visibility = View.GONE
         binding.chipWa.visibility = View.GONE
+        // El escáner de códigos no pinta nada aquí: la tarjeta se desplegaba ENCIMA del
+        // flujo de captura de otra app y el usuario no sabía si estaba usando su cámara o
+        // la del banco. Además cuesta un stream en un flujo que dura tres segundos.
+        applyQrSetting()
+        // ENTREGA NEUTRA. Si el usuario había dejado puesto B/N, Sepia o Vintage, la foto
+        // que se le devolvía al banco, al formulario o a WhatsApp salía filtrada sin que
+        // nadie lo pidiera y sin forma de verlo (el llamador no enseña la miniatura con el
+        // filtro). Ultra HDR se apaga por lo mismo: el JPEG_R con mapa de ganancia lo
+        // interpretan mal los receptores que no lo esperan.
+        // El filtro NO se persiste: el que eligió el usuario sigue guardado en prefs.
+        filterIndex = 0
+        controller.setCaptureColorMatrix(null)
+        binding.chipFilter.text = ""
+        setChipState(binding.chipFilter, false, R.string.cd_filter, Filters.list[0].name)
+        binding.chipFilter.visibility = View.GONE
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) binding.texture.setRenderEffect(null)
+        if (controller.hdrEnabled) {
+            controller.setHdrEnabled(false)
+            setChipState(binding.chipHdr, false, R.string.cd_hdr)
+        }
         if (captureVideo) setMode("video") else setMode("photo")
 
-        controller.jpegSink = sink@{ bytes ->
-            val out = captureOutput
-            if (out != null) {
+        controller.jpegSink = { bytes ->
+            // No se entrega NADA hasta que el usuario confirme: antes se hacía
+            // setResult+finish en cuanto se escribía el archivo, así que un toque
+            // accidental mandaba una foto movida al formulario del banco sin manera de
+            // repetirla, que es justo lo que cualquier cámara de fábrica sí deja hacer.
+            runOnUiThread { showCaptureReview(bytes) }
+            true // 'true' = ya nos ocupamos nosotros, que no se guarde en la galería
+        }
+    }
+
+    /** Lee de un Intent si nos invoca otra app y para qué. Antes esto vivía suelto en
+     *  onCreate, y por eso un intent NUEVO sobre la misma instancia no se veía jamás. */
+    private fun readCaptureIntent(i: Intent?) {
+        val act = i?.action
+        captureVideo = act == MediaStore.ACTION_VIDEO_CAPTURE
+        // GET_CONTENT/PICK: otra app pide una imagen (adjuntar documento, formularios,
+        // subidas web...). Respondemos capturándola con la lente que SÍ funciona.
+        pickContent = act == Intent.ACTION_GET_CONTENT || act == Intent.ACTION_PICK
+        captureIntent = captureVideo || act == MediaStore.ACTION_IMAGE_CAPTURE || pickContent
+        @Suppress("DEPRECATION")
+        captureOutput = i?.getParcelableExtra(MediaStore.EXTRA_OUTPUT) as? Uri
+    }
+
+    /**
+     * Cuando el sistema REUTILIZA esta instancia, el intent nuevo llegaba aquí y se
+     * ignoraba: la app que pedía la foto esperaba un resultado que nunca llegaba y, al
+     * revés, una instancia que venía de un IMAGE_CAPTURE se quedaba con jpegSink armado y
+     * mandaba la SIGUIENTE foto del usuario a un llamador que ya no existe.
+     *
+     * Límite honesto: con launchMode estándar esto solo llega si el llamador añade
+     * FLAG_ACTIVITY_SINGLE_TOP (lo hacen bastantes selectores de archivos). No se cambia a
+     * singleTop porque afectaría al ciclo de vida de la sesión de cámara.
+     */
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (!::controller.isInitialized) return
+        hideCaptureReview()
+        readCaptureIntent(intent)
+        if (captureIntent) {
+            setResult(RESULT_CANCELED)
+            armIntentCapture()
+        } else {
+            disarmIntentCapture()
+        }
+    }
+
+    /** Vuelve al modo normal tras una captura pedida por otra app. */
+    private fun disarmIntentCapture() {
+        controller.jpegSink = null
+        captureOutput = null
+        binding.thumbnail.visibility = View.VISIBLE
+        binding.modeToggle.visibility = View.VISIBLE
+        binding.chipWa.visibility = View.VISIBLE
+        binding.chipFilter.visibility = View.VISIBLE
+        setMode(prefs.getString("mode", "photo") ?: "photo")
+        // Recuperar el filtro del usuario, que el modo intent había forzado a Normal.
+        filterIndex = prefs.getInt("filter", 0).coerceIn(0, Filters.list.size - 1)
+        applyFilter()
+        applyQrSetting()
+    }
+
+    // ---- Revisión antes de entregar la foto a otra app ----
+
+    /**
+     * La pantalla de revisión se construye por CÓDIGO: res/layout es de otro integrador y
+     * meter ahí un fichero nuevo rompería su trabajo. Se infla una sola vez y solo cuando
+     * otra aplicación pide una captura, así que no pesa nada en el arranque normal.
+     */
+    private var reviewRoot: FrameLayout? = null
+    private var reviewImage: android.widget.ImageView? = null
+    private var reviewUse: TextView? = null
+    private var reviewBytes: ByteArray? = null
+
+    private fun showCaptureReview(bytes: ByteArray) {
+        val root = reviewRoot ?: buildCaptureReview().also { reviewRoot = it }
+        reviewBytes = bytes
+        // inSampleSize 4: en pantalla no se nota y evita un bitmap de 50 MB.
+        val opts = BitmapFactory.Options().apply { inSampleSize = 4 }
+        reviewImage?.setImageBitmap(BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts))
+        reviewUse?.isEnabled = true
+        root.visibility = View.VISIBLE
+        root.bringToFront()
+    }
+
+    private fun hideCaptureReview() {
+        reviewRoot?.visibility = View.GONE
+        reviewImage?.setImageDrawable(null)
+        reviewUse?.isEnabled = true
+        reviewBytes = null
+    }
+
+    private fun buildCaptureReview(): FrameLayout {
+        val root = FrameLayout(this)
+        root.setBackgroundColor(android.graphics.Color.parseColor("#F2000000"))
+        root.isClickable = true // traga los toques: detrás está el visor en vivo
+        root.visibility = View.GONE
+        val img = android.widget.ImageView(this)
+        img.scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+        img.contentDescription = getString(R.string.cd_thumbnail)
+        root.addView(
+            img,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
+            ).apply { bottomMargin = dp(112f).toInt() }
+        )
+        val fila = LinearLayout(this)
+        fila.orientation = LinearLayout.HORIZONTAL
+        fila.setPadding(dp(24f).toInt(), 0, dp(24f).toInt(), dp(32f).toInt())
+        // Textos literales: strings.xml es de otro integrador y no se le puede añadir nada
+        // desde aquí sin arriesgar su compilación.
+        val repetir = TextView(this, null, 0, R.style.ProChip).apply {
+            text = "Repetir"
+            gravity = android.view.Gravity.CENTER
+            setTextColor(cWhite)
+            setOnClickListener { hideCaptureReview() }
+        }
+        val usar = TextView(this, null, 0, R.style.ProChip).apply {
+            text = "Usar esta"
+            gravity = android.view.Gravity.CENTER
+            setTextColor(cAccent)
+            setOnClickListener {
+                // Evita la doble entrega por doble toque: escribir varios MB tarda.
+                isEnabled = false
+                reviewBytes?.let { deliverPhotoToCaller(it) }
+            }
+        }
+        markAsButton(repetir)
+        markAsButton(usar)
+        fila.addView(
+            repetir,
+            LinearLayout.LayoutParams(0, dp(56f).toInt(), 1f)
+                .apply { marginEnd = dp(12f).toInt() }
+        )
+        fila.addView(
+            usar,
+            LinearLayout.LayoutParams(0, dp(56f).toInt(), 1f)
+                .apply { marginStart = dp(12f).toInt() }
+        )
+        root.addView(
+            fila,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                android.view.Gravity.BOTTOM
+            )
+        )
+        // ViewGroup.LayoutParams a propósito: la raíz es un ConstraintLayout y addViewInner
+        // los convierte a los suyos (checkLayoutParams + generateLayoutParams). Pasarle unos
+        // de FrameLayout funcionaría igual, pero esto no depende de qué raíz haya mañana.
+        binding.root.addView(
+            root,
+            ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        reviewImage = img
+        reviewUse = usar
+        return root
+    }
+
+    /** Entrega definitiva. Solo se ejecuta cuando el usuario confirma. */
+    private fun deliverPhotoToCaller(bytes: ByteArray) {
+        val out = captureOutput
+        if (out != null) {
+            // Escribir varios MB en la Uri de otra app puede tardar: fuera del hilo de UI.
+            ioExec.execute {
                 val ok = try {
                     contentResolver.openOutputStream(out)?.use { it.write(bytes) } != null
                 } catch (e: Exception) {
                     false
                 }
-                if (ok) runOnUiThread {
-                    setResult(
-                        RESULT_OK,
-                        Intent().setData(out).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    )
-                    finish()
+                runOnUiThread {
+                    if (ok) {
+                        setResult(
+                            RESULT_OK,
+                            Intent().setData(out).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        )
+                        finish()
+                    } else {
+                        Toast.makeText(this, R.string.photo_error, Toast.LENGTH_SHORT).show()
+                        hideCaptureReview()
+                    }
                 }
-                return@sink ok
             }
+            return
+        }
+        if (pickContent) {
             // GET_CONTENT/PICK esperan un content:// legible, no una miniatura.
-            if (pickContent) {
+            ioExec.execute {
                 val uri = writeSharedJpeg(bytes)
-                if (uri != null) {
-                    runOnUiThread {
+                runOnUiThread {
+                    if (uri != null) {
                         setResult(
                             RESULT_OK,
                             Intent().setDataAndType(uri, "image/jpeg")
                                 .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                         )
                         finish()
+                    } else {
+                        Toast.makeText(this, R.string.photo_error, Toast.LENGTH_SHORT).show()
+                        hideCaptureReview()
                     }
-                    return@sink true
                 }
-                return@sink false
             }
-            // Sin EXTRA_OUTPUT: miniatura en "data". Máx ~400 px o revienta el Binder.
-            val opts = BitmapFactory.Options().apply { inSampleSize = 8 }
-            val full = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: return@sink false
-            val s = 400f / maxOf(full.width, full.height)
-            val thumb = if (s < 1f) Bitmap.createScaledBitmap(
-                full, (full.width * s).toInt(), (full.height * s).toInt(), true
-            ) else full
-            if (thumb !== full) full.recycle()
+            return
+        }
+        // Sin EXTRA_OUTPUT el contrato es devolver una MINIATURA en el extra "data". Va
+        // parcelada por Binder, con un límite duro de ~1 MB COMPARTIDO con el resto de la
+        // transacción: a 400 px en ARGB_8888 son 640 KB, y con un llamador que lleve carga
+        // propia salta TransactionTooLargeException y se queda sin foto (el usuario solo ve
+        // que "la cámara no funciona con esa app"). 256 px en RGB_565 son 128 KB, que es el
+        // orden que usa la cámara de AOSP.
+        val opts = BitmapFactory.Options().apply {
+            inSampleSize = 8
+            inPreferredConfig = Bitmap.Config.RGB_565
+        }
+        val full = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+        if (full == null) {
+            Toast.makeText(this, R.string.photo_error, Toast.LENGTH_SHORT).show()
+            hideCaptureReview()
+            return
+        }
+        val s = 256f / maxOf(full.width, full.height)
+        val thumb = if (s < 1f) Bitmap.createScaledBitmap(
+            full,
+            (full.width * s).toInt().coerceAtLeast(1),
+            (full.height * s).toInt().coerceAtLeast(1),
+            true
+        ) else full
+        if (thumb !== full) full.recycle()
+        setResult(RESULT_OK, Intent("inline-data").putExtra("data", thumb))
+        finish()
+    }
+
+    /**
+     * ACTION_VIDEO_CAPTURE: la app que nos invocó espera el vídeo de vuelta. Antes solo se
+     * armaba jpegSink (fotos), así que el vídeo se guardaba en DCIM/Camera y el llamador
+     * recibía SIEMPRE el RESULT_CANCELED puesto en onCreate: pedirnos un vídeo no devolvía
+     * nada y el usuario creía que la app estaba rota. Es el único incumplimiento del
+     * contrato que el propio manifiesto anuncia.
+     */
+    private fun deliverVideoToCaller() {
+        val src = controller.ultimoGuardado
+        if (src == null) { setResult(RESULT_CANCELED); finish(); return }
+        val dest = captureOutput
+        if (dest == null) {
+            // Sin EXTRA_OUTPUT el contrato es devolver la Uri del vídeo en el Intent.
+            setResult(
+                RESULT_OK,
+                Intent().setData(src).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            )
+            finish()
+            return
+        }
+        // Con EXTRA_OUTPUT hay que dejarlo en el destino del llamador. Se COPIA en vez de
+        // grabar directo sobre su descriptor porque un proveedor puede devolver un fd NO
+        // desplazable (una tubería) y MediaRecorder necesita hacer seek para cerrar el MP4:
+        // saldría un archivo corrupto.
+        ioExec.execute {
+            val ok = try {
+                contentResolver.openInputStream(src)?.use { input ->
+                    contentResolver.openOutputStream(dest)?.use { output ->
+                        input.copyTo(output, 256 * 1024)
+                    } != null
+                } ?: false
+            } catch (e: Exception) {
+                false
+            }
+            // La copia de DCIM/Camera sobra: el usuario no pidió el vídeo para sí mismo.
+            if (ok) try { contentResolver.delete(src, null, null) } catch (e: Exception) {}
             runOnUiThread {
-                setResult(RESULT_OK, Intent("inline-data").putExtra("data", thumb))
+                if (ok) setResult(
+                    RESULT_OK,
+                    Intent().setData(dest).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                ) else setResult(RESULT_CANCELED)
                 finish()
             }
-            true
         }
     }
 
@@ -842,7 +1525,24 @@ class CameraActivity : AppCompatActivity() {
         val t = binding.texture
         if (t.width == 0 || t.height == 0) return
         try {
-            val bmp = t.getBitmap(t.width, t.height) ?: return
+            // A UN CUARTO DE LADO y con el bitmap REUTILIZADO. getBitmap(w, h) pedía el
+            // texture a resolución COMPLETA: en el plegable desplegado son 35,9 MB de
+            // ARGB_8888 asignados en el hilo de UI justo en el instante que la animación
+            // pretendía suavizar, y una vez por CADA cruce de parada óptica durante un
+            // pellizco: ese es exactamente el tirón que se ve en la transición. A 1/16 de
+            // memoria se ve igual (dura 140 ms, va desenfocado por definición y el
+            // ImageView lo escala al tamaño del visor).
+            val fw = (t.width / 4).coerceAtLeast(1)
+            val fh = (t.height / 4).coerceAtLeast(1)
+            var bmp = freezeBitmap
+            if (bmp == null || bmp.width != fw || bmp.height != fh) {
+                // No se recicla el anterior: lens_fade puede tenerlo todavía puesto y
+                // pintar un bitmap reciclado mata el proceso entero.
+                binding.lensFade.setImageDrawable(null)
+                bmp = Bitmap.createBitmap(fw, fh, Bitmap.Config.ARGB_8888)
+                freezeBitmap = bmp
+            }
+            if (t.getBitmap(bmp) == null) return
             // Ya no hay que copiar el tamaño del texture a mano: lens_fade cuelga del
             // PreviewFrameLayout, que lo coloca exactamente sobre el rectángulo visible
             // de la imagen, y con centerCrop encaja también en modo LLENAR.
@@ -867,7 +1567,18 @@ class CameraActivity : AppCompatActivity() {
     /** Escribe la foto en la caché privada y la expone por content:// para otra app. */
     private fun writeSharedJpeg(bytes: ByteArray): Uri? = try {
         val dir = java.io.File(cacheDir, "compartir").apply { if (!exists()) mkdirs() }
-        dir.listFiles()?.forEach { if (it.isFile) it.delete() } // no acumular basura
+        // Antes se borraba TODO antes de escribir. Es un fallo diferido y desconcertante:
+        // el usuario adjunta una foto a un correo, la deja en borrador, vuelve a la cámara,
+        // hace otra captura para otra app y la Uri de FileProvider que ya había entregado
+        // apunta a un fichero que ya no existe: el envío falla con FileNotFoundException
+        // horas después. Ahora solo se retira lo caducado (más de 6 h) y se conservan
+        // siempre los 3 últimos, con lo que se sigue cumpliendo el único propósito real del
+        // borrado, que era no acumular basura.
+        val ahora = System.currentTimeMillis()
+        dir.listFiles()?.filter { it.isFile }
+            ?.sortedByDescending { it.lastModified() }
+            ?.drop(3)
+            ?.forEach { if (ahora - it.lastModified() > 6 * 60 * 60 * 1000L) it.delete() }
         val f = java.io.File(dir, "captura_${System.currentTimeMillis()}.jpg")
         java.io.FileOutputStream(f).use { it.write(bytes) }
         androidx.core.content.FileProvider.getUriForFile(
@@ -920,12 +1631,18 @@ class CameraActivity : AppCompatActivity() {
         if (binding.zoomStrip.childCount != stops.size) return
         // La activa es la parada MÁS CERCANA al zoom real, no la última que no lo supera:
         // con el zoom global en 6,6x quedaba resaltada la de 5x, que es mentira.
-        var active = 0
+        var active = -1
         var best = Float.MAX_VALUE
         stops.forEachIndexed { i, t ->
-            val d = kotlin.math.abs(currentZoom - t.first)
+            // Distancia RELATIVA: 0,4x de diferencia significa cosas muy distintas a 0,6x
+            // que a 5x, y con la absoluta la parada larga se llevaba siempre el foco.
+            val d = kotlin.math.abs(currentZoom - t.first) / t.first.coerceAtLeast(0.01f)
             if (d < best) { best = d; active = i }
         }
+        // Y si el zoom real no está DE VERDAD en ninguna parada (pellizco a 6,6x), no se
+        // resalta ninguna: antes quedaba marcada la de 5x y el HUD se contradecía consigo
+        // mismo mientras el rótulo decía otra cosa.
+        if (best > 0.02f) active = -1
         for (i in 0 until binding.zoomStrip.childCount) {
             val esOptica = stops.getOrNull(i)?.third == true
             val v = binding.zoomStrip.getChildAt(i) as? TextView ?: continue
@@ -1050,8 +1767,17 @@ class CameraActivity : AppCompatActivity() {
             capturing = false
             if (binding.nightLabel.visibility == View.VISIBLE) showCenterSlot(null)
             if (ok) {
-                refreshThumbnail()
+                // La miniatura YA la pintó onPhotoThumb desde el JPEG en memoria, al
+                // instante y sin tocar disco. refreshThumbnail lanzaba además una
+                // decodificación de coil del JPEG COMPLETO y, sin URI cacheada, una consulta
+                // a MediaStore en el hilo principal, justo en el momento de mayor presión de
+                // memoria de toda la app.
                 bounceThumbnail()
+                // Se guarda la URI para el próximo arranque en frío: así la miniatura sale
+                // sin preguntarle nada a MediaStore.
+                controller.ultimoGuardado?.let {
+                    prefs.edit().putString("ultimaFoto", it.toString()).apply()
+                }
             } else {
                 Toast.makeText(this, R.string.photo_error, Toast.LENGTH_SHORT).show()
             }
@@ -1059,11 +1785,38 @@ class CameraActivity : AppCompatActivity() {
         if (nightOn) {
             // Apilado multi-frame: sin destello, con indicador de procesado.
             showCenterSlot(binding.nightLabel)
+            playShutterSound()
             controller.takeNightPhoto(cb)
         } else {
             flashScreen()
+            playShutterSound()
             controller.takePhoto(cb)
         }
+    }
+
+    private fun ensureShutterSound() {
+        if (shutterSound != null) return
+        // Precargado: la PRIMERA reproducción de MediaActionSound sin load() tarda ~150 ms
+        // y llegaría DESPUÉS de la foto.
+        shutterSound = android.media.MediaActionSound().apply {
+            load(android.media.MediaActionSound.SHUTTER_CLICK)
+        }
+    }
+
+    /**
+     * Sonido del obturador. Antes disparar solo daba un golpe háptico: sin confirmación
+     * audible el usuario no sabe si la foto se tomó y vuelve a pulsar (fotos duplicadas).
+     * Suena a la vez que el destello de pantalla, que es el instante en que se lanza la
+     * captura al motor.
+     */
+    private fun playShutterSound(sonido: Int = android.media.MediaActionSound.SHUTTER_CLICK) {
+        if (!soundOn) return
+        // Respeta el silencio del teléfono: una cámara que suena con el timbre en silencio
+        // es exactamente lo que hace que la gente desinstale una app.
+        val am = getSystemService(AUDIO_SERVICE) as? android.media.AudioManager
+        if (am != null && am.ringerMode != android.media.AudioManager.RINGER_MODE_NORMAL) return
+        ensureShutterSound()
+        try { shutterSound?.play(sonido) } catch (e: Exception) {}
     }
 
     // ---- Ráfaga (mantener pulsado el obturador) ----
@@ -1080,10 +1833,15 @@ class CameraActivity : AppCompatActivity() {
         if (capturing) { ui.postDelayed({ burstNext() }, 50); return }
         capturing = true
         flashScreen()
+        // Un clic por fotograma, como cualquier cámara: es la única forma de saber cuántas
+        // fotos se han hecho de verdad sin mirar la pantalla.
+        playShutterSound()
         controller.takePhoto { ok ->
             capturing = false
             burstRemaining--
-            if (ok) refreshThumbnail()
+            // UNA sola actualización de miniatura al soltar, no siete en un segundo:
+            // refreshThumbnail se llamaba por CADA foto de la ráfaga aunque onPhotoThumb ya
+            // la pinta al instante desde el JPEG en memoria.
             if (burstRemaining > 0) ui.postDelayed({ burstNext() }, 60) else bounceThumbnail()
         }
     }
@@ -1107,6 +1865,9 @@ class CameraActivity : AppCompatActivity() {
 
     // ---- Video ----
     private fun toggleRecord() {
+        // Empezar a grabar con una cuenta atrás en marcha disparaba una foto fija sobre una
+        // sesión de vídeo que no tiene el surface del ImageReader.
+        cancelCountdown()
         if (controller.isRecording) {
             controller.stopVideo()
             return
@@ -1135,6 +1896,15 @@ class CameraActivity : AppCompatActivity() {
                 binding.modeToggle.alpha = 0.4f
                 binding.tabPhoto.isEnabled = false
                 binding.tabVideo.isEnabled = false
+                // Literal: strings.xml no es nuestro y no existe una cadena para esto.
+                binding.btnShutter.contentDescription = "Detener la grabación"
+                // El cronómetro y la fila de chips compartían cota (y=54..85 contra
+                // y=40..88) y options_bar se declaraba después: el 0:00 salía MORDIDO.
+                // Grabando no hace falta ningún ajuste de foto en pantalla.
+                binding.optionsScroll.visibility = View.GONE
+                binding.chipMore.visibility = View.GONE
+                showPanel(null)
+                playShutterSound(android.media.MediaActionSound.START_VIDEO_RECORDING)
             } else {
                 binding.shutterIcon.setBackgroundResource(R.drawable.rec_dot)
                 binding.recIndicator.visibility = View.GONE
@@ -1143,15 +1913,58 @@ class CameraActivity : AppCompatActivity() {
                 binding.modeToggle.alpha = 1f
                 binding.tabPhoto.isEnabled = true
                 binding.tabVideo.isEnabled = true
+                binding.optionsScroll.visibility = View.VISIBLE
+                binding.chipMore.visibility = View.VISIBLE
+                binding.btnShutter.contentDescription =
+                    getString(if (mode == "photo") R.string.shutter else R.string.cd_record)
+                playShutterSound(android.media.MediaActionSound.STOP_VIDEO_RECORDING)
+                // Esta es la ÚNICA ruta que no pasa por onPhotoThumb: aquí sí hace falta.
                 refreshThumbnail()
+                // Si nos invocó otra app pidiendo un vídeo, hay que devolvérselo.
+                if (captureIntent && captureVideo) deliverVideoToCaller()
             }
         }
     }
 
     // ---- Miniatura / galería ----
+    /**
+     * Miniatura de lo último guardado, SIEMPRE fuera del hilo principal.
+     *
+     * Dos problemas de una vez: (a) latestMediaUri se ejecutaba desde onResume en el hilo
+     * de UI, por delante del arranque de la cámara, con un LIKE de comodín inicial que
+     * fuerza un escaneo completo de la tabla de MediaStore y sin LIMIT; (b) coil sin
+     * coil-video no sabe decodificar un mp4, así que tras GRABAR la miniatura se quedaba
+     * con la foto anterior y el usuario creía que el vídeo no se había guardado.
+     * loadThumbnail (API 29+) vale para imagen Y vídeo sin añadir dependencias.
+     */
     private fun refreshThumbnail() {
-        val uri = latestOwnUri()
-        if (uri != null) binding.thumbnailImage.load(uri)
+        // Primero lo que ya sabemos: la URI que devolvió el motor o la cacheada en
+        // preferencias. Así el arranque en frío NO toca MediaStore para nada.
+        val cached = (if (::controller.isInitialized) controller.ultimoGuardado else null)
+            ?: prefs.getString("ultimaFoto", null)?.let { runCatching { Uri.parse(it) }.getOrNull() }
+        if (cached != null) { pintarMiniatura(cached); return }
+        ioExec.execute {
+            val uri = latestMediaUri() ?: return@execute
+            prefs.edit().putString("ultimaFoto", uri.toString()).apply()
+            runOnUiThread { pintarMiniatura(uri) }
+        }
+    }
+
+    private fun pintarMiniatura(uri: Uri) {
+        ioExec.execute {
+            val esVideo = (try { contentResolver.getType(uri) } catch (e: Exception) { null }
+                ?: "").startsWith("video")
+            if (esVideo && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val bmp = try {
+                    contentResolver.loadThumbnail(uri, android.util.Size(256, 256), null)
+                } catch (e: Exception) {
+                    null
+                }
+                if (bmp != null) runOnUiThread { binding.thumbnailImage.setImageBitmap(bmp) }
+            } else {
+                runOnUiThread { binding.thumbnailImage.load(uri) }
+            }
+        }
     }
 
     private fun openGallery() {
@@ -1168,10 +1981,10 @@ class CameraActivity : AppCompatActivity() {
         capturing = true
         binding.btnShutter.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
         flashScreen()
+        playShutterSound()
         controller.takePhoto { ok ->
             capturing = false
             if (ok) {
-                refreshThumbnail()
                 bounceThumbnail()
                 shareLatestToWhatsApp()
             } else {
@@ -1182,8 +1995,12 @@ class CameraActivity : AppCompatActivity() {
 
     private fun shareLatestToWhatsApp() {
         val uri = latestOwnUri() ?: return
+        // El tipo REAL importa: tras grabar, lo último guardado es un mp4 y se enviaba con
+        // setType("image/jpeg") pasara lo que pasara; WhatsApp lo rechazaba o lo adjuntaba
+        // roto. Un mime mentido produce un adjunto que la app receptora no acepta.
+        val mime = contentResolver.getType(uri) ?: "image/jpeg"
         val base = Intent(Intent.ACTION_SEND)
-            .setType("image/jpeg")
+            .setType(mime)
             .putExtra(Intent.EXTRA_STREAM, uri)
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         // WhatsApp normal → WhatsApp Business → selector general.
@@ -1206,14 +2023,44 @@ class CameraActivity : AppCompatActivity() {
     private fun latestOwnUri(): Uri? =
         (if (::controller.isInitialized) controller.ultimoGuardado else null) ?: latestMediaUri()
 
+    /**
+     * Última foto NUESTRA. Dos arreglos en una consulta:
+     *
+     * 1) PRIVACIDAD. DCIM/Camera la COMPARTIMOS con la cámara de fábrica, y esto solo
+     *    filtraba por carpeta: con ultimoGuardado a null (el estado normal nada más abrir
+     *    la app) el botón de WhatsApp podía ENVIAR la última foto de la cámara de fábrica
+     *    -de otra persona, un documento, lo que fuera- creyendo el usuario que enviaba la
+     *    que acababa de tomar. Todas las nuestras se llaman MACRO_<millis>.jpg. Ojo: en SQL
+     *    el guion bajo es COMODÍN, así que hace falta ESCAPE o 'MACRO_%' casaría también
+     *    con nombres ajenos (el mismo pinchazo que ya se corrigió en la galería).
+     * 2) COSTE. El LIKE con comodín INICIAL ('%DCIM/Camera%') fuerza un escaneo completo de
+     *    la tabla; sin él el proveedor puede usar el índice. Y sin LIMIT se ordenaba y
+     *    materializaba TODA la carpeta de la cámara para leer una sola fila.
+     */
     private fun latestMediaUri(): Uri? {
         val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
         val projection = arrayOf(MediaStore.Images.Media._ID)
-        val selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
-        val args = arrayOf("%DCIM/Camera%")
+        val selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ? AND " +
+            "${MediaStore.Images.Media.DISPLAY_NAME} LIKE 'MACRO#_%' ESCAPE '#'"
+        val args = arrayOf("DCIM/Camera%")
         val sort = "${MediaStore.Images.Media.DATE_ADDED} DESC"
         return try {
-            contentResolver.query(collection, projection, selection, args, sort)?.use { c ->
+            val cursor = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                // QUERY_ARG_LIMIT es API 30; el resto de QUERY_ARG_SQL_* y la sobrecarga
+                // query(Uri, String[], Bundle?, CancellationSignal?) existen desde API 26.
+                val q = Bundle().apply {
+                    putString(android.content.ContentResolver.QUERY_ARG_SQL_SELECTION, selection)
+                    putStringArray(
+                        android.content.ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, args
+                    )
+                    putString(android.content.ContentResolver.QUERY_ARG_SQL_SORT_ORDER, sort)
+                    putInt(android.content.ContentResolver.QUERY_ARG_LIMIT, 1)
+                }
+                contentResolver.query(collection, projection, q, null)
+            } else {
+                contentResolver.query(collection, projection, selection, args, sort)
+            }
+            cursor?.use { c ->
                 if (c.moveToFirst()) {
                     val id = c.getLong(c.getColumnIndexOrThrow(MediaStore.Images.Media._ID))
                     ContentUris.withAppendedId(collection, id)
@@ -1231,9 +2078,26 @@ class CameraActivity : AppCompatActivity() {
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         if (isVolumeKey(keyCode) && ::controller.isInitialized) {
-            // Solo en la primera pulsación (repeatCount 0): un disparo por clic.
-            if (event == null || event.repeatCount == 0) {
-                if (mode == "video") toggleRecord() else startPhotoOrTimer()
+            // Con el volumen como DISPARADOR solo vale la primera pulsación (un disparo por
+            // clic); con zoom o exposición, en cambio, mantener pulsado DEBE repetir.
+            // Antes las teclas estaban clavadas al disparo, sin alternativa.
+            if (volAction != 0 || event == null || event.repeatCount == 0) {
+                when (volAction) {
+                    1 -> {
+                        val paso = if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) 1.15f else 1f / 1.15f
+                        currentZoom = controller.setZoom(currentZoom * paso)
+                        showZoom()
+                    }
+                    2 -> {
+                        val r = controller.evRange
+                        val d = if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) 1 else -1
+                        evSteps = (evSteps + d).coerceIn(r.first, r.second)
+                        controller.setEv(evSteps)
+                        binding.evLabel.text = evLabel(evSteps)
+                        showEvQuick()
+                    }
+                    else -> if (mode == "video") toggleRecord() else startPhotoOrTimer()
+                }
             }
             return true // consume para que NO aparezca el control de volumen
         }
@@ -1253,6 +2117,9 @@ class CameraActivity : AppCompatActivity() {
         setChipState(binding.chipGrid, gridOn, R.string.cd_grid)
         announceChip(binding.chipGrid)
         prefs.edit().putBoolean("grid", gridOn).apply()
+        // El nivel de horizonte solo existe con la cuadrícula puesta: el sensor se enciende
+        // y se apaga con ella en vez de estar despertando el hilo principal siempre.
+        if (gridOn) startRollSensor() else stopRollSensor()
     }
 
     private fun cycleTimer() {
@@ -1305,7 +2172,12 @@ class CameraActivity : AppCompatActivity() {
         }
         val on = controller.setHdrEnabled(!controller.hdrEnabled)
         syncCaptureModeChips()
-        prefs.edit().putBoolean("hdr", on).apply()
+        // Los dos ajustes que sobreviven al cierre de la app (Ultra HDR y el lector de
+        // códigos) se pelean por el mismo tercer flujo: encender uno tiene que apagar la
+        // preferencia del otro, o al siguiente arranque se encenderían los dos.
+        val ed = prefs.edit().putBoolean("hdr", on)
+        if (on) ed.putBoolean("qr", false)
+        ed.apply()
         hint(getString(if (on) R.string.hint_hdr_on else R.string.hint_hdr_off))
     }
 
@@ -1314,62 +2186,16 @@ class CameraActivity : AppCompatActivity() {
         showPanel(if (binding.morePanel.visibility == View.VISIBLE) null else binding.morePanel)
     }
 
-    // ---- Escaneo SIEMPRE activo de QR y códigos de barras ----
-    // Sin chip, sin modo dedicado y sin stream extra: se analiza el propio visor
-    // (mismo método que la lupa), así funciona en cualquier modo y no compite con
-    // RAW ni con el modo noche por el número de streams de la cámara.
-
-    private val autoScanner by lazy {
-        com.google.mlkit.vision.barcode.BarcodeScanning.getClient()
-    }
-    private var autoScanBusy = false
-    private var scanBitmap: Bitmap? = null
-
-    private val autoScanTick = object : Runnable {
-        override fun run() {
-            scanViewfinderForCodes()
-            ui.postDelayed(this, 1100)
-        }
-    }
-
-    private fun scanViewfinderForCodes() {
-        if (autoScanBusy || capturing || controller.isRecording) return
-        if (binding.qrCard.visibility == View.VISIBLE) return // ya hay uno en pantalla
-        if (binding.qrHint.visibility == View.VISIBLE) return // ya hay un aviso pendiente
-        // Ni con el dedo puesto en el obturador ni durante la cuenta atrás: en esos dos
-        // momentos el usuario está haciendo una foto, no leyendo un código, y la lectura
-        // de GPU compite justo con el disparo.
-        if (shutterHeld || binding.countdown.visibility == View.VISIBLE) return
-        val t = binding.texture
-        if (t.width == 0 || t.height == 0) return
-        // Bitmap PEQUEÑO y REUTILIZADO: pedir uno nuevo a media resolución cada vez hacía
-        // una lectura de GPU enorme y una asignación por ciclo, y eso volvía la app lenta.
-        // A ~360 px de ancho un QR se sigue leyendo de sobra.
-        val target = 360
-        val h = (target.toFloat() * t.height / t.width).toInt().coerceAtLeast(1)
-        var bmp = scanBitmap
-        if (bmp == null || bmp.width != target || bmp.height != h) {
-            bmp?.recycle()
-            bmp = Bitmap.createBitmap(target, h, Bitmap.Config.ARGB_8888)
-            scanBitmap = bmp
-        }
-        val frame = try { t.getBitmap(bmp) } catch (e: Exception) { null } ?: return
-        autoScanBusy = true
-        try {
-            val input = com.google.mlkit.vision.common.InputImage.fromBitmap(frame, 0)
-            autoScanner.process(input)
-                .addOnSuccessListener { codes ->
-                    codes.firstOrNull()?.rawValue?.let { v ->
-                        if (v.isNotEmpty()) showQrResult(v)
-                    }
-                }
-                .addOnCompleteListener { autoScanBusy = false } // el bitmap se reutiliza
-        } catch (e: Exception) {
-            autoScanBusy = false
-        }
-    }
-
     // ---- QR / código de barras ----
+    // El escaneo ya NO se hace aquí. Vivía en un tick de la Activity que pedía
+    // TextureView.getBitmap() cada 1,1 s EN EL HILO PRINCIPAL, una lectura síncrona
+    // GPU->CPU cuyo coste escala con la superficie ORIGEN (2248x3998 en la pantalla
+    // interior, no con los 360 px de destino) y que fuerza un vaciado del pipeline de
+    // render: era la causa técnica más directa del "se siente lenta". Corría SIEMPRE, en
+    // todos los modos, hasta en PRO, con el vídeo parado y durante una captura pedida por
+    // otra app. El motor ya tenía hecho el camino bueno (stream YUV del HAL ->
+    // InputImage.fromMediaImage, sin copia ni readback) y nadie llamaba nunca a
+    // setQrEnabled. Ahora se enciende desde Ajustes y llega por controller.onQrDetected.
     /**
      * Aviso discreto, no secuestro del visor.
      * La tarjeta saltaba al centro en cuanto entraba CUALQUIER código en cuadro,
@@ -1383,7 +2209,15 @@ class CameraActivity : AppCompatActivity() {
         if (binding.qrCard.visibility == View.VISIBLE && qrValue == value) return // ya mostrado
         qrValue = value
         binding.qrHint.visibility = View.VISIBLE
+        // CADUCIDAD. La pastilla se encendía y NADA volvía a apagarla salvo abrir o cerrar
+        // la tarjeta: el código se iba del encuadre y el aviso seguía en pantalla
+        // anunciando algo que ya no estaba. El valor NO se mete en qrDismissedList a
+        // propósito, para que vuelva a avisar si el código sigue delante.
+        ui.removeCallbacks(hideQrHint)
+        ui.postDelayed(hideQrHint, 4000)
     }
+
+    private val hideQrHint = Runnable { binding.qrHint.visibility = View.GONE }
 
     /** Despliega la tarjeta con el contenido del código. */
     private fun openQrCard() {
@@ -1391,18 +2225,23 @@ class CameraActivity : AppCompatActivity() {
         binding.qrText.text = v
         binding.btnQrOpen.visibility =
             if (v.startsWith("http://") || v.startsWith("https://")) View.VISIBLE else View.GONE
+        ui.removeCallbacks(hideQrHint)
         binding.qrHint.visibility = View.GONE
         showCenterSlot(binding.qrCard)
     }
 
     private fun dismissQr() {
         qrValue?.let { qrDismissedList.add(it) }
+        ui.removeCallbacks(hideQrHint)
         binding.qrHint.visibility = View.GONE
         if (binding.qrCard.visibility == View.VISIBLE) showCenterSlot(null)
     }
 
     private fun openQr() {
         val v = qrValue ?: return
+        // Cerrar ANTES de irse al navegador: si no, al volver la tarjeta seguía abierta
+        // ocupando la ranura central y tapando el visor sin que nadie la hubiera pedido.
+        dismissQr()
         try {
             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(v)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         } catch (e: Exception) {
@@ -1526,8 +2365,21 @@ class CameraActivity : AppCompatActivity() {
         ui.removeCallbacksAndMessages(null)
         mirror?.release()
         mirror = null
-        try { autoScanner.close() } catch (e: Exception) {}
-        scanBitmap?.recycle(); scanBitmap = null
+        // El escáner de la Activity (autoScanner + scanBitmap) ya no existe: con él se va
+        // también la carrera que había aquí, donde se reciclaba el bitmap sin mirar si ML
+        // Kit tenía una detección EN VUELO sobre ese mismo bitmap (InputImage.fromBitmap no
+        // lo copia), y el worker acababa dibujando sobre un bitmap reciclado.
+        // freezeBitmap NO se recicla: lens_fade puede tenerlo puesto todavía y pintar un
+        // bitmap reciclado mata el proceso entero. El de la lupa sí, porque a la vista solo
+        // se le entrega el RECORTE, que es una copia aparte.
+        freezeBitmap = null
+        magBitmap?.recycle(); magBitmap = null
+        analysisOverlay?.setMask(null)
+        analysisBmp?.recycle(); analysisBmp = null
+        maskBmp?.recycle(); maskBmp = null
+        shutterSound?.release()
+        shutterSound = null
+        ioExec.shutdown()
         if (::controller.isInitialized) controller.jpegSink = null
         super.onDestroy()
     }
@@ -1567,7 +2419,16 @@ class CameraActivity : AppCompatActivity() {
         chip.compoundDrawablePadding = if (chip.text.isNullOrEmpty()) 0 else dp(5f).toInt()
         val estado = stateText
             ?: getString(if (active) R.string.state_on else R.string.state_off)
-        chip.contentDescription = getString(cdRes, estado)
+        // Ocho de estas cadenas (cd_more, cd_lenses, cd_vid, cd_ev, cd_iso, cd_vel,
+        // cd_kelvin, cd_auto) NO llevan marcador %1$s. String.format se traga el argumento
+        // sobrante sin quejarse, así que no reventaba nada: simplemente TalkBack no
+        // anunciaba NUNCA el estado de esos ocho chips, que era justo lo que este bloque de
+        // accesibilidad venía a arreglar. Se detecta el marcador en vez de tocar strings.xml
+        // (que es de otro integrador) y, si no lo hay, el estado se añade detrás.
+        val plantilla = getString(cdRes)
+        chip.contentDescription =
+            if (plantilla.contains("%1\$s")) getString(cdRes, estado)
+            else "$plantilla: $estado"
     }
 
     /** Un cambio de estado que no se anuncia no existe para quien usa TalkBack. */
@@ -1691,6 +2552,15 @@ class CameraActivity : AppCompatActivity() {
         setChipState(binding.chipRaw, controller.rawEnabled, R.string.cd_raw)
         nightOn = controller.nightEnabled
         setChipState(binding.chipNight, nightOn, R.string.cd_night)
+        // El lector de códigos entra en la misma exclusión (los cuatro se pelean por el
+        // tercer stream): si el motor lo ha apagado por su cuenta, aquí no puede quedar el
+        // chip en ámbar ni un aviso de código colgado en pantalla.
+        qrOn = controller.qrEnabled
+        setChipState(binding.chipQr, qrOn, R.string.cd_qr)
+        if (!qrOn && binding.qrHint.visibility == View.VISIBLE) {
+            ui.removeCallbacks(hideQrHint)
+            binding.qrHint.visibility = View.GONE
+        }
     }
 
     private fun cancelCountdown() {
@@ -1748,7 +2618,8 @@ class CameraActivity : AppCompatActivity() {
             binding.chipVres, binding.chipVfps, binding.chipVcodec, binding.chipTl,
             binding.chipEv, binding.chipIso, binding.chipVel, binding.chipWb,
             binding.chipK, binding.chipAuto, binding.tabPhoto, binding.tabVideo,
-            binding.btnQrCopy, binding.btnQrOpen, binding.btnQrClose, binding.qrHint
+            binding.btnQrCopy, binding.btnQrOpen, binding.btnQrClose, binding.qrHint,
+            binding.chipQr, binding.chipFit
         ).forEach { markAsButton(it) }
     }
 
@@ -1822,6 +2693,12 @@ class CameraActivity : AppCompatActivity() {
         facing = if (camCycleIndex == 0) "back" else "front"
         currentZoom = 1f
         zoomRestored = true
+        // open() resetea aeLocked/afLocked/manualFocus en el motor: la insignia y el chip MF
+        // se quedaban encendidos con el bloqueo ya deshecho, y hacían falta DOS pulsaciones
+        // largas para volver a bloquear de verdad.
+        clearAeAfLock()
+        mfOn = false
+        updateMfChip()
         controller.close()
         controller.open(target)
         val frontCount = cycle.size - 1
@@ -1839,6 +2716,10 @@ class CameraActivity : AppCompatActivity() {
 
     private fun startPhotoOrTimer() {
         if (capturing) return
+        // Segunda pulsación durante la cuenta atrás: CANCELAR, no reiniciarla. Antes la
+        // única forma de detener un temporizador de 10 s era salir de la app, y salir
+        // tampoco lo paraba de verdad.
+        if (countdownRunnable != null) { cancelCountdown(); return }
         if (timerSec <= 0) {
             takePhoto()
             return
@@ -1869,6 +2750,292 @@ class CameraActivity : AppCompatActivity() {
         ui.postDelayed(r, 1000)
     }
 
+    // ==========================================================================
+    //  ENFOQUE MANUAL (MF), APILADO DE ENFOQUE Y HORQUILLADO
+    // ==========================================================================
+
+    /**
+     * Enciende o apaga el enfoque manual. setManualFocusDistance() y hasManualFocus llevan
+     * implementados en el motor desde el primer día y NINGÚN control los llamaba (cero
+     * coincidencias en el grep): en una app cuyo propósito declarado es el macro, el
+     * enfoque fino era literalmente inalcanzable desde la interfaz. Con el AF continuo, a
+     * 3 cm el barrido caza el foco y falla, y no había forma de fijar el plano.
+     */
+    private fun toggleMf() {
+        if (!controller.hasManualFocus) {
+            hint("Esta lente no permite enfoque manual")
+            return
+        }
+        mfOn = !mfOn
+        if (mfOn) {
+            if (binding.proPanel.visibility != View.VISIBLE) togglePro() // el slider vive ahí
+            selectParam("mf")
+        } else {
+            controller.setAutoFocus()
+            if (proParam == "mf") selectParam("ev")
+        }
+        updateMfChip()
+    }
+
+    private fun updateMfChip() {
+        val c = chipMf ?: return
+        c.text = if (mfOn) "MF ${focusLabel(mfDiopters)}" else "MF"
+        setExtraChip(
+            c, mfOn,
+            "Enfoque manual: " +
+                if (mfOn) focusLabel(mfDiopters) else getString(R.string.state_off)
+        )
+    }
+
+    /** Estado de los chips creados por código: no tienen cadena cd_* en strings.xml
+     *  (ese fichero es de otro integrador), así que la descripción llega ya montada. */
+    private fun setExtraChip(chip: TextView, active: Boolean, descripcion: String) {
+        chip.isSelected = active
+        chip.setTextColor(if (active) cAccent else cDim)
+        chip.compoundDrawableTintList =
+            ColorStateList.valueOf(if (active) cAccent else cDim)
+        chip.contentDescription = descripcion
+    }
+
+    /** Dioptrías -> distancia legible. 0 dioptrías = infinito; el macro vive por debajo
+     *  de 20 cm, que es justo donde el slider tiene casi todo su recorrido. */
+    private fun focusLabel(d: Float): String {
+        if (d <= 0.02f) return "∞"
+        val cm = 100f / d
+        return if (cm < 100f) String.format(Locale.US, "%.0f cm", cm)
+        else String.format(Locale.US, "%.1f m", cm / 100f)
+    }
+
+    // El slider es lineal en DIOPTRÍAS, no en metros: es la escala en la que el enfoque se
+    // mueve de forma uniforme y la que le da casi todo el recorrido a la zona cercana.
+    private fun mfToProgress(d: Float): Int {
+        val max = controller.minFocusDiopters
+        if (max <= 0f) return 0
+        return (d / max * 100f).toInt().coerceIn(0, 100)
+    }
+
+    private fun progressToMf(p: Int): Float = controller.minFocusDiopters * p / 100f
+
+    /**
+     * Apilado de enfoque: barrido de la distancia guardando la serie completa. En una foto
+     * a 5 cm la profundidad de campo son MILÍMETROS: una sola toma nunca tiene todo el
+     * bicho enfocado, por buena que sea la lente. La fusión NO se hace en el teléfono; se
+     * apila en el ordenador, que es donde esa operación tiene sentido.
+     */
+    private fun startFocusStack() {
+        if (!controller.hasManualFocus) {
+            hint("Esta lente no permite enfoque manual")
+            return
+        }
+        if (capturing || stackQueue.isNotEmpty() || mode != "photo") return
+        val max = controller.minFocusDiopters
+        // Barrido CENTRADO en el punto actual: ±25 % del recorrido, cinco tomas. Barrer de
+        // 0 a infinito sería tirar la mitad de los disparos en planos que no interesan.
+        val centro = if (mfDiopters > 0.02f) mfDiopters else max * 0.5f
+        val ancho = max * 0.25f
+        val pasos = ArrayList<Float>(5)
+        for (i in 0 until 5) pasos.add((centro - ancho + (2f * ancho) * i / 4f).coerceIn(0f, max))
+        stackQueue = ArrayDeque(pasos)
+        stackTotal = pasos.size
+        if (!mfOn) { mfOn = true; updateMfChip() }
+        binding.btnShutter.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+        stackNext()
+    }
+
+    private fun stackNext() {
+        val d = stackQueue.removeFirstOrNull()
+        if (d == null) {
+            if (binding.nightLabel.visibility == View.VISIBLE) showCenterSlot(null)
+            bounceThumbnail()
+            return
+        }
+        controller.setManualFocusDistance(d)
+        mfDiopters = d
+        updateMfChip()
+        binding.nightLabel.text = "Apilado de enfoque ${stackTotal - stackQueue.size}/$stackTotal"
+        showCenterSlot(binding.nightLabel)
+        // 350 ms: lo que tarda el motor de enfoque en llegar y quedarse quieto. Disparar
+        // antes fotografía la lente EN MOVIMIENTO y toda la serie sale movida.
+        ui.postDelayed({
+            if (capturing) { ui.postDelayed({ stackNext() }, 100); return@postDelayed }
+            capturing = true
+            flashScreen()
+            playShutterSound()
+            controller.takePhoto {
+                capturing = false
+                stackNext()
+            }
+        }, 350)
+    }
+
+    /**
+     * Horquillado de exposición (AEB): tres tomas a -1 / 0 / +1 EV. Hoy no hay ninguna
+     * forma de asegurar una escena a contraluz: o se quema el cielo o se tapa la sombra, y
+     * el usuario descubre cuál de las dos en casa.
+     *
+     * NO se usa captureBurst: el ImageReader de la foto tiene maxImages=2 y una ráfaga de
+     * tres perdería fotogramas; además el AE necesita ~400 ms para asentar cada paso de
+     * compensación o las tres fotos salen idénticas. Se encadena el takePhoto que ya
+     * existe, sin tocar la máquina de estados de captura.
+     */
+    private fun startBracket() {
+        if (capturing || bracketQueue.isNotEmpty() || mode != "photo") return
+        if (controller.isManualExposure) {
+            hint("El horquillado necesita exposición automática")
+            return
+        }
+        val r = controller.evRange
+        if (r.second <= r.first) {
+            hint("Esta lente no permite compensar la exposición")
+            return
+        }
+        // Cuántos pasos son 1 EV en esta lente: el HAL declara el tamaño del paso en
+        // CONTROL_AE_COMPENSATION_STEP (suele ser 1/6 EV), y dar por hecho "1 paso = 1 EV"
+        // habría producido tres fotos casi iguales.
+        val step = controller.evStepValue.let { if (it > 0f) it else 0.5f }
+        val uno = Math.max(1, Math.round(1f / step))
+        bracketBase = evSteps
+        bracketQueue = ArrayDeque(
+            listOf(
+                (bracketBase - uno).coerceIn(r.first, r.second),
+                bracketBase,
+                (bracketBase + uno).coerceIn(r.first, r.second)
+            )
+        )
+        binding.btnShutter.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+        bracketNext()
+    }
+
+    private fun bracketNext() {
+        val siguiente = bracketQueue.removeFirstOrNull()
+        if (siguiente == null) {
+            controller.setEv(bracketBase) // dejar la exposición como estaba
+            if (binding.nightLabel.visibility == View.VISIBLE) showCenterSlot(null)
+            bounceThumbnail()
+            return
+        }
+        controller.setEv(siguiente)
+        binding.nightLabel.text = "Horquillado ${3 - bracketQueue.size}/3"
+        showCenterSlot(binding.nightLabel)
+        // 450 ms: el AE del visor tarda en asentarse tras cambiar la compensación; disparar
+        // antes daba tres fotos con la MISMA exposición.
+        ui.postDelayed({
+            if (capturing) { ui.postDelayed({ bracketNext() }, 100); return@postDelayed }
+            capturing = true
+            flashScreen()
+            playShutterSound()
+            controller.takePhoto {
+                capturing = false
+                bracketNext()
+            }
+        }, 450)
+    }
+
+    // ==========================================================================
+    //  HERRAMIENTAS DE ANÁLISIS: histograma, cebras de recorte y realce de enfoque
+    // ==========================================================================
+
+    private fun toggleTools() {
+        toolsOn = !toolsOn
+        chipTools?.let {
+            setExtraChip(
+                it, toolsOn,
+                "Herramientas de análisis: " +
+                    getString(if (toolsOn) R.string.state_on else R.string.state_off)
+            )
+        }
+        analysisOverlay?.showHistogram = toolsOn && toolHist
+        prefs.edit().putBoolean("toolsOn", toolsOn).apply()
+        ui.removeCallbacks(analysisTick)
+        if (toolsOn) ui.post(analysisTick) else analysisOverlay?.setMask(null)
+        hint(if (toolsOn) "Análisis activado" else "Análisis desactivado")
+    }
+
+    private fun allocAnalysis(w: Int, h: Int) {
+        analysisOverlay?.setMask(null)
+        analysisBmp?.recycle()
+        maskBmp?.recycle()
+        analysisBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        maskBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        analysisPx = IntArray(w * h)
+        lumaBuf = IntArray(w * h)
+        maskPx = IntArray(w * h)
+    }
+
+    /**
+     * Un fotograma DIMINUTO del visor (160 px de ancho) y una sola pasada de enteros. Un
+     * histograma no mejora con más muestras, y pedir el fotograma a media resolución es
+     * exactamente lo que volvía lento al escáner de códigos que se acaba de quitar.
+     */
+    private fun analyzeFrame() {
+        if (!toolsOn || capturing || shutterHeld || controller.isRecording) return
+        val t = binding.texture
+        if (t.width == 0 || t.height == 0) return
+        val w = 160
+        val h = (w.toFloat() * t.height / t.width).toInt().coerceIn(1, 400)
+        val src0 = analysisBmp
+        if (src0 == null || src0.width != w || src0.height != h) allocAnalysis(w, h)
+        val src = analysisBmp ?: return
+        val px = analysisPx ?: return
+        val luma = lumaBuf ?: return
+        val mask = maskPx ?: return
+        if ((try { t.getBitmap(src) } catch (e: Exception) { null }) == null) return
+        src.getPixels(px, 0, w, 0, 0, w, h)
+        java.util.Arrays.fill(histBins, 0)
+        var max = 1
+        var suma = 0L
+        for (i in px.indices) {
+            val p = px[i]
+            // Luma BT.601 en enteros (77/150/29 sobre 256): en coma flotante costaba el
+            // triple para el mismo resultado visible.
+            val y = ((p shr 16 and 0xFF) * 77 + (p shr 8 and 0xFF) * 150 + (p and 0xFF) * 29) shr 8
+            luma[i] = y
+            suma += y
+            val n = ++histBins[y shr 2]
+            if (n > max) max = n
+        }
+        // Nota honesta: la lectura de ISO/velocidad reales del AE se queda fuera porque el
+        // motor todavía no publica aeIso/aeExposureNs (ver la entrega). Se muestra el nivel
+        // medio de luz y la compensación pedida, que sí son datos ciertos.
+        val medio = (suma / px.size.coerceAtLeast(1)).toInt() * 100 / 255
+        analysisOverlay?.setHistogram(
+            histBins, max, String.format(Locale.US, "LUZ %d%%   %s", medio, evLabel(evSteps))
+        )
+        if (!toolZebra && !toolPeak) { analysisOverlay?.setMask(null); return }
+        java.util.Arrays.fill(mask, 0)
+        if (toolZebra) {
+            for (i in px.indices) {
+                val y = luma[i]
+                if (y >= 250 || y <= 2) {
+                    // Rayas diagonales de 1 px: en pantalla el fotograma se amplía unas 7
+                    // veces, así que se ven como bandas gruesas y no como ruido.
+                    if (((i % w + i / w) and 1) == 0) {
+                        mask[i] = if (y >= 250) 0xCCFFFFFF.toInt() else 0x99339CFF.toInt()
+                    }
+                }
+            }
+        }
+        if (toolPeak) {
+            // Sobel sobre la luma. En macro la profundidad de campo son milímetros y a ojo,
+            // sobre un visor pequeño, es imposible saber qué está de verdad enfocado: esa es
+            // la causa directa de las fotos "blandas" que se descubren en el ordenador.
+            for (row in 1 until h - 1) {
+                var i = row * w + 1
+                for (x in 1 until w - 1) {
+                    val gx = luma[i - w + 1] + 2 * luma[i + 1] + luma[i + w + 1] -
+                        luma[i - w - 1] - 2 * luma[i - 1] - luma[i + w - 1]
+                    val gy = luma[i + w - 1] + 2 * luma[i + w] + luma[i + w + 1] -
+                        luma[i - w - 1] - 2 * luma[i - w] - luma[i - w + 1]
+                    if (kotlin.math.abs(gx) + kotlin.math.abs(gy) > 190) mask[i] = 0xFFFF9E00.toInt()
+                    i++
+                }
+            }
+        }
+        val mb = maskBmp ?: return
+        mb.setPixels(mask, 0, w, 0, 0, w, h)
+        analysisOverlay?.setMask(mb)
+    }
+
     // ---- PRO ----
     private fun togglePro() {
         showPanel(if (binding.proPanel.visibility == View.VISIBLE) null else binding.proPanel)
@@ -1884,13 +3051,16 @@ class CameraActivity : AppCompatActivity() {
         when (p) {
             "ev" -> controller.setAutoExposure()
             "iso", "vel" -> controller.setManualExposure(proIso, proExpNs)
+            "mf" -> controller.setManualFocusDistance(mfDiopters)
         }
         binding.proSlider.progress = when (p) {
             "iso" -> isoToProgress(proIso)
             "vel" -> velToProgress(proExpNs)
-            else -> evToProgress(0)
+            "mf" -> mfToProgress(mfDiopters)
+            else -> evToProgress(evSteps)
         }
         updateProLabel()
+        setProSliderEnabled(true)
     }
 
     private fun applyParam(p: Int) {
@@ -1898,8 +3068,32 @@ class CameraActivity : AppCompatActivity() {
             "ev" -> {
                 val r = controller.evRange
                 val steps = r.first + ((r.second - r.first) * p / 100.0).toInt()
+                // evSteps es la MISMA variable que usan el slider rápido y showEvQuick: sin
+                // esta asignación el slider rápido seguía mostrando el valor VIEJO y el
+                // primer roce pisaba lo que se acababa de poner en PRO (salto de exposición).
+                evSteps = steps
                 controller.setEv(steps)
                 binding.proValue.text = "EV $steps"
+                binding.evLabel.text = evLabel(steps)
+                binding.evSlider.progress = evToProgress(steps)
+            }
+            "mf" -> {
+                mfDiopters = progressToMf(p)
+                controller.setManualFocusDistance(mfDiopters)
+                binding.proValue.text = focusLabel(mfDiopters)
+                updateMfChip()
+                // La lupa confirma la nitidez mientras se arrastra (es el gesto natural en
+                // macro), pero getBitmap del texture es una lectura de GPU carísima: sin
+                // este freno se disparaba una por cada píxel movido y el visor se atascaba.
+                val ahora = SystemClock.elapsedRealtime()
+                if (ahora - lastMagnifierMs > 250) {
+                    lastMagnifierMs = ahora
+                    val t = binding.texture
+                    showMagnifier(
+                        binding.previewHud.width / 2f, binding.previewHud.height / 2f,
+                        t.width / 2f, t.height / 2f
+                    )
+                }
             }
             "iso" -> {
                 val r = controller.isoRange
@@ -1927,6 +3121,17 @@ class CameraActivity : AppCompatActivity() {
         binding.proValue.text = wbLabels[wbIndex]
         binding.chipWb.contentDescription = getString(R.string.cd_wb, wbLabels[wbIndex])
         announceChip(binding.chipWb)
+        // WB son PRESETS, no un valor continuo: applyParam no tiene rama "wb", así que a
+        // partir de aquí mover el deslizador no hacía absolutamente nada y no había ninguna
+        // señal de por qué. El usuario creía que el panel PRO se había roto y solo se
+        // recuperaba tocando EV/ISO/VEL/K, cosa que nadie adivina.
+        setProSliderEnabled(false)
+    }
+
+    /** El deslizador solo sirve para parámetros continuos: con WB se ve deshabilitado. */
+    private fun setProSliderEnabled(on: Boolean) {
+        binding.proSlider.isEnabled = on
+        binding.proSlider.alpha = if (on) 1f else 0.4f
     }
 
     private fun selectKelvin() {
@@ -1938,6 +3143,7 @@ class CameraActivity : AppCompatActivity() {
         binding.proSlider.progress = kelvinToProgress(wbKelvin)
         controller.setWhiteBalanceKelvin(wbKelvin)
         binding.proValue.text = "${wbKelvin}K"
+        setProSliderEnabled(true)
     }
 
     private fun kelvinToProgress(k: Int): Int {
@@ -1957,15 +3163,24 @@ class CameraActivity : AppCompatActivity() {
         wbIndex = 0
         controller.setWhiteBalance(wbModes[0])
         proParam = "ev"
+        // AUTO no reiniciaba de verdad: setEv(0) dejaba evSteps con el valor VIEJO, así que
+        // el slider rápido seguía marcando la compensación anterior.
+        evSteps = 0
+        binding.evSlider.progress = evToProgress(0)
+        binding.evLabel.text = evLabel(0)
         binding.proSlider.progress = evToProgress(0)
         binding.proValue.text = "AUTO"
+        mfOn = false
+        updateMfChip()
+        setProSliderEnabled(true)
     }
 
     private fun updateProLabel() {
         binding.proValue.text = when (proParam) {
             "iso" -> "ISO $proIso"
             "vel" -> shutterLabel(proExpNs)
-            else -> "EV 0"
+            "mf" -> focusLabel(mfDiopters)
+            else -> "EV $evSteps"
         }
     }
 

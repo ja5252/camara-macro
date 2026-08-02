@@ -3,9 +3,10 @@ package com.pepe.camaramacro
 import android.media.Image
 import android.util.Log
 import java.util.Arrays
-import java.util.concurrent.Callable
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.RejectedExecutionException
 import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.pow
@@ -258,6 +259,10 @@ class NightStacker(private val width: Int, private val height: Int) {
                 }
             }
         }
+        // Si el apilado se abortó mientras se escribía la salida, parallelRows habrá
+        // abandonado las bandas que faltaban y esta imagen tiene franjas sin escribir:
+        // mejor no devolver nada que devolver una foto con bandas negras.
+        if (released || cancelled) return null
         return out
     }
 
@@ -693,29 +698,47 @@ class NightStacker(private val width: Int, private val height: Int) {
      * watchdog agotado); troceado por bandas baja el reloj de pared casi al
      * número de núcleos. Si `evenRows`, las bandas empiezan en fila par porque
      * la máscara de croma cubre bloques 2x2.
+     *
+     * CADA BANDA SE EJECUTA EXACTAMENTE UNA VEZ. Antes se mandaban todas juntas
+     * con invokeAll y, si el pool se cerraba a media foto (release() desde
+     * abortNight cuando ColorOS nos quita la cámara), el catch reejecutaba el
+     * RANGO ENTERO en este hilo: invokeAll encola las tareas una a una, así que
+     * varias bandas ya se habían ejecutado y volvían a sumar sobre accY/wY. El
+     * resultado eran franjas con luma y pesos duplicados, o sea bandas quemadas
+     * en parte de la foto. Ahora se envía banda a banda: la que el pool acepta
+     * la hace el pool, la que rechaza la hace este mismo hilo, y ninguna se hace
+     * dos veces.
      */
     private fun parallelRows(rows: Int, evenRows: Boolean, body: (Int, Int) -> Unit) {
         val p = pool
         if (p == null || threads <= 1 || rows < 64) { body(0, rows); return }
         var chunk = (rows + threads - 1) / threads
         if (evenRows && (chunk and 1) == 1) chunk++
-        val tasks = ArrayList<Callable<Unit>>(threads)
+        val futures = ArrayList<Future<*>>(threads)
         var s = 0
         while (s < rows) {
             val a = s
             val b = if (s + chunk < rows) s + chunk else rows
-            tasks.add(Callable<Unit> { body(a, b) })
+            var encolada = false
+            if (!released && !cancelled) {
+                try {
+                    // SAM explícito: ExecutorService.submit está sobrecargado con
+                    // Runnable y con Callable y una lambda a secas es ambigua.
+                    futures.add(p.submit(Runnable { body(a, b) }))
+                    encolada = true
+                } catch (e: RejectedExecutionException) {
+                    Log.i("CamMacro", "noche: pool cerrado, banda $a-$b en el hilo que llama")
+                }
+            }
+            // Si el pool ya no acepta trabajo pero el apilado sigue vivo, la banda
+            // se hace aquí (las bandas no comparten ni una fila: no hace falta
+            // bloqueo). Si ya se soltó el apilador, se abandona: result() devuelve
+            // null cuando released/cancelled, así que ese fotograma no lo ve nadie.
+            if (!encolada && !released && !cancelled) body(a, b)
             s = b
         }
-        try {
-            val futures = p.invokeAll(tasks)
-            for (f in futures) {
-                try { f.get() } catch (e: Exception) { Log.e("CamMacro", "banda: ${e.message}") }
-            }
-        } catch (e: Exception) {
-            // Pool cerrado a media foto (abortNight): si no llegó a ejecutarse
-            // nada, se hace en este mismo hilo; si ya está liberado, no se toca.
-            if (!released) body(0, rows)
+        for (f in futures) {
+            try { f.get() } catch (e: Exception) { Log.e("CamMacro", "banda: ${e.message}") }
         }
     }
 

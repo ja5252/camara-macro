@@ -4,11 +4,13 @@
     android:layout_height="match_parent"
     android:background="@color/black">
 
+    <!-- Reciclaba cd_thumbnail, o sea "Ver última foto": la acción de un botón de OTRA
+         pantalla anunciada sobre la foto que ya estás mirando a pantalla completa. -->
     <com.pepe.camaramacro.ZoomableImageView
         android:id="@+id/page_image"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:contentDescription="@string/cd_thumbnail" />
+        android:contentDescription="@string/cd_photo_full" />
 
     <!-- Reproductor integrado: los vídeos se ven aquí, sin mandar a otra app -->
     <VideoView
@@ -18,12 +20,16 @@
         android:layout_gravity="center"
         android:visibility="gone" />
 
+    <!-- La etiqueta va en el distintivo, que es lo clicable; el icono de dentro se calla
+         para que el lector no anuncie "Reproducir" dos veces sobre el mismo botón. -->
     <FrameLayout
         android:id="@+id/play_badge"
         android:layout_width="78dp"
         android:layout_height="78dp"
         android:layout_gravity="center"
         android:background="@drawable/circle_btn_bg"
+        android:contentDescription="@string/play"
+        android:focusable="true"
         android:visibility="gone">
 
         <ImageView
@@ -31,7 +37,7 @@
             android:layout_height="42dp"
             android:layout_gravity="center"
             android:layout_marginStart="4dp"
-            android:contentDescription="@string/play"
+            android:importantForAccessibility="no"
             android:src="@drawable/ic_play" />
     </FrameLayout>
 </FrameLayout>

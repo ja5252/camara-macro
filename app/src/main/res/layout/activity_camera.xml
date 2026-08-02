@@ -157,17 +157,25 @@
 
             <!-- Lupa de confirmación de nitidez. CameraActivity la manda al cuadrante
                  OPUESTO al dedo: pegada siempre arriba a la derecha tapaba justo lo
-                 que el usuario acababa de tocar en esa esquina. -->
+                 que el usuario acababa de tocar en esa esquina.
+
+                 Los DOS márgenes son la ranura útil, no un adorno. Con marginBottom=20dp
+                 al tocar la mitad SUPERIOR del visor la tarjeta se iba al fondo de la
+                 imagen (y≈484..604dp) y caía entera dentro de control_band, que se dibuja
+                 después: la lupa era invisible justo en la mitad de los casos. Ahora el
+                 margen inferior deja libre la banda de controles (≈289dp de alto) y el
+                 superior deja libre la barra de opciones y el chip de lente. Se miden
+                 contra la IMAGEN porque el padre es PreviewFrameLayout. -->
             <com.google.android.material.card.MaterialCardView
                 android:id="@+id/magnifier_card"
                 android:layout_width="120dp"
                 android:layout_height="120dp"
                 android:layout_gravity="top|end"
                 android:layout_marginStart="14dp"
-                android:layout_marginTop="@dimen/hud_top_offset"
+                android:layout_marginTop="@dimen/magnifier_top_inset"
                 android:layout_marginEnd="14dp"
-                android:layout_marginBottom="20dp"
-                android:importantForAccessibility="no"
+                android:layout_marginBottom="@dimen/magnifier_bottom_inset"
+                android:importantForAccessibility="noHideDescendants"
                 android:visibility="gone"
                 app:cardBackgroundColor="@color/black"
                 app:cardCornerRadius="60dp"
@@ -202,10 +210,16 @@
                 android:layout_width="match_parent"
                 android:layout_height="match_parent">
 
+                <!-- La cuenta atrás y el aviso de apilado se anuncian solos: son la única
+                     señal de que la foto TODAVÍA no se ha hecho, y sin región activa quien
+                     usa TalkBack soltaba el teléfono creyendo que ya había disparado.
+                     rec_indicator NO lleva esto a propósito: se refresca cada 500 ms y el
+                     lector no pararía de hablar durante toda la grabación. -->
                 <TextView
                     android:id="@+id/countdown"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
+                    android:accessibilityLiveRegion="polite"
                     android:layout_gravity="center"
                     android:contentDescription="@string/cd_countdown"
                     android:fontFamily="sans-serif-medium"
@@ -222,6 +236,7 @@
                     style="@style/Hud.Data"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
+                    android:accessibilityLiveRegion="polite"
                     android:layout_gravity="center"
                     android:background="@drawable/panel_bg"
                     android:clickable="false"
@@ -245,11 +260,15 @@
                     android:padding="18dp"
                     android:visibility="gone">
 
+                    <!-- El código se lee solo al aparecer, que es justo cuando importa:
+                         la tarjeta se abre sola y sin región activa había que ir a
+                         buscarla a ciegas por la pantalla. -->
                     <TextView
                         android:id="@+id/qr_text"
                         style="@style/Hud.Data"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
+                        android:accessibilityLiveRegion="polite"
                         android:ellipsize="end"
                         android:maxLines="4"
                         android:maxWidth="@dimen/panel_max_width"
@@ -262,66 +281,29 @@
                         android:gravity="end"
                         android:orientation="horizontal">
 
+                        <!-- Literales fuera: "Copiar", "Abrir" y "Cerrar" estaban
+                             incrustados en el XML y no se podían traducir, así que en un
+                             teléfono en inglés la tarjeta salía a medias en castellano. -->
                         <TextView
                             android:id="@+id/btn_qr_copy"
                             style="@style/ProChip.Action"
                             android:contentDescription="@string/cd_qr_copy"
-                            android:text="Copiar" />
+                            android:text="@string/copy" />
 
                         <TextView
                             android:id="@+id/btn_qr_open"
                             style="@style/ProChip.Action"
                             android:contentDescription="@string/cd_qr_open"
-                            android:text="Abrir" />
+                            android:text="@string/open" />
 
                         <TextView
                             android:id="@+id/btn_qr_close"
                             style="@style/ProChip"
                             android:contentDescription="@string/cd_qr_close"
-                            android:text="Cerrar" />
+                            android:text="@string/close" />
                     </LinearLayout>
                 </LinearLayout>
             </FrameLayout>
-
-            <!-- Aviso DISCRETO de código detectado. La tarjeta QR saltaba al centro del
-                 visor en cuanto entraba cualquier código en cuadro, tapando al sujeto
-                 mientras el usuario componía. Ahora solo aparece esta pastilla y la
-                 tarjeta se despliega si se toca. -->
-            <TextView
-                android:id="@+id/qr_hint"
-                style="@style/Hud.Label"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_gravity="bottom|center_horizontal"
-                android:layout_marginBottom="72dp"
-                android:background="@drawable/chip_action_bg"
-                android:clickable="true"
-                android:focusable="true"
-                android:minHeight="@dimen/touch_min"
-                android:gravity="center"
-                android:paddingHorizontal="18dp"
-                android:text="@string/qr_detected"
-                android:textAllCaps="false"
-                android:textColor="@color/accent"
-                android:textSize="13sp"
-                android:visibility="gone" />
-
-            <!-- Aviso efímero. Sustituye a los más de 20 Toast, que en la pantalla
-                 grande salían abajo del todo, lejísimos del chip recién tocado. -->
-            <TextView
-                android:id="@+id/hint_pill"
-                style="@style/Hud.Value"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_gravity="bottom|center_horizontal"
-                android:layout_marginBottom="18dp"
-                android:background="@drawable/hint_pill_bg"
-                android:clickable="false"
-                android:focusable="false"
-                android:paddingHorizontal="18dp"
-                android:paddingVertical="10dp"
-                android:text=""
-                android:visibility="gone" />
 
             <!-- El destello vive DENTRO del visor: en la pantalla de cubierta con 16:9
                  parpadeaban también 134dp de barra negra (407dp con 1:1). -->
@@ -336,6 +318,63 @@
                 android:importantForAccessibility="no" />
         </FrameLayout>
     </com.pepe.camaramacro.PreviewFrameLayout>
+
+    <!-- ==================== AVISOS: JUSTO ENCIMA DE LOS CONTROLES ====================
+         Estos dos colgaban de preview_hud, es decir de la IMAGEN, con margen inferior
+         medido contra el borde de abajo del fotograma. Con el visor 16:9 en la pantalla
+         de cubierta la imagen acaba en y=624dp y control_band ocupa y=468..758dp, así
+         que las dos pastillas caían DENTRO de la banda de controles: hint_pill se
+         dibujaba debajo de la tira de zoom y de FOTO/VIDEO (ilegible: los más de 20
+         avisos que sustituyeron a los Toast no comunicaban nada), y qr_hint quedaba
+         tapada por control_band, que además es clickable, así que el toque nunca le
+         llegaba y openQrCard() era IMPOSIBLE de disparar desde la interfaz.
+
+         Ahora cuelgan de la raíz y se apoyan en el BORDE SUPERIOR de control_band, que
+         es la única referencia que no se mueve pase lo que pase con la relación de
+         aspecto ni con el panel que esté abierto. -->
+    <TextView
+        android:id="@+id/hint_pill"
+        style="@style/Hud.Value"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="8dp"
+        android:background="@drawable/hint_pill_bg"
+        android:clickable="false"
+        android:focusable="false"
+        android:paddingHorizontal="18dp"
+        android:paddingVertical="10dp"
+        android:text=""
+        android:visibility="gone"
+        app:layout_constraintBottom_toTopOf="@+id/control_band"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <!-- Aviso DISCRETO de código detectado. La tarjeta QR saltaba al centro del visor en
+         cuanto entraba cualquier código en cuadro, tapando al sujeto mientras el usuario
+         componía. Ahora solo aparece esta pastilla y la tarjeta se despliega si se toca.
+         Se apila SOBRE hint_pill: cuando hint_pill está oculto ConstraintLayout lo
+         resuelve como un punto sin márgenes, y por eso hace falta el goneMargin. -->
+    <TextView
+        android:id="@+id/qr_hint"
+        style="@style/Hud.Label"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="8dp"
+        android:background="@drawable/chip_action_bg"
+        android:clickable="true"
+        android:focusable="true"
+        android:gravity="center"
+        android:minHeight="@dimen/touch_min"
+        android:paddingHorizontal="18dp"
+        android:text="@string/qr_detected"
+        android:textAllCaps="false"
+        android:textColor="@color/accent"
+        android:textSize="13sp"
+        android:visibility="gone"
+        app:layout_constraintBottom_toTopOf="@id/hint_pill"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_goneMarginBottom="8dp" />
 
     <!-- ==================== 2. BARRA SUPERIOR ==================== -->
     <LinearLayout
@@ -666,6 +705,16 @@
                             style="@style/ProChip"
                             android:text="@string/chip_full" />
 
+                        <!-- AJUSTAR / LLENAR. En la pantalla interior (casi cuadrada) el
+                             visor llena la pantalla y recorta lo que sobra: sin este
+                             interruptor no había forma de ver el fotograma entero, y el
+                             usuario encuadraba a ciegas los bordes de la foto. -->
+                        <TextView
+                            android:id="@+id/chip_fit"
+                            style="@style/ProChip"
+                            android:contentDescription="@string/cd_fit"
+                            android:text="@string/chip_fill" />
+
                         <TextView
                             android:id="@+id/chip_filter"
                             style="@style/ProChip.Icon"
@@ -769,6 +818,17 @@
                             style="@style/ProChip"
                             android:contentDescription="@string/cd_wa"
                             android:text="@string/chip_wa" />
+
+                        <!-- Interruptor del lector de códigos. Al sacar el escaneo del
+                             hilo de UI el lector pasa a costar un stream de cámara
+                             (excluyente con RAW y con el modo noche), así que tiene que
+                             ser una decisión del usuario y no algo que corra siempre a
+                             su espalda comiéndose fotogramas. -->
+                        <TextView
+                            android:id="@+id/chip_qr"
+                            style="@style/ProChip"
+                            android:contentDescription="@string/cd_qr"
+                            android:text="@string/chip_qr" />
                     </LinearLayout>
                 </HorizontalScrollView>
             </LinearLayout>
@@ -815,30 +875,55 @@
                 android:orientation="horizontal" />
         </HorizontalScrollView>
 
-        <LinearLayout
-            android:id="@+id/mode_toggle"
-            android:layout_width="wrap_content"
+        <!-- Fila de modo. El selector FOTO/VIDEO sigue CENTRADO en la pantalla (es el
+             ancla visual de la franja) y a su derecha va el atajo de WhatsApp, que antes
+             estaba enterrado en el panel "⋯": para mandar una foto había que abrir el
+             panel, buscar la pastilla y disparar, o sea perder el momento. Aquí se toca
+             sin apartar el pulgar del obturador. Se envuelve en un FrameLayout para que
+             el botón no descentre el selector, que es lo que pasaría en una fila. -->
+        <FrameLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_gravity="center_horizontal"
-            android:layout_marginTop="12dp"
-            android:background="@drawable/zoom_pill_bg"
-            android:orientation="horizontal"
-            android:padding="4dp">
+            android:layout_marginTop="12dp">
 
-            <TextView
-                android:id="@+id/tab_photo"
-                style="@style/ModeTab"
-                android:contentDescription="@string/cd_mode_photo"
-                android:text="@string/mode_photo"
-                android:textColor="@color/accent" />
+            <LinearLayout
+                android:id="@+id/mode_toggle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:background="@drawable/zoom_pill_bg"
+                android:orientation="horizontal"
+                android:padding="4dp">
 
-            <TextView
-                android:id="@+id/tab_video"
-                style="@style/ModeTab"
-                android:contentDescription="@string/cd_mode_video"
-                android:text="@string/mode_video"
-                android:textColor="@color/text_off" />
-        </LinearLayout>
+                <TextView
+                    android:id="@+id/tab_photo"
+                    style="@style/ModeTab"
+                    android:contentDescription="@string/cd_mode_photo"
+                    android:text="@string/mode_photo"
+                    android:textColor="@color/accent" />
+
+                <TextView
+                    android:id="@+id/tab_video"
+                    style="@style/ModeTab"
+                    android:contentDescription="@string/cd_mode_video"
+                    android:text="@string/mode_video"
+                    android:textColor="@color/text_off" />
+            </LinearLayout>
+
+            <ImageView
+                android:id="@+id/btn_whatsapp"
+                android:layout_width="46dp"
+                android:layout_height="46dp"
+                android:layout_gravity="center_vertical|end"
+                android:layout_marginEnd="@dimen/action_row_side_margin"
+                android:background="@drawable/wa_circle_bg"
+                android:clickable="true"
+                android:contentDescription="@string/cd_wa"
+                android:focusable="true"
+                android:padding="12dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_whatsapp_glyph" />
+        </FrameLayout>
 
         <!-- Fila del obturador. Los tres controles se alinean por CENTRO VERTICAL
              (antes sus centros caían en 57, 58 y 63dp: 6dp de desnivel a simple vista

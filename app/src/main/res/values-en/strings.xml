@@ -1,0 +1,163 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Traducción al inglés. No existía NINGÚN values-* alternativo: la app entera estaba
+    clavada en castellano, así que en un teléfono en inglés la interfaz salía en un
+    idioma que su dueño puede no leer, y eso incluye los avisos de error de la cámara.
+
+    Aquí sólo están las cadenas que son PROSA. Las que ya son iguales en los dos idiomas
+    (HDR, RAW, PRO, FULL, MED, ISO, 1080p, WhatsApp, los nombres técnicos) no se repiten
+    a propósito: Android cae solo en values/ cuando falta una clave, y una traducción
+    duplicada es una traducción que algún día se queda vieja sólo en un sitio.
+
+    Los especificadores de formato (%1$s, %1$d, %2$s) tienen que coincidir uno a uno con
+    los de values/strings.xml o getString() revienta en tiempo de ejecución.
+-->
+<resources>
+    <string name="app_name">Camera</string>
+
+    <string name="setup_title">Choose your lens</string>
+    <string name="setup_hint">Use Previous / Next and watch the preview. Pick the lens that looks like your macro mode (the one that DOES work) and tap \"Use this lens\".</string>
+    <string name="prev">‹ Previous</string>
+    <string name="next">Next ›</string>
+    <string name="use_this">Use this lens</string>
+    <string name="no_cameras">No cameras detected on this phone.</string>
+    <string name="lens_saved">Lens saved ✓</string>
+
+    <string name="shutter">Take photo</string>
+    <string name="change_lens">Change lens</string>
+    <string name="pick_another_lens">Pick another lens</string>
+
+    <string name="need_camera_permission">I need camera permission to work.</string>
+    <string name="grant">Grant</string>
+    <string name="photo_saved">Photo saved to the gallery</string>
+    <string name="photo_error">Could not save the photo</string>
+
+    <string name="cd_thumbnail">View last photo</string>
+    <string name="cd_recents">Recent</string>
+    <string name="recents">Recent</string>
+    <string name="focus_locked">Focus locked</string>
+    <string name="ae_locked">Exposure locked</string>
+    <string name="lens_macro">MACRO</string>
+    <string name="lens_back">CAMERA</string>
+    <string name="close">Close</string>
+    <string name="mode_photo">PHOTO</string>
+    <string name="mode_video">VIDEO</string>
+    <string name="cd_record">Record video</string>
+    <string name="copy">Copy</string>
+    <string name="open">Open</string>
+
+    <!-- Galería -->
+    <string name="play">Play</string>
+    <string name="share">Share</string>
+    <string name="delete">Delete</string>
+    <string name="no_media">No photos or videos yet</string>
+    <string name="deleted">Deleted</string>
+    <string name="delete_error">Could not delete it</string>
+    <string name="no_player">No app can open this</string>
+
+    <string name="raw_save_error">Could not save the RAW file</string>
+    <string name="raw_unavailable">RAW not available on this lens</string>
+    <string name="lens_min_one">At least one lens must stay on</string>
+
+    <string name="ae_af_locked">AE/AF LOCKED</string>
+    <string name="ae_af_unlocked">Exposure and focus unlocked</string>
+
+    <string name="share_whatsapp">Take a photo and send it on WhatsApp</string>
+    <string name="no_whatsapp">WhatsApp is not installed</string>
+
+    <!-- Secciones del panel "Más" -->
+    <string name="sec_image">Image quality</string>
+    <string name="sec_lenses">Lenses and camera</string>
+    <string name="sec_tools">Tools</string>
+
+    <!-- Nombres de las lentes -->
+    <string name="lens_wide">Ultra wide</string>
+    <string name="lens_main">Main</string>
+    <string name="lens_tele">Telephoto</string>
+    <string name="lens_front">Front</string>
+    <string name="lens_digital">digital</string>
+    <string name="lens_off_one">1 lens off</string>
+    <string name="lens_off_many">%1$d lenses off</string>
+
+    <!-- Accesibilidad -->
+    <string name="cd_viewfinder">Viewfinder. Tap to focus, press and hold to lock exposure and focus</string>
+    <string name="cd_focus_center">Focus on the centre</string>
+    <string name="cd_toggle_ae_lock">Lock or unlock exposure and focus</string>
+    <string name="cd_flash">Flash: %1$s</string>
+    <string name="cd_timer">Timer: %1$s</string>
+    <string name="cd_grid">Grid and level: %1$s</string>
+    <string name="cd_night">Night mode: %1$s</string>
+    <string name="cd_more">More options</string>
+    <string name="cd_hdr">Ultra HDR: %1$s</string>
+    <string name="cd_raw">RAW plus JPEG: %1$s</string>
+    <string name="cd_filter">Colour filter: %1$s</string>
+    <string name="cd_pro">Manual controls: %1$s</string>
+    <string name="cd_ratio">Photo aspect ratio: %1$s</string>
+    <string name="cd_res">Resolution: %1$s</string>
+    <string name="cd_lenses">Choose which lenses the zoom uses</string>
+    <string name="cd_flip">Switch between rear and front camera. Now: %1$s</string>
+    <string name="cd_wa">Take a photo and send it on WhatsApp</string>
+    <string name="cd_vid">Video settings</string>
+    <string name="cd_vres">Video resolution: %1$s</string>
+    <string name="cd_vfps">Frames per second: %1$s</string>
+    <string name="cd_vcodec">Video codec: %1$s</string>
+    <string name="cd_tl">Time-lapse: %1$s</string>
+    <string name="cd_ev">Exposure compensation</string>
+    <string name="cd_iso">ISO sensitivity</string>
+    <string name="cd_vel">Shutter speed</string>
+    <string name="cd_wb">White balance: %1$s</string>
+    <string name="cd_kelvin">Colour temperature in kelvin</string>
+    <string name="cd_auto">Reset everything to automatic</string>
+    <string name="cd_pro_slider">Value of the selected parameter</string>
+    <string name="cd_ev_slider">Quick exposure</string>
+    <string name="cd_mode_photo">Photo mode</string>
+    <string name="cd_mode_video">Video mode</string>
+    <string name="cd_zoom_optical">Zoom %1$s, real optical lens</string>
+    <string name="cd_zoom_digital">Zoom %1$s, digital crop</string>
+    <string name="cd_qr_copy">Copy the code to the clipboard</string>
+    <string name="cd_qr_open">Open the link in the code</string>
+    <string name="cd_qr_close">Dismiss the code notice</string>
+    <string name="cd_qr">QR code reader</string>
+    <string name="cd_fit">Show the whole frame or fill the screen</string>
+    <string name="cd_rec_time">Recorded time</string>
+    <string name="cd_countdown">Timer countdown</string>
+    <string name="cd_photo_full">Photo, full screen</string>
+    <string name="cd_media_cell">Open</string>
+    <string name="cd_lens_chip">Lens %1$s: %2$s</string>
+    <string name="state_on">on</string>
+    <string name="state_off">off</string>
+    <string name="state_auto">automatic</string>
+    <string name="state_torch">torch</string>
+
+    <!-- Avisos efímeros -->
+    <string name="hint_night_on">Night mode on</string>
+    <string name="hint_night_off">Night mode off</string>
+    <string name="hint_raw_on">RAW + JPEG</string>
+    <string name="hint_raw_off">JPEG only</string>
+    <string name="hint_hdr_on">Ultra HDR on</string>
+    <string name="hint_hdr_off">Ultra HDR off</string>
+    <string name="hint_burst">Burst</string>
+    <string name="hint_copied">Code copied</string>
+    <string name="hint_no_raw">This lens does not support RAW</string>
+    <string name="hint_no_hdr">This lens does not support Ultra HDR</string>
+    <string name="hint_no_manual_wb">This lens does not support manual white balance</string>
+    <string name="hint_no_front">No front camera available</string>
+    <string name="hint_only_photo">Photo mode only</string>
+
+    <!-- Plegable: espejo en la pantalla externa -->
+    <string name="mirror">Mirror</string>
+    <string name="mirror_on">Mirror on the outer screen is on</string>
+    <string name="mirror_off">Mirror on the outer screen is off</string>
+    <string name="mirror_failed">The outer screen refused the mirror</string>
+    <string name="mirror_hint">Tap this screen to shoot</string>
+    <string name="cd_mirror">Mirror on the outer screen: %1$s</string>
+    <string name="cd_mirror_view">Mirrored preview on the outer screen</string>
+
+    <!-- Etiquetas de la barra -->
+    <string name="chip_lenses">LENSES</string>
+    <string name="chip_wa">WHATSAPP</string>
+    <string name="chip_fill">FILL</string>
+    <string name="chip_fit">FIT</string>
+    <string name="night_stacking">Stacking…</string>
+    <string name="qr_detected">Code detected · tap to view</string>
+</resources>

@@ -22,6 +22,10 @@
     <color name="text_primary">#FFFFFFFF</color>
     <color name="text_dim">#E6FFFFFF</color>
     <color name="text_off">#99FFFFFF</color>
+    <!-- Paso intermedio para lo que está apagado pero no desactivado (paradas de zoom
+         digital, rótulos secundarios). Estaba escrito a mano en Kotlin como
+         Color.parseColor("#8CFFFFFF"). -->
+    <color name="text_faint">#8CFFFFFF</color>
 
     <!--
         Verde y rojo del anillo de enfoque. Los anteriores (#4CD964 y #FF3B30) eran
@@ -33,11 +37,23 @@
 
     <!--
         Superficies del HUD: dos niveles de elevación de la misma familia.
-        surface_chip estaba en 40% de negro y los chips desaparecían sobre fondo claro.
+        surface_chip venía del 40% de negro (los chips desaparecían sobre fondo claro) y
+        pasó al 60%, pero al 60% seguía sin llegar: medido sobre una pared blanca quemada,
+        el ÁMBAR del chip activo (#FFFF9E00) daba 2,77:1 sobre ese fondo, muy por debajo
+        del 4,5:1 exigible, y el ámbar es justo lo que dice qué ajuste está puesto.
+        Al 80% el mismo par sube a 6,10:1 y el texto blanco a 10,6:1. Se queda por debajo
+        de surface_panel (85%) a propósito, para conservar los dos niveles de elevación.
     -->
-    <color name="surface_chip">#99000000</color>
+    <color name="surface_chip">#CC000000</color>
     <color name="surface_panel">#D9000000</color>
     <color name="hairline">#33FFFFFF</color>
     <!-- Ámbar al 18%: fondo de la parada de zoom seleccionada. -->
     <color name="accent_soft">#2EFF9E00</color>
+
+    <!-- Botón de WhatsApp junto a FOTO/VIDEO. El verde de la marca a plena opacidad
+         rompía la paleta cálida de la app (fue la queja del botón verde anterior), así
+         que va al 35% sobre la franja de control, con un aro claro para que se despegue
+         igual de bien sobre una escena oscura que sobre uno clara. -->
+    <color name="wa_soft">#5925D366</color>
+    <color name="wa_stroke">#8C25D366</color>
 </resources>

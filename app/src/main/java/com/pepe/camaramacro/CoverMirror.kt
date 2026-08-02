@@ -50,6 +50,14 @@ class CoverMirror(
     /** Cambió la disponibilidad de la pantalla externa: la UI muestra u oculta el chip. */
     var onAvailabilityChanged: ((Boolean) -> Unit)? = null
 
+    /**
+     * "Ahora mismo no copies": lo consulta el bombeo antes de cada lectura.
+     * getBitmap() es una lectura SÍNCRONA GPU->CPU que vacía el pipeline de render, así que
+     * hacerla justo mientras se dispara (dedo en el obturador, captura en vuelo, apilado de
+     * noche) competía con lo único que de verdad importa en ese instante: la foto.
+     */
+    var isBusy: (() -> Boolean)? = null
+
     private val displayManager =
         context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
     private val ui = Handler(Looper.getMainLooper())
@@ -62,7 +70,28 @@ class CoverMirror(
     /** Ancho del fotograma copiado. A 480 px se ve de sobra para encuadrar una cara y
      *  la lectura de GPU sigue siendo barata. */
     private val mirrorWidth = 480
-    private val frameDelayMs = 66L // ~15 fps
+
+    /**
+     * ~6 fps (era 66 ms, ~15 fps).
+     *
+     * El coste de getBitmap() NO depende de estos 480 px de destino sino de la superficie
+     * ORIGEN: el TextureView entero, hasta 2248x3998 px en la pantalla interior. Es una
+     * lectura síncrona GPU->CPU que además fuerza un vaciado del pipeline de render, y a
+     * 15 Hz eso se comía el visor justo con el espejo encendido: la misma técnica que se
+     * acaba de quitar del escáner de códigos por ser "la causa más directa del se siente
+     * lenta", pero quince veces por segundo en vez de una.
+     *
+     * A 6 fps se sigue encuadrando una cara de sobra (el espejo sirve para colocarse en el
+     * cuadro, no para juzgar nitidez) y el coste baja a menos de la mitad.
+     *
+     * Lo que NO se puede hacer, y conviene dejarlo escrito para que nadie lo intente otra
+     * vez: sacar la lectura a un HandlerThread con PixelCopy. PixelCopy.request() del SDK
+     * 34 solo admite SurfaceView, Surface o Window; no hay ninguna sobrecarga para
+     * TextureView, y la Surface que se construye sobre su SurfaceTexture es el lado
+     * PRODUCTOR (donde escribe la cámara), del que PixelCopy no puede leer. La única API
+     * para sacar píxeles de un TextureView es getBitmap(), y está atada al hilo de UI.
+     */
+    private val frameDelayMs = 160L
 
     val isAvailable: Boolean get() = externalDisplay() != null
     val isShowing: Boolean get() = presentation != null
@@ -183,6 +212,14 @@ class CoverMirror(
             val p = presentation ?: return
             val w = source.width
             val h = source.height
+            // Mientras se dispara NO se copia nada: la lectura de GPU competía con la
+            // captura y con el apilado de noche. Saltar el ciclo (y no parar el bombeo)
+            // deja el último fotograma en la pantalla externa, que es lo correcto: quien
+            // está posando ve congelada la imagen que se acaba de tomar.
+            if (isBusy?.invoke() == true) {
+                ui.postDelayed(this, frameDelayMs)
+                return
+            }
             if (w > 0 && h > 0 && source.isAvailable) {
                 val th = (mirrorWidth.toFloat() * h / w).toInt().coerceAtLeast(1)
                 var b = frame

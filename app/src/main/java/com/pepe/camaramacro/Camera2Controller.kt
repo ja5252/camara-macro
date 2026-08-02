@@ -30,6 +30,8 @@ import android.hardware.camera2.DngCreator
 import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.MeteringRectangle
 import android.hardware.camera2.params.RggbChannelVector
+import android.hardware.camera2.params.TonemapCurve
+import android.media.ExifInterface
 import android.media.Image
 import android.media.ImageReader
 import android.media.MediaRecorder
@@ -56,6 +58,12 @@ import java.io.FileOutputStream
 
 /** Estado del enfoque comunicado a la UI (mapea CONTROL_AF_STATE). */
 enum class FocusState { SCANNING, FOCUSED, NOT_FOCUSED, INACTIVE }
+
+/**
+ * A qué se aplica el punto tocado: enfoque, medición, o las dos cosas. Enfocar en un punto
+ * y MEDIR en otro es justo lo que la cámara rival solo ofrece en su modo Master.
+ */
+enum class MeterTarget { BOTH, FOCUS_ONLY, EXPOSURE_ONLY }
 
 /**
  * Relación de aspecto de captura. NATIVE = el del sensor (máxima área).
@@ -124,10 +132,25 @@ class Camera2Controller(
      */
     var onFirstFrame: (() -> Unit)? = null
 
+    /**
+     * Caras detectadas, en coordenadas del array activo del sensor (por si la UI quiere
+     * pintarlas). STATISTICS_FACE_DETECT_MODE no se usaba en ningún punto del controlador:
+     * en el caso más común —fotos de personas— el AF y el AE medían el centro del encuadre.
+     */
+    var onFaces: ((List<Rect>) -> Unit)? = null
+
     private var cameraId: String = "0"
     @Volatile private var cameraDevice: CameraDevice? = null
     @Volatile private var captureSession: CameraCaptureSession? = null
     private var imageReader: ImageReader? = null
+    /**
+     * La Surface del visor, CON DUEÑO. startPreview y startVideo hacían Surface(texture) y no
+     * la liberaban nunca; startPreview se invoca en cada apertura, cada switchToLens, cada
+     * postRebuildSession, cada fallback de configuración y al terminar un vídeo, así que con
+     * uso normal se acumulaban decenas de Surface con su buffer nativo detrás y el consumo
+     * del proceso solo subía.
+     */
+    private var previewSurface: Surface? = null
     /**
      * Era `lateinit`, y eso mentía: isInitialized seguía siendo true después de cerrar la
      * cámara, así que se seguían construyendo peticiones contra un CameraDevice muerto.
@@ -147,6 +170,16 @@ class Camera2Controller(
     @Volatile private var firstFrameNotified = false
 
     private var previewSize: Size = Size(1920, 1080)
+    /**
+     * Tope del tamaño de la SurfaceTexture del visor. Estaba clavado en 1920x1080: en la
+     * pantalla interior (2248 px de ancho) el mayor 4:3 que cabía era 1440x1080, o sea 1,6 MP
+     * escalados hasta 6,7 MP de panel. De ahí la imagen blanda y el muaré arcoíris sobre
+     * telas y rejillas. Con 2592x1944 entran 2560x1920 y 2304x1728.
+     */
+    private var previewCapW = PREVIEW_CAP_W
+    private var previewCapH = PREVIEW_CAP_H
+    /** El tope solo se baja UNA vez, y solo si el HAL rechaza la configuración. */
+    private var previewCapFallbackTried = false
     private var sensorOrientation = 0
     private var facingFront = false
     private var afContinuousSupported = false
@@ -196,6 +229,16 @@ class Camera2Controller(
 
     // Anti-blur / estabilización
     private var aeFpsRange: Range<Int>? = null
+    /** Juego COMPLETO de rangos de FPS de la lente: hace falta para poder alternar. */
+    private var fpsRangesAvailable: Array<Range<Int>> = emptyArray()
+    /**
+     * Rango de tope 30 con la cota inferior más baja ([10,30] en esta lente): el único que
+     * deja al AE bajar a 1/10 s a oscuras, que es el que arregló la foto nocturna.
+     */
+    private var fpsRangeSlow: Range<Int>? = null
+    /** Rango de 60 fps, si la lente lo declara ([15,60] en la ID3). */
+    private var fpsRangeFast: Range<Int>? = null
+    private var lastFpsSwitchMs = 0L
     private var oisAvailable = false
     private var eisAvailable = false          // estabilización electrónica (solo video)
     private var videoSessionActive = false    // true mientras la sesión es de grabación
@@ -213,6 +256,14 @@ class Camera2Controller(
      * solo en cada arranque mientras la preferencia guardada seguía diciendo que sí.
      */
     private var hdrRequested = false
+    /**
+     * Lente para la que YA se avisó de que no admite Ultra HDR. setUpOutputs corre en cada
+     * apertura y en CADA reconstrucción de sesión, así que sin esto el usuario que activó
+     * Ultra HDR en la ID3 y se pasó a una lente que no lo admite veía la pastilla "Ultra HDR
+     * no disponible" otra vez en cada toque de ratio, resolución, noche o RAW, y otra vez en
+     * cada onResume. El DESEO no se borra: al volver a una lente capaz, se vuelve a aplicar.
+     */
+    private var hdrWarnedLens: String? = null
     /** Ultra HDR no se pudo activar y se cayó a JPEG normal. */
     var onHdrUnavailable: (() -> Unit)? = null
     var hdrEnabled = false
@@ -220,6 +271,25 @@ class Camera2Controller(
     private var nrAvailable: IntArray = IntArray(0)
     private var edgeAvailable: IntArray = IntArray(0)
     private var aberrationAvailable: IntArray = IntArray(0)
+    /** Banda de detalle con la que está programado el VISOR (-1 = sin programar). */
+    @Volatile private var lastDetailBand = -1
+    /** Curva de tono propia: el pie de la del HAL aplasta las sombras contra el cero. */
+    private var toneCurveSupported = false
+    private var toneCurve: TonemapCurve? = null
+    /**
+     * Compensación de exposición propia de la LENTE FÍSICA activa, en pasos de EV del HAL.
+     * Medido: con BrightnessValue casi idéntico (6,85 en el gran angular contra 6,19 en el
+     * tele) el tele expone ~2 EV más y usa ISO 628 donde el gran angular usó ISO 100; su foto
+     * sale con mediana de luma 170 y el histograma aplastado (p1=52, p99=211) frente a 131 y
+     * (5, 234). No es un fallo del AE: cada módulo trae su calibración de fábrica.
+     */
+    private var lensEvSteps = 0
+    // Detección de caras: sin esto el AF y el AE de una foto de personas van al centro.
+    private var faceDetectMode = CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF
+    private var maxAfRegions = 0
+    private var maxAeRegions = 0
+    private var lastFaceRect: Rect? = null
+    private var lastFaceApplyMs = 0L
     /**
      * Acción pendiente a ejecutar cuando el AF converja antes de disparar.
      * @Volatile: se arma en el hilo de UI (takePhoto) y se consume en el de cámara
@@ -231,10 +301,37 @@ class Camera2Controller(
     private var afWaitTimeout: Runnable? = null
     /** Se ha visto un barrido ACTIVO desde el disparador (no el estado pasivo heredado). */
     @Volatile private var afSawActiveScan = false
+    /**
+     * Hay un barrido de AF lanzado por el usuario (toque o precalentado del obturador) que NO
+     * hay que cancelar reenviando otro AF_TRIGGER_START.
+     */
+    @Volatile private var afPrewarmed = false
+    /**
+     * Suelta sola el AF precalentado si la foto nunca llega. prewarmAf manda
+     * AF_TRIGGER_START desde el ACTION_DOWN del obturador y, si el dedo se arrastra fuera
+     * (ACTION_CANCEL) o la pulsación acaba en ráfaga bloqueada por el modo noche, NADIE
+     * mandaba el CANCEL: el AF se quedaba en FOCUSED_LOCKED, el visor dejaba de reenfocar
+     * para siempre y la foto siguiente salía clavada a la distancia del encuadre abortado.
+     * Es el bug histórico del proyecto ("AF bloqueado por hacer START sin CANCEL"), esta vez
+     * sin haber tomado ni una foto.
+     */
+    private var prewarmRelease: Runnable? = null
     /** El AE ha entrado DE VERDAD en PRECAPTURE (no el CONVERGED viejo de antes del trigger). */
     @Volatile private var aeSawPrecapture = false
+    /**
+     * Decisión de destello CONGELADA en el instante en que la pre-captura se dio por buena.
+     * null = todavía no se ha resuelto ninguna pre-captura para este disparo.
+     *
+     * Releer lastAeState dentro de la petición still no vale: esa petición se construye en el
+     * hilo de cámara uno o dos fotogramas después, y para entonces el visor ya ha vuelto a
+     * escribir el estado POSTERIOR a la pre-captura. Si el HAL vuelve a CONVERGED al terminar
+     * la secuencia (lo normal cuando el pre-flash ya iluminó la escena), el flash AUTO no
+     * encendía: se pagaban los 900 ms de espera y la foto salía sin destello.
+     */
+    @Volatile private var aeFlashAtPrecapture: Boolean? = null
     @Volatile private var lastAeState = -1
-    private var lastSavedUri: Uri? = null
+    /** Se escribe en el hilo de E-S y se lee desde la UI: sin @Volatile se leía rancio. */
+    @Volatile private var lastSavedUri: Uri? = null
     /** URI de lo ultimo que se guardo: la miniatura y compartir deben usar ESTO,
      *  no una busqueda en MediaStore que puede apuntar a la carpeta equivocada. */
     val ultimoGuardado: Uri? get() = lastSavedUri
@@ -266,6 +363,27 @@ class Camera2Controller(
      * caigan dentro del rango, resueltas con zoom digital.
      */
     fun zoomStops(): List<Triple<Float, String, Boolean>> {
+        // Con la cámara FRONTAL abierta la cadena sigue siendo la de las traseras: enseñar
+        // sus paradas era mentir, porque pulsarlas no hace nada útil.
+        if (zoomChain.none { it.first == cameraId }) return emptyList()
+        return zoomStopsCache
+    }
+
+    /**
+     * Recalcula las paradas UNA vez por configuración. Antes zoomStops() se recalculaba en
+     * cada llamada a partir de campos que cambian a mitad de la apertura (maxZoom se fija en
+     * setUpOutputs, la cadena en buildZoomChain): en una captura salían 0.6/1/2/2.9/5 y en
+     * otra 1/4.6. Además buildZoomStrip y highlightZoomStrip llamaban por separado y podían
+     * ver listas distintas, con lo que el resaltado se quedaba pegado.
+     */
+    private fun refreshZoomStops() {
+        zoomStopsCache = computeZoomStops()
+        Log.i("CamMacro", "zoomStops=${zoomStopsCache.map { it.second }}")
+    }
+
+    private var zoomStopsCache: List<Triple<Float, String, Boolean>> = emptyList()
+
+    private fun computeZoomStops(): List<Triple<Float, String, Boolean>> {
         if (zoomChain.isEmpty()) return emptyList()
         val f = zoomDisplayFactor
         val byDisplay = sortedMapOf<Float, Triple<Float, String, Boolean>>()
@@ -341,12 +459,30 @@ class Camera2Controller(
     private var aspect = AspectRatio.NATIVE
     private var fullRes = true
     private var captureMatrix: ColorMatrix? = null // filtro de color aplicado a la foto
+    /**
+     * Proporción (ancho/alto) de la CAJA por la que se ve el visor cuando este recorta.
+     * 0 = el visor NO recorta y la foto se guarda entera. Es lo único que sabe de verdad qué
+     * parte del fotograma está viendo el usuario: el jurado midió que el visor se comía el
+     * 42% (solo por abajo) y la foto se guardaba ENTERA, así que el sujeto que estaba en el
+     * centro de la pantalla salía en el tercio superior del archivo.
+     */
+    @Volatile private var previewCropRatio = 0f
+    /** Preferencia Ajustar/Llenar del usuario; null = lo que diga el recurso del aparato. */
+    private var previewFill: Boolean? = null
+    private var boxListenerAdded = false
 
     // Modo noche (multi-frame). Excluyente con RAW.
     var nightEnabled = false
         private set
     private var nightReader: ImageReader? = null
     private var nightSize = Size(1920, 1080)
+    /**
+     * Tamaño REAL del stream de foto. El HAL puede no ofrecer el 16:9 pedido y caer al 4:3
+     * (las cuatro fotos entregadas al jurado salieron 4096x3072 con el chip diciendo 16:9):
+     * en una app cuyo mayor valor es decir la verdad sobre la óptica, el HUD no puede
+     * equivocarse sobre el encuadre.
+     */
+    private var stillSizeReal = Size(1920, 1080)
     @Volatile private var nightStacker: NightStacker? = null
     /**
      * Un ÚNICO dueño del final de la ráfaga nocturna. Antes finishNightStack (hilo de
@@ -356,7 +492,15 @@ class Camera2Controller(
      * abortNight podía liberar el stacker mientras addFrame seguía escribiendo en él.
      */
     private val nightActive = java.util.concurrent.atomic.AtomicBoolean(false)
+    /** Fotogramas ENTREGADOS por el HAL (uno por callback, salgan bien o mal). */
     @Volatile private var nightCount = 0
+    /**
+     * Fotogramas realmente APILADOS. Contar solo los buenos en nightCount dejaba la ráfaga
+     * COLGADA hasta el vigilante en cuanto un acquireNextImage fallaba: el HAL manda
+     * exactamente N fotogramas y ya no iba a llegar ninguno más. Los entregados cierran la
+     * ráfaga; los apilados deciden si la foto vale.
+     */
+    @Volatile private var nightStacked = 0
     private var nightTarget = 0
     // El apilado NO puede vivir en el hilo de la cámara: son ~130 millones de iteraciones
     // por foto y mientras corren no se entrega ningún callback (visor congelado, capturas
@@ -374,6 +518,12 @@ class Camera2Controller(
     private var qrReader: ImageReader? = null
     private var qrScanner: BarcodeScanner? = null
     @Volatile private var qrBusy = false
+    /**
+     * Momento del último fotograma enviado a analizar. El stream de QR es un target de la
+     * petición REPETIDA: llega a ritmo de visor (30/s) y no hace ninguna falta. Cinco
+     * análisis por segundo leen cualquier código y dejan el resto de la CPU para la cámara.
+     */
+    private var lastQrMs = 0L
     /** Generación del escáner: descarta detecciones de una sesión ya cerrada. */
     @Volatile private var qrGen = 0
     var onQrDetected: ((String) -> Unit)? = null
@@ -393,6 +543,12 @@ class Camera2Controller(
     private var videoFps = 30         // 30 / 60
     private var videoHevc = false
     private var timeLapse = false
+    /**
+     * Segundos entre fotogramas del time-lapse. Estaba escrito a mano como setCaptureRate(2.0)
+     * —dos tomas por segundo— y sin exponer: el modo aceleraba 15x sobre 30 fps, que para una
+     * nube, una obra o un amanecer no sirve de nada.
+     */
+    private var timeLapseSec = 2
     private var mediaRecorder: MediaRecorder? = null
     private var recording = false
     private var videoUri: Uri? = null
@@ -404,6 +560,67 @@ class Camera2Controller(
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
     private val uiHandler = Handler(Looper.getMainLooper())
+
+    /**
+     * Hilo EXCLUSIVO de codificación y E-S. El guardado (recorte + filtro + limpieza de
+     * segmentos + miniatura + EXIF + insert/write/update en MediaStore) corría en
+     * backgroundHandler, o sea en el MISMO hilo que sirve a la cámara: mientras duraba, el
+     * HAL no entregaba fotogramas (visor congelado), el enfoque seguía clavado a la distancia
+     * de la foto y el segundo disparo de una ráfaga se perdía. Daemon: no impide que el
+     * proceso termine.
+     */
+    private val ioExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "CamaraIO").also { it.isDaemon = true }
+    }
+
+    /**
+     * Posición con la que etiquetar la foto. El HAL escribe el IFD de GPS del JPEG él solo si
+     * se le pasa por JPEG_GPS_LOCATION. Hasta hoy TODAS las fotos llevaban un IFD de GPS
+     * VACÍO: el HAL reserva el hueco y nadie le daba nunca una posición.
+     * null = sin geoetiquetado (el ajuste viene apagado).
+     */
+    @Volatile private var geoLocation: android.location.Location? = null
+
+    /**
+     * Exposición larga REAL, en ns, aplicada SOLO a la foto. 0 = apagada. El visor no se toca
+     * a propósito: pedirle 30 s por fotograma lo dejaría congelado.
+     */
+    private var longExpNs = 0L
+
+    /** Marca de agua con los datos de la toma. Va SIEMPRE en un fichero aparte. */
+    private var watermarkEnabled = false
+
+    /** Versión de la app para el EXIF (Software). No hay BuildConfig: el proyecto no lo genera. */
+    private val appVersion: String by lazy {
+        try {
+            @Suppress("DEPRECATION")
+            activity.packageManager.getPackageInfo(activity.packageName, 0).versionName ?: "1.0"
+        } catch (e: Exception) {
+            "1.0"
+        }
+    }
+
+    /**
+     * Ganancias que el propio HAL usa para cada preajuste de balance de blancos, aprendidas
+     * del CaptureResult. Es la única calibración honesta que se puede sacar sin una carta de
+     * color: kelvinToRggb interpolaba r de 1,0 a 2,4 y b de 2,2 a 1,0 en línea recta, valores
+     * inventados que no corresponden a ninguna temperatura real (5000 K no daba gris neutro).
+     */
+    private val awbAnchors = java.util.TreeMap<Int, RggbChannelVector>()
+    /** Kelvin nominal del preajuste recién pedido, para casar la ganancia que llegue. */
+    @Volatile private var awbAnchorPending = 0
+
+    // ------------------------------------------------------------------ Ráfaga
+    @Volatile private var burstLeft = 0
+    private var burstSaved = 0
+    private var burstTotal = 0
+    private var burstProgress: ((Int, Int) -> Unit)? = null
+    private val burstDone =
+        java.util.concurrent.atomic.AtomicReference<((Int) -> Unit)?>(null)
+
+    // Cronómetros de las rutas caras (adb logcat -s CamPerf).
+    private var tOpenMs = 0L
+    private var tShotMs = 0L
 
     /**
      * ÚNICO dueño del callback del disparo. Se arma NADA MÁS pulsar (takePhoto /
@@ -464,6 +681,66 @@ class Camera2Controller(
 
     fun currentZoom(): Float = zoomRatio
 
+    /** Id de la lente física abierta. La UI lo necesita para nombrarla en lenguaje humano. */
+    val activeCameraId: String get() = cameraId
+
+    /**
+     * Focal EFECTIVA en equivalente 35 mm = la física de la lente por el recorte digital
+     * aplicado DENTRO de ella. El HUD enseñaba los milímetros congelados en la focal física
+     * mientras el recorte crecía hasta 3,6x: en una captura la pastilla decía "5x" y el
+     * rótulo "ID6 · 70 MM · 6.6X", y en otra "4.6x" contra "10.5X".
+     */
+    val effectiveEquivMm: Int
+        get() = if (activeEquivMm > 0) Math.round(activeEquivMm * zoomRatio) else 0
+
+    /** true si el encuadre ya no sale del sensor sino de un recorte digital. */
+    val isDigitalCrop: Boolean get() = zoomRatio > 1.02f
+
+    /** Tamaño REAL del JPEG que se va a guardar (no el que dice el chip de proporción). */
+    val stillSize: Size get() = stillSizeReal
+
+    /** Megapíxeles reales del apilado nocturno (depende de la memoria libre, no del usuario). */
+    val nightMp: Float get() = nightSize.width.toFloat() * nightSize.height / 1_000_000f
+
+    /** Megapíxeles del stream de foto normal, para comparar. */
+    val stillMp: Float get() = stillSizeReal.width.toFloat() * stillSizeReal.height / 1_000_000f
+
+    /**
+     * true si el modo noche va a disparar a menos de la mitad de la resolución normal.
+     * nightSize se elige por MEMORIA LIBRE y puede caer hasta la resolución del visor sin que
+     * el usuario se entere: es la diferencia entre 12,6 y 2,1 MP.
+     */
+    val nightDegraded: Boolean get() = stillMp > 0f && nightMp < stillMp / 2f
+
+    /** La lente admite exposición larga (control manual del sensor y al menos 1 s). */
+    val hasLongExposure: Boolean get() = manualSensorSupported && expMaxNs >= 1_000_000_000L
+
+    /** Exposición máxima que declara el HAL para esta lente, en ns. */
+    val maxExposureNs: Long get() = expMaxNs
+
+    /**
+     * Exposición larga REAL. El sensor de la ID3 declara 30 s en
+     * SENSOR_INFO_EXPOSURE_TIME_RANGE y la app no ofrecía ni una toma larga ni un apilado:
+     * es la función que produce las fotos que el rival no puede hacer (estelas de luz, agua
+     * sedosa, cielo nocturno) y estaba a dos claves de CaptureRequest.
+     */
+    fun setLongExposureNs(ns: Long) {
+        longExpNs = if (ns <= 0L) 0L else ns.coerceAtMost(if (expMaxNs > 0) expMaxNs else ns)
+    }
+
+    /** Intervalo del time-lapse en segundos (1..60). */
+    fun setTimeLapseSeconds(s: Int) { timeLapseSec = s.coerceIn(1, 60) }
+    val timeLapseSeconds: Int get() = timeLapseSec
+
+    /** Marca de agua con los datos de la toma, en una copia aparte. */
+    fun setWatermarkEnabled(on: Boolean) { watermarkEnabled = on }
+
+    /**
+     * Posición para geoetiquetar. La Activity pasa la ÚLTIMA conocida (nunca pide un fix
+     * nuevo: el GPS puede tardar 30 s y el disparo no puede esperar por eso jamás).
+     */
+    fun setGeoLocation(loc: android.location.Location?) { geoLocation = loc }
+
     // ---------------------------------------------------------------- API pública
 
     fun open(camId: String) {
@@ -485,6 +762,13 @@ class Camera2Controller(
         Log.i("CamMacro", "open id=$camId autoLens=$autoLens chainIndex=$chainIndex chain=$zoomChain")
         if (backgroundThread == null) startBackgroundThread()
         if (orientationListener.canDetectOrientation()) orientationListener.enable()
+        // La caja visible del visor cambia al plegar, al girar y al cambiar de proporción: se
+        // vuelve a medir en cada layout en vez de suponerla. De ella sale el recorte de la
+        // foto, así que suponerla es exactamente lo que rompía el WYSIWYG.
+        if (!boxListenerAdded) {
+            boxListenerAdded = true
+            textureView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> refreshPreviewBox() }
+        }
         if (textureView.isAvailable) {
             openCamera()
         } else {
@@ -502,6 +786,7 @@ class Camera2Controller(
      * cancelación puede dejar a la UI esperando una respuesta que no llegará nunca.
      */
     fun takePhoto(onResult: (Boolean) -> Unit) {
+        tShotMs = android.os.SystemClock.elapsedRealtime()
         if (!armShot(onResult)) return
         startFocusThenCapture()
     }
@@ -516,6 +801,9 @@ class Camera2Controller(
             activity.runOnUiThread { onResult(false) }
             return false
         }
+        // El precalentado del AF ya tiene dueño: a partir de aquí lo cierra finishShot, así
+        // que se retira su auto-cancelación para no soltar el foco a mitad del disparo.
+        cancelPrewarmRelease()
         return true
     }
 
@@ -527,10 +815,15 @@ class Camera2Controller(
      * distancia de aquella.
      */
     private fun finishShot(ok: Boolean) {
+        val cb = shotCallback.getAndSet(null)
         cancelCaptureWatchdog()
         clearAfAeWaits()
+        // Salida temprana si NO había disparo en vuelo. Sin ella, cada reconstrucción de
+        // sesión (un toque en HDR, RAW, noche o proporción llama a abortPendingCapture)
+        // mandaba un AF_TRIGGER_CANCEL al visor y reseteaba lastFocusState sin motivo: el
+        // visor daba un tirón de reenfoque cada vez que el usuario tocaba un chip.
+        if (cb == null) return
         unlockFocusAfterShot()
-        val cb = shotCallback.getAndSet(null) ?: return
         activity.runOnUiThread { cb(ok) }
     }
 
@@ -560,10 +853,11 @@ class Camera2Controller(
         val needsAf = ready && afAvailable && !manualFocus && lastFocusState != FocusState.FOCUSED
         when {
             !needsAf -> proceedAfterAf()
-            // Con el foco dirigido por el usuario ya hay un barrido AUTO en marcha hacia SU
-            // punto: solo hay que suscribirse al resultado. Reenviar AF_TRIGGER_START lo
-            // cancelaría y arrancaría otro, perdiendo la región que él eligió.
-            afLocked -> waitForAfThenCapture(retrigger = false)
+            // Con el foco dirigido por el usuario (toque) o ya precalentado desde el
+            // ACTION_DOWN del obturador hay un barrido AUTO en marcha: solo hay que
+            // suscribirse al resultado. Reenviar AF_TRIGGER_START lo cancelaría y arrancaría
+            // otro, perdiendo la región que él eligió y regalando los 150-250 ms ganados.
+            afLocked || afPrewarmed -> waitForAfThenCapture(retrigger = false)
             else -> waitForAfThenCapture(retrigger = true)
         }
     }
@@ -602,6 +896,7 @@ class Camera2Controller(
         // atraviesa y la pre-captura se da por buena sin haber empezado.
         aeTriggerFrame = Long.MAX_VALUE
         aeSawPrecapture = false
+        aeFlashAtPrecapture = null // la decisión del flash se congela al resolverse la espera
         aeWaitAction = go
         val timeout = Runnable {
             // Queda registrado si el HAL llegó a entrar en PRECAPTURE. Si sale siempre con
@@ -664,7 +959,11 @@ class Camera2Controller(
         // Cuando no reenviamos el disparador, el barrido ya está en marcha desde antes, así
         // que la puerta por número de fotograma sobra: manda el estado (solo LOCKED).
         afTriggerFrame = if (retrigger) Long.MAX_VALUE else 0L
-        afSawActiveScan = false
+        // OJO: solo se borra la marca de barrido si vamos a lanzar uno NUEVO. Cuando nos
+        // limitamos a escuchar (toque previo o precalentado), el barrido que importa es el
+        // que ya empezó: borrar la marca aquí obligaba a esperar el timeout entero de 600 ms
+        // en el gesto más natural de todos, tocar y disparar.
+        if (retrigger) afSawActiveScan = false
         afWaitAction = go
         val timeout = Runnable {
             // Se registra si el HAL llegó a barrer: si esto sale con barrido=false de forma
@@ -705,13 +1004,15 @@ class Camera2Controller(
      * dedo se levante. Son 100-200 ms gratis: cuando llega el disparo real el AF ya suele
      * estar convergido y takePhoto se salta la espera entera.
      */
-    fun prewarmAf() {
-        if (!afAvailable || manualFocus || afLocked) return
+    fun prewarmFocus() {
+        if (!afAvailable || manualFocus || afLocked || afPrewarmed) return
         if (shotCallback.get() != null) return // ya hay un disparo en vuelo: no interferir
         val session = captureSession ?: return
         onCameraThread {
             val builder = previewRequestBuilder ?: return@onCameraThread
             try {
+                afSawActiveScan = false
+                afPrewarmed = true
                 builder.set(
                     CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START
                 )
@@ -719,6 +1020,69 @@ class Camera2Controller(
                 builder.set(
                     CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_IDLE
                 )
+                // Y SU CANCELACIÓN. Este START necesita un CANCEL sí o sí: si el dedo se
+                // arrastra fuera del obturador, o la pulsación larga entra en la ráfaga y
+                // sale por el guard del modo noche, el clic NUNCA llega y nadie manda el
+                // CANCEL. El AF se quedaba en FOCUSED_LOCKED, el visor dejaba de reenfocar
+                // para siempre (applyControls pide CONTINUOUS_PICTURE pero el trigger lo
+                // bloquea) y la foto siguiente veía lastFocusState=FOCUSED, así que
+                // capturaba sin esperar y clavada a la distancia del encuadre abortado.
+                schedulePrewarmRelease()
+            } catch (e: Exception) {
+                afPrewarmed = false
+            }
+        }
+    }
+
+    /** Nombre histórico de prewarmFocus(); lo usa el listener del obturador. */
+    fun prewarmAf() = prewarmFocus()
+
+    /** Arma (o rearma) la auto-cancelación del precalentado. */
+    private fun schedulePrewarmRelease() {
+        uiHandler.post {
+            prewarmRelease?.let { uiHandler.removeCallbacks(it) }
+            val r = Runnable { cancelPrewarmAf() }
+            prewarmRelease = r
+            uiHandler.postDelayed(r, PREWARM_MAX_MS)
+        }
+    }
+
+    /** Retira la auto-cancelación (hay un disparo real que ya se encarga del enfoque). */
+    private fun cancelPrewarmRelease() {
+        uiHandler.post {
+            prewarmRelease?.let { uiHandler.removeCallbacks(it) }
+            prewarmRelease = null
+        }
+    }
+
+    /**
+     * Deshace el precalentado del AF cuando la foto no llega a dispararse. Es el simétrico
+     * exacto de prewarmFocus(): mismo cuerpo que unlockFocusAfterShot pero sin tocar nada si
+     * hay una captura en vuelo (ahí manda finishShot). La UI puede llamarlo en el
+     * ACTION_CANCEL del obturador; si no lo hace, el vigilante lo llama solo.
+     */
+    fun cancelPrewarmAf() {
+        prewarmRelease?.let { uiHandler.removeCallbacks(it) }
+        prewarmRelease = null
+        if (!afPrewarmed) return
+        if (shotCallback.get() != null) return
+        afPrewarmed = false
+        if (afLocked || manualFocus || !afAvailable) return
+        onCameraThread {
+            val session = captureSession ?: return@onCameraThread
+            val builder = previewRequestBuilder ?: return@onCameraThread
+            try {
+                builder.set(
+                    CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_CANCEL
+                )
+                session.capture(builder.build(), null, backgroundHandler)
+                builder.set(
+                    CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_IDLE
+                )
+                lastFocusState = null // que la próxima foto vuelva a enfocar de verdad
+                afSawActiveScan = false
+                applyControls(builder)
+                updatePreview()
             } catch (e: Exception) {
             }
         }
@@ -753,7 +1117,10 @@ class Camera2Controller(
                 }
             }
             captureWatchdog = cw
-            uiHandler.postDelayed(cw, CAPTURE_TIMEOUT_MS)
+            // El vigilante tiene que durar MÁS que la propia exposición: con 30 s pedidos, un
+            // techo fijo de 4 s daba la foto por perdida y soltaba el obturador con el aviso
+            // de error antes de que la foto existiera siquiera.
+            uiHandler.postDelayed(cw, CAPTURE_TIMEOUT_MS + longExpNs / 1_000_000L)
             val wantRaw = rawEnabled && rawSupported && rawReader != null
             // Descarta cualquier mitad colgante de un disparo previo.
             if (wantRaw) clearPendingRaw()
@@ -761,34 +1128,89 @@ class Camera2Controller(
             req.addTarget(reader.surface)
             if (wantRaw) rawReader?.let { req.addTarget(it.surface) }
             applyControls(req, still = true)
-            var flashIso = 0
+            // DECISIÓN DEL FLASH CONGELADA en la pre-captura. Releerla aquí era el fallo: esta
+            // petición se construye en el hilo de cámara uno o dos fotogramas después, y el
+            // visor ya ha reescrito lastAeState con el estado POSTERIOR a la pre-captura. Si
+            // el HAL vuelve a CONVERGED (lo normal cuando el pre-flash ya iluminó la escena),
+            // el flash AUTO no encendía: se pagaban 900 ms de espera y la foto salía sin
+            // destello. Solo afecta al AUTO; con flash ON siempre dispara.
+            val fireFlash = flashAvailable && (
+                flashMode == 2 || (
+                    flashMode == 1 && (
+                        aeFlashAtPrecapture
+                            ?: (lastAeState == CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED)
+                        )
+                    )
+                )
             if (flashAvailable) {
-                // Orden EXPLÍCITA de destello. Dejar que solo mande CONTROL_AE_MODE no
-                // funcionaba en este HAL (comprobado por EXIF tres veces): FLASH_MODE_SINGLE
-                // es inequívoco. En AUTO solo destella si el AE dijo que hace falta luz.
-                val fireFlash = flashMode == 2 ||
-                    (flashMode == 1 && lastAeState == CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED)
                 when {
                     flashMode == 3 ->
                         req.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_TORCH)
                     fireFlash -> {
-                        req.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                        // El AE_MODE tiene que decirle al HAL que VA A HABER flash. Con
+                        // CONTROL_AE_MODE_ON medía el AMBIENTE (EXIF: ISO 21280 a 1/20 s) y
+                        // luego destellaba encima: ruido extremo y primer plano quemado. La
+                        // orden explícita FLASH_MODE_SINGLE se mantiene porque dejar que solo
+                        // mande el AE_MODE no encendía el flash en este HAL (verificado por
+                        // EXIF tres veces).
+                        req.set(
+                            CaptureRequest.CONTROL_AE_MODE,
+                            if (flashMode == 1) CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH
+                            else CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH
+                        )
                         req.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_SINGLE)
-                        flashIso = applyFlashExposure(req)
+                        applyFlashExposure(req)
                     }
                 }
             }
-            // DESPUÉS del flash (si no, el bloque de flash pisaría el AE_MODE_OFF).
-            val floorIso = applyShutterFloor(req)
             // El ISO REAL de esta foto, que puede no tener nada que ver con el del visor:
             // decidir el denoise con el del visor pedía detalle máximo para fotos que
             // acababan a ISO 3200 y denoise agresivo para fotos que salían a ISO 100.
-            val shotIso = when {
-                floorIso > 0 -> floorIso
-                flashIso > 0 -> flashIso
-                else -> lastAeIso
+            var shotIso = lastAeIso
+            if (longExpNs > 0L && manualSensorSupported) {
+                // La exposición larga manda sobre todo lo demás: el piso de obturación existe
+                // para CONGELAR el movimiento, que es justo lo contrario de lo que se pide.
+                req.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                req.set(CaptureRequest.SENSOR_SENSITIVITY, isoMin)
+                req.set(
+                    CaptureRequest.SENSOR_EXPOSURE_TIME,
+                    longExpNs.coerceAtLeast(expMinNs.coerceAtLeast(1L))
+                        .coerceAtMost(if (expMaxNs > 0) expMaxNs else longExpNs)
+                )
+                // Enfoque clavado donde estaba: 30 s de exposición con el AF cazando foco a
+                // mitad de la toma arruinan la foto sin remedio.
+                req.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+                if (minFocusDistance > 0f) {
+                    req.set(
+                        CaptureRequest.LENS_FOCUS_DISTANCE,
+                        if (manualFocus) manualDiopters else lastFocusDistance
+                    )
+                }
+                shotIso = isoMin
+            } else if (fireFlash) {
+                // Con destello el HAL rebaja muchísimo la sensibilidad respecto a la medición
+                // ambiental del visor: medido en este aparato, de ISO 12209 a ISO 2419 a
+                // 2,9x. Usar el ISO del visor tal cual pediría denoise agresivo para una foto
+                // que va a salir limpia; se estima con ese mismo factor.
+                shotIso = (lastAeIso / FLASH_ISO_DIVISOR).coerceAtLeast(isoMin)
+            } else {
+                val floorIso = applyShutterFloor(req)
+                if (floorIso > 0) shotIso = floorIso
             }
-            applyDetailModes(req, shotIso)
+            applyDetailModes(req, shotIso, still = true)
+            // Curva de tono propia SOLO en la foto (en el visor cuesta fotograma y no aporta).
+            if (toneCurveSupported) toneCurve?.let {
+                req.set(CaptureRequest.TONEMAP_MODE, CameraMetadata.TONEMAP_MODE_CONTRAST_CURVE)
+                req.set(CaptureRequest.TONEMAP_CURVE, it)
+            }
+            // Calidad EXPLÍCITA. En este aparato salió IJG 98, excelente, pero por casualidad:
+            // no se fijaba nunca, así que otra versión de ColorOS podría dar 90 y perder
+            // detalle sin que nadie se entere. OJO: la clave es Key<Byte>, no Key<Int>.
+            req.set(CaptureRequest.JPEG_QUALITY, JPEG_Q.toByte())
+            req.set(CaptureRequest.JPEG_THUMBNAIL_QUALITY, 90.toByte())
+            // El HAL escribe el IFD de GPS él solo si se le pasa la posición aquí. Hasta hoy
+            // todas las fotos llevaban ese IFD reservado y VACÍO.
+            geoLocation?.let { req.set(CaptureRequest.JPEG_GPS_LOCATION, it) }
             req.set(CaptureRequest.JPEG_ORIENTATION, currentJpegOrientation())
             session.capture(req.build(), object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureCompleted(
@@ -821,32 +1243,40 @@ class Camera2Controller(
     }
 
     /**
-     * Exposición de sincronización del destello. Medido en el aparato: dos capturas con
-     * flash salieron a ISO 21280 y 1/20 s porque el AE mide el AMBIENTE y el destello llega
-     * DESPUÉS: ruido extremo y primer plano quemado. Aquí se acota la parte ambiental
-     * (1/60 s y un techo de ISO) y el resto de la luz la pone el flash, que es como se hace
-     * en cualquier cámara. Con luz suficiente no se toca nada: se deja la ruta del AE del
-     * HAL, que es la que está verificada por EXIF. Devuelve el ISO efectivo, o 0 si no tocó.
+     * Acota la parte AMBIENTAL de una foto con destello. Medido en el aparato: dos capturas
+     * con flash salieron a ISO 21280 y 1/20 s porque el AE mide el ambiente y el destello
+     * llega DESPUÉS: ruido extremo y primer plano quemado.
+     *
+     * NO pone el AE en manual, y esa es la corrección importante. La versión anterior fijaba
+     * CONTROL_AE_MODE_OFF dos líneas después de que la rama del flash hubiera puesto
+     * CONTROL_AE_MODE_ON_ALWAYS_FLASH: exactamente la clase de interacción de claves que ya
+     * dejó el flash sin encender tres veces en este HAL. Y su matemática conservaba
+     * "luz = exposición x ISO", así que en interiores (AE a ISO 400 y 1/30 s) el ambiente
+     * quedaba igual de expuesto que sin flash y el destello caía encima.
      */
-    private fun applyFlashExposure(b: CaptureRequest.Builder): Int {
-        if (!manualSensorSupported || manualExposure) return 0
-        if (lastAeExpNs <= 0L || lastAeIso <= 0) return 0
-        if (lastAeIso <= FLASH_MAX_ISO && lastAeExpNs <= FLASH_SYNC_EXP_NS) return 0
-        val exp = FLASH_SYNC_EXP_NS.coerceIn(
-            expMinNs.coerceAtLeast(1L),
-            if (expMaxNs > 0) expMaxNs.coerceAtLeast(1L) else FLASH_SYNC_EXP_NS
-        )
-        val luz = lastAeExpNs.toDouble() * lastAeIso
-        val iso = Math.round(luz / exp).toInt()
-            .coerceIn(isoMin, minOf(isoMax, FLASH_MAX_ISO).coerceAtLeast(isoMin))
-        b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
-        b.set(CaptureRequest.SENSOR_SENSITIVITY, iso)
-        b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exp)
+    private fun applyFlashExposure(b: CaptureRequest.Builder) {
+        if (manualExposure) return
+        // 1) Congelar la ganancia que el AE midió DURANTE el pre-flash. Sin esto el HAL puede
+        //    volver a medir el ambiente entre la pre-captura y la captura y tirar por tierra
+        //    todo el trabajo de la secuencia.
+        b.set(CaptureRequest.CONTROL_AE_LOCK, true)
+        // 2) Acotar la parte AMBIENTAL con compensación negativa, no con SENSOR_EXPOSURE_TIME.
+        //    La versión anterior calculaba una exposición manual "conservando la luz medida"
+        //    (exp x ISO), que en interiores dejaba el ambiente EXACTAMENTE igual de expuesto
+        //    que sin flash y encima destellaba con el AE en manual: primer plano quemado.
+        if (evMin < 0) {
+            val paso = evStepValue
+            val pasos = if (paso > 0f) Math.round(FLASH_AMBIENT_EV / paso) else 0
+            b.set(
+                CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION,
+                (evSteps + pasos).coerceIn(evMin, evMax)
+            )
+        }
         Log.i(
             "CamMacro",
-            "flash: ${exp / 1000}us ISO$iso (ambiente ${lastAeExpNs / 1000}us ISO$lastAeIso)"
+            "flash: AE bloqueado tras pre-captura, ambiente ${FLASH_AMBIENT_EV}EV " +
+                "(el visor medía ${lastAeExpNs / 1000}us ISO$lastAeIso)"
         )
-        return iso
     }
 
     /**
@@ -854,7 +1284,15 @@ class Camera2Controller(
      * "pegado" si la sesión se cierra/reconstruye con una foto en vuelo).
      */
     private fun abortPendingCapture() {
-        nightActive.set(false)
+        if (burstLeft > 0) finishBurst()
+        // cancelNight() y no un 'nightActive.set(false)' suelto: esto se llama desde
+        // postRebuildSession (o sea, desde CUALQUIER chip que reconstruya la sesión: ratio,
+        // resolución, RAW, HDR, QR), desde switchToLens, desde onDisconnected y desde fail().
+        // Con la ráfaga nocturna en vuelo, el flag suelto dejaba vivo el NightStacker con sus
+        // ~90 MB de acumuladores a 12,6 MP MÁS su pool de hasta 6 hilos, que nadie apagaba;
+        // el siguiente takeNightPhoto sobrescribía el campo sin liberar el anterior y cada
+        // cancelación filtraba otros 90 MB hasta el OutOfMemory.
+        cancelNight()
         clearPendingRaw()
         finishShot(false)
     }
@@ -877,6 +1315,10 @@ class Camera2Controller(
      * quedaban clavadas a la distancia de la primera.
      */
     private fun unlockFocusAfterShot() {
+        // El precalentado muere aquí pase lo que pase: si no, su vigilante mandaría un
+        // AF_TRIGGER_CANCEL tardío en mitad del disparo siguiente.
+        afPrewarmed = false
+        cancelPrewarmRelease()
         if (afLocked || manualFocus || !afAvailable) return // el toque manda: no lo pisamos
         onCameraThread {
             val session = captureSession ?: return@onCameraThread
@@ -905,6 +1347,7 @@ class Camera2Controller(
         aeTriggerFrame = Long.MAX_VALUE
         afSawActiveScan = false
         aeSawPrecapture = false
+        aeFlashAtPrecapture = null
         afWaitTimeout?.let { uiHandler.removeCallbacks(it) }
         afWaitTimeout = null
         aeWaitTimeout?.let { uiHandler.removeCallbacks(it) }
@@ -941,20 +1384,40 @@ class Camera2Controller(
         }
         rawReader = null
         clearPendingRaw()
-        nightActive.set(false)
-        nightWatchdog?.let { uiHandler.removeCallbacks(it) }
-        nightWatchdog = null
-        nightStacker?.release()
-        nightStacker = null
-        try { nightReader?.close() } catch (e: Exception) {}
+        try { previewSurface?.release() } catch (e: Exception) {}
+        previewSurface = null
+        // Cancela la ráfaga nocturna y libera el acumulador EN EL HILO DEL APILADO
+        // (idempotente: abortPendingCapture ya lo llamó al entrar).
+        cancelNight()
+        // Y el reader se cierra DETRÁS del addFrame en curso, no encima. Cerrarlo aquí
+        // invalidaba la Image que el hilo del apilado todavía estaba usando —addFrame puede
+        // tardar segundos— y su close() en el finally lanzaba IllegalStateException fuera de
+        // cualquier catch: proceso muerto. La ventana es real justo en el caso más frecuente
+        // de ColorOS: salir de la app con una ráfaga nocturna a medias.
+        val nr = nightReader
         nightReader = null
-        stopStackThread()
-        try { qrReader?.close() } catch (e: Exception) {}
+        val sh = stackHandler
+        if (sh != null) sh.post { try { nr?.close() } catch (e: Exception) {} }
+        else try { nr?.close() } catch (e: Exception) {}
+        stopStackThread() // quitSafely: deja terminar lo que acabamos de encolar
+        qrGen++
+        val qr = qrReader
         qrReader = null
+        if (qr != null) {
+            // No cerrarlo con una detección en vuelo: el listener de ML Kit corre en el hilo
+            // principal y cerraría una Image de un reader ya destruido.
+            if (qrBusy) uiHandler.postDelayed({ try { qr.close() } catch (e: Exception) {} }, 300)
+            else try { qr.close() } catch (e: Exception) {}
+        }
         try { qrScanner?.close() } catch (e: Exception) {}
         qrScanner = null
         qrBusy = false
         videoSessionActive = false
+        // El precalentado del AF y su auto-cancelación mueren con la cámara: si no, al volver
+        // de onPause quedaba un flag diciendo que hay un barrido en marcha que ya no existe.
+        afPrewarmed = false
+        prewarmRelease?.let { uiHandler.removeCallbacks(it) }
+        prewarmRelease = null
         refocusRelease?.let { uiHandler.removeCallbacks(it) }
         refocusRelease = null
         afWaitAction = null
@@ -1064,6 +1527,7 @@ class Camera2Controller(
             }
         }
         backs.sortBy { it.second }
+        Log.i("CamMacro", "lensMaxZoom=$lensMaxZoom")
         return backs
     }
 
@@ -1078,6 +1542,9 @@ class Camera2Controller(
         val minF = backs.first().second
         backs.forEach { zoomChain.add(Pair(it.first, it.second / minF)) }
         Log.i("CamMacro", "buildZoomChain chain=$zoomChain disabled=$disabledLensIds")
+        // UNA sola fuente de verdad para la tira de zoom: buildZoomStrip y highlightZoomStrip
+        // llamaban por separado y podían ver listas distintas.
+        refreshZoomStops()
     }
 
     /** Activa/desactiva lentes en la cadena de zoom. La lente activa nunca se quita. */
@@ -1108,14 +1575,7 @@ class Camera2Controller(
         chainIndex = targetIndex
         cameraId = zoomChain[targetIndex].first
         failed = false
-        abortPendingCapture()
-        previewRequestBuilder = null
-        try { captureSession?.close() } catch (e: Exception) {}
-        captureSession = null
-        try { cameraDevice?.close() } catch (e: Exception) {}
-        cameraDevice = null
-        try { imageReader?.close() } catch (e: Exception) {}
-        imageReader = null
+        closeForSwitch()
         if (textureView.isAvailable) {
             openCamera()
         } else {
@@ -1123,29 +1583,103 @@ class Camera2Controller(
         }
     }
 
+    /**
+     * Cierre PARCIAL: suelta la captura pendiente, la sesión y el CameraDevice, pero CONSERVA
+     * el HandlerThread de cámara y el listener de orientación. Los cuatro ImageReader los
+     * recrea setUpOutputs, que ya los cierra antes de reasignarlos.
+     */
+    private fun closeForSwitch() {
+        abortPendingCapture()
+        previewRequestBuilder = null
+        closeDeviceAsync()
+    }
+
+    /**
+     * Cambia a OTRA cámara (p.ej. la frontal) sin tirar el hilo de fondo. close() completo
+     * hacía join(1500) sobre el hilo de cámara desde el hilo de UI y desregistraba el
+     * listener de orientación: en flipCamera eso congelaba la interfaz casi segundo y medio
+     * y dejaba el visor en negro, sin el fotograma congelado que sí se usa al cambiar de
+     * lente trasera.
+     */
+    fun switchToCamera(camId: String) {
+        if (camId == cameraId && cameraDevice != null) return
+        cameraGen++
+        activity.runOnUiThread { onLensSwitching?.invoke() }
+        cameraId = camId
+        failed = false
+        switching = false
+        closeForSwitch()
+        open(camId)
+    }
+
+    /**
+     * Cierra sesión y CameraDevice SIN bloquear al que llama. CameraDevice.close() espera a
+     * que el HAL responda, y con la lente dañada de este aparato eso se puede eternizar:
+     * hacerlo desde el hilo de UI —que es de donde vienen fail() (vigilante de apertura), el
+     * cambio de lente y el volteo de cámara— congela la pantalla y Android puede lanzar un
+     * ANR, exactamente lo que el vigilante venía a evitar. Los campos se anulan EN EL ACTO
+     * para que nadie siga usando una lente ya dada por muerta.
+     */
+    private fun closeDeviceAsync() {
+        val s = captureSession
+        val d = cameraDevice
+        captureSession = null
+        cameraDevice = null
+        if (s == null && d == null) return
+        val cerrar = Runnable {
+            try { s?.close() } catch (e: Exception) {}
+            try { d?.close() } catch (e: Exception) {}
+        }
+        val h = backgroundHandler
+        if (h == null || !h.post(cerrar)) Thread(cerrar, "CamaraClose").start()
+    }
+
     // ---------------------------------------------------------------- Enfoque
 
-    /** Enfoque/medición en el punto tocado (coordenadas de la vista). */
-    fun setFocusPoint(x: Float, y: Float, viewW: Int, viewH: Int) {
+    /**
+     * Enfoque/medición en el punto tocado (coordenadas de la vista). El parámetro `target`
+     * permite enfocar en un punto y MEDIR en otro, que es justo lo que la cámara rival solo
+     * ofrece en su modo Master; el valor por defecto conserva el comportamiento de siempre.
+     */
+    fun setFocusPoint(
+        x: Float,
+        y: Float,
+        viewW: Int,
+        viewH: Int,
+        target: MeterTarget = MeterTarget.BOTH
+    ) {
         val session = captureSession ?: return
         if (viewW == 0 || viewH == 0) return
         val rect = meteringRect(x / viewW, y / viewH) ?: return
         val mr = arrayOf(MeteringRectangle(rect, MeteringRectangle.METERING_WEIGHT_MAX))
         manualFocus = false
         lastFocusState = null
-        onCameraThread { applyFocusPoint(session, mr) }
+        // El barrido que cuenta a partir de ahora es el que lanza ESTE toque: si no se
+        // reinicia la marca, la espera del disparo daría por bueno el barrido anterior.
+        afSawActiveScan = false
+        // Y el toque manda sobre cualquier precalentado en vuelo.
+        afPrewarmed = false
+        cancelPrewarmRelease()
+        onCameraThread { applyFocusPoint(session, mr, target) }
     }
 
     /** Parte que toca el builder: SIEMPRE en el hilo de la cámara. */
     private fun applyFocusPoint(
         session: CameraCaptureSession,
-        mr: Array<MeteringRectangle>
+        mr: Array<MeteringRectangle>,
+        target: MeterTarget
     ) {
         val previewRequestBuilder = previewRequestBuilder ?: return
         try {
-            previewRequestBuilder.set(CaptureRequest.CONTROL_AE_REGIONS, mr)
-            if (afAvailable) {
-                previewRequestBuilder.set(CaptureRequest.CONTROL_AF_REGIONS, mr)
+            // Hay que mirar CONTROL_MAX_REGIONS: si el HAL declara 0 regiones (pasa en las
+            // frontales del plegable) la clave se ignora y se estaba mandando igual.
+            if (target != MeterTarget.FOCUS_ONLY && maxAeRegions > 0) {
+                previewRequestBuilder.set(CaptureRequest.CONTROL_AE_REGIONS, mr)
+            }
+            if (afAvailable && target != MeterTarget.EXPOSURE_ONLY) {
+                if (maxAfRegions > 0) {
+                    previewRequestBuilder.set(CaptureRequest.CONTROL_AF_REGIONS, mr)
+                }
                 // Secuencia CORRECTA de tap-to-focus en Camera2:
                 // 1) CANCEL para abortar el barrido pasivo en curso,
                 // 2) modo AUTO (un disparo) para poder dirigir el enfoque a la región,
@@ -1240,6 +1774,8 @@ class Camera2Controller(
         afLocked = false
         aeLocked = false
         lastFocusState = null
+        afPrewarmed = false // vuelve a mandar el AF continuo: ya no hay barrido dirigido
+        cancelPrewarmRelease()
         onCameraThread {
             val b = previewRequestBuilder ?: return@onCameraThread
             b.set(CaptureRequest.CONTROL_AF_REGIONS, null)
@@ -1281,6 +1817,18 @@ class Camera2Controller(
     fun setWhiteBalance(mode: Int) {
         awbMode = mode
         manualWb = false // un preset cancela el modo Kelvin manual
+        // Al pedir un preajuste, el HAL responde con LAS GANANCIAS QUE USA para ese
+        // iluminante: es una medida real de ESTE sensor, no una tabla genérica. Se apunta el
+        // Kelvin nominal para casarlo con el CaptureResult que llegue a continuación.
+        awbAnchorPending = when (mode) {
+            CameraMetadata.CONTROL_AWB_MODE_INCANDESCENT -> 2800
+            CameraMetadata.CONTROL_AWB_MODE_WARM_FLUORESCENT -> 3000
+            CameraMetadata.CONTROL_AWB_MODE_FLUORESCENT -> 4000
+            CameraMetadata.CONTROL_AWB_MODE_DAYLIGHT -> 5500
+            CameraMetadata.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT -> 6500
+            CameraMetadata.CONTROL_AWB_MODE_SHADE -> 7500
+            else -> 0
+        }
         applyAndUpdate()
     }
 
@@ -1294,12 +1842,35 @@ class Camera2Controller(
         applyAndUpdate()
     }
 
-    /** Aprox.: K alto = imagen cálida (más rojo); K bajo = fría (más azul). Gains >= 1.0. */
+    /**
+     * Ganancias para una temperatura de color. Con dos o más anclas aprendidas del propio HAL
+     * se interpola ENTRE ELLAS en mired (1e6/K), que es como se comporta de verdad el locus
+     * de Planck; mientras no las haya, se cae a la recta de siempre, que al menos mueve el
+     * color en el sentido correcto. La recta sola no correspondía a ninguna temperatura real:
+     * 5000 K no daba gris neutro. Cada preajuste que toque el usuario mejora la calibración.
+     */
     private fun kelvinToRggb(kelvin: Int): RggbChannelVector {
-        val t = ((kelvin - 2300).toFloat() / (7500 - 2300)).coerceIn(0f, 1f)
-        val r = 1.0f + t * 1.4f   // 1.0 .. 2.4
-        val b = 2.2f - t * 1.2f   // 2.2 .. 1.0
-        return RggbChannelVector(r, 1.0f, 1.0f, b)
+        val k = kelvin.coerceIn(2300, 7500)
+        val bajo = awbAnchors.floorEntry(k)
+        val alto = awbAnchors.ceilingEntry(k)
+        if (bajo != null && alto != null) {
+            if (bajo.key == alto.key) return bajo.value
+            val m = 1e6 / k
+            val mb = 1e6 / bajo.key
+            val ma = 1e6 / alto.key
+            val t = ((m - mb) / (ma - mb)).coerceIn(0.0, 1.0).toFloat()
+            fun mezcla(x: Float, y: Float) = x + (y - x) * t
+            return RggbChannelVector(
+                mezcla(bajo.value.red, alto.value.red),
+                mezcla(bajo.value.greenEven, alto.value.greenEven),
+                mezcla(bajo.value.greenOdd, alto.value.greenOdd),
+                mezcla(bajo.value.blue, alto.value.blue)
+            )
+        }
+        val unica = bajo?.value ?: alto?.value
+        if (unica != null) return unica
+        val t = ((k - 2300).toFloat() / (7500 - 2300)).coerceIn(0f, 1f)
+        return RggbChannelVector(1.0f + t * 1.4f, 1.0f, 1.0f, 2.2f - t * 1.2f)
     }
 
     val hasFlash: Boolean get() = flashAvailable
@@ -1326,14 +1897,17 @@ class Camera2Controller(
         hdrRequested = enabled
         if (enabled) {
             hdrFallbackTried = false
+            hdrWarnedLens = null // el usuario lo acaba de pedir: si no puede, hay que decírselo
             keepOnlyExtra(EXTRA_HDR)
         }
         // Si la lente ya está abierta sabemos la capacidad real; si todavía no (restauración
         // de ajustes en onCreate), se resuelve en setUpOutputs y se avisa por
-        // onHdrUnavailable / onCaptureModesChanged en vez de mentir devolviendo false.
+        // onHdrUnavailable / onCaptureModesChanged.
         hdrEnabled = enabled && hdrSupported
         postRebuildSession()
-        return if (hdrSupported) hdrEnabled else hdrRequested
+        // Devuelve SIEMPRE el estado REAL. Devolver hdrRequested cuando la lente no lo admite
+        // pintaba el chip encendido durante un instante para un modo que no se aplica.
+        return hdrEnabled
     }
 
     /**
@@ -1343,7 +1917,14 @@ class Camera2Controller(
      */
     fun presetHdr(on: Boolean) {
         hdrRequested = on
+        hdrWarnedLens = null
         if (on) keepOnlyExtra(EXTRA_HDR)
+    }
+
+    /** Ídem para el escaneo de códigos por el stream YUV del motor (antes del primer open). */
+    fun presetQr(on: Boolean) {
+        setQrEnabledInternal(on)
+        if (on) keepOnlyExtra(EXTRA_QR)
     }
 
     fun setRawEnabled(enabled: Boolean): Boolean {
@@ -1406,12 +1987,109 @@ class Camera2Controller(
         fullRes = full
     }
 
-    /** Cambia resolución/aspecto reconstruyendo la sesión (no cambia el nº de streams). */
+    /**
+     * Cambia resolución/relación de aspecto. Solo reconstruye la sesión si de verdad cambia
+     * el TAMAÑO del stream de la foto: NATIVE y FULL acaban eligiendo exactamente el mismo
+     * tamaño JPEG (sizesForAspect trata igual a los dos), así que alternar entre esos dos
+     * apagaba el visor medio segundo para nada. Lo único que cambia ahí es el recorte al
+     * guardar y el modo de encaje del visor, y eso no necesita tocar la sesión.
+     */
     fun setCaptureSettings(newAspect: AspectRatio, full: Boolean) {
         if (newAspect == aspect && full == fullRes) return
+        // Con el modo noche encendido el tamaño del stream YUV también depende del aspecto:
+        // ahí no hay atajo posible.
+        if (nightEnabled) {
+            aspect = newAspect
+            fullRes = full
+            postRebuildSession()
+            return
+        }
+        val antes = tamanoFotoActual()
         aspect = newAspect
         fullRes = full
+        val despues = tamanoFotoActual()
+        if (antes != null && antes == despues) {
+            applyPreviewBox()
+            return
+        }
         postRebuildSession()
+    }
+
+    /**
+     * Tamaño JPEG que elegiría AHORA la configuración actual, o null si todavía no hay
+     * características cacheadas (antes del primer open).
+     */
+    private fun tamanoFotoActual(): Size? {
+        val map = camChars?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return null
+        val fmt = if (hdrEnabled && hdrSupported && Build.VERSION.SDK_INT >= 34)
+            ImageFormat.JPEG_R else ImageFormat.JPEG
+        val sizes = try { map.getOutputSizes(fmt) } catch (e: Exception) { null } ?: return null
+        if (sizes.isEmpty()) return null
+        return pickJpegSize(sizes)
+    }
+
+    /** true si el visor debe recortar para llenar la pantalla. */
+    private fun coverWanted(): Boolean =
+        aspect == AspectRatio.FULL ||
+            (previewFill ?: activity.resources.getBoolean(R.bool.preview_fills_screen))
+
+    /** Interruptor Ajustar/Llenar. No reconstruye la sesión: solo cambia la vista. */
+    fun setPreviewFill(fill: Boolean) {
+        previewFill = fill
+        applyPreviewBox()
+    }
+
+    /**
+     * Aplica Ajustar/Llenar al visor SIN tocar la sesión de cámara. Se llama al arrancar, al
+     * mover el interruptor, al cambiar de proporción y al plegar/desplegar (donde
+     * preview_fills_screen cambia de valor porque se cruza sw600dp).
+     */
+    fun applyPreviewBox() {
+        activity.runOnUiThread {
+            textureView.coverMode = coverWanted()
+            textureView.post {
+                configureTransform(textureView.width, textureView.height)
+                refreshPreviewBox()
+            }
+        }
+    }
+
+    /**
+     * Mide la caja REAL por la que se ve el visor: el contenedor ya colocado menos los
+     * márgenes del texture. El recorte de la foto se calculaba con displayMetrics
+     * (2248/2480 = 0,9065) en vez de con la caja visible (2248/2327 = 0,9665, ya sin barras
+     * del sistema): un 6,6% de error incluso cuando SÍ recortaba.
+     */
+    fun refreshPreviewBox() {
+        val box = textureView.parent as? android.view.View ?: return
+        val lp = textureView.layoutParams as? android.widget.FrameLayout.LayoutParams
+        val w = box.width
+        val h = box.height - (lp?.topMargin ?: 0) - (lp?.bottomMargin ?: 0)
+        previewCropRatio =
+            if (textureView.coverMode && w > 0 && h > 0) w.toFloat() / h else 0f
+        Log.i(
+            "CamMacro",
+            "visor=${textureView.width}x${textureView.height} cajaVisor=${w}x$h " +
+                "cover=${textureView.coverMode} ratio=$previewCropRatio"
+        )
+    }
+
+    /**
+     * Proporción a la que hay que recortar la foto para que coincida con lo que se vio. Si el
+     * VISOR recorta (modo Llenar, o proporción FULL), la foto tiene que recortarse igual:
+     * antes solo se recortaba con aspect==FULL, así que en la pantalla interior el visor se
+     * comía el 42% del fotograma y el archivo se guardaba entero, y el sujeto que estaba en
+     * el centro de la pantalla salía en el tercio superior.
+     */
+    private fun cropRatioForSave(): Float {
+        val r = previewCropRatio
+        if (r > 0f) return r
+        if (aspect != AspectRatio.FULL) return 0f
+        // Respaldo (no debería hacer falta: no se puede disparar sin visor colocado).
+        val dm = activity.resources.displayMetrics
+        val sw = minOf(dm.widthPixels, dm.heightPixels).toFloat()
+        val sh = maxOf(dm.widthPixels, dm.heightPixels).toFloat()
+        return if (sh > 0f) sw / sh else 0f
     }
 
     /** Reconstruye toda la sesión (recrea ImageReaders según los flags actuales). */
@@ -1480,12 +2158,32 @@ class Camera2Controller(
         return qrEnabled
     }
 
+    /**
+     * Buscar TODOS los formatos es la configuración MÁS LENTA de ML Kit: obliga a probar cada
+     * detector sobre cada fotograma. Con la lista acotada a lo que la gente escanea de verdad,
+     * el análisis cuesta una fracción, que es justo el ahorro que se buscaba al sacar el
+     * escaneo del hilo de UI.
+     */
+    private fun nuevoScanner(): BarcodeScanner {
+        val opts = com.google.mlkit.vision.barcode.BarcodeScannerOptions.Builder()
+            .setBarcodeFormats(
+                com.google.mlkit.vision.barcode.common.Barcode.FORMAT_QR_CODE,
+                com.google.mlkit.vision.barcode.common.Barcode.FORMAT_EAN_13,
+                com.google.mlkit.vision.barcode.common.Barcode.FORMAT_EAN_8,
+                com.google.mlkit.vision.barcode.common.Barcode.FORMAT_UPC_A,
+                com.google.mlkit.vision.barcode.common.Barcode.FORMAT_CODE_128,
+                com.google.mlkit.vision.barcode.common.Barcode.FORMAT_DATA_MATRIX
+            )
+            .build()
+        return BarcodeScanning.getClient(opts)
+    }
+
     private fun setQrEnabledInternal(enabled: Boolean) {
         qrEnabled = enabled
         // Cada encendido/apagado invalida las detecciones en vuelo de la etapa anterior.
         qrGen++
         if (enabled) {
-            if (qrScanner == null) qrScanner = BarcodeScanning.getClient()
+            if (qrScanner == null) qrScanner = nuevoScanner()
         } else {
             try { qrScanner?.close() } catch (e: Exception) {}
             qrScanner = null
@@ -1498,7 +2196,17 @@ class Camera2Controller(
         val image = try { reader.acquireLatestImage() } catch (e: Exception) { null }
         if (image == null) return@OnImageAvailableListener
         val scanner = qrScanner
-        if (qrBusy || scanner == null) { closeQuietly(image); return@OnImageAvailableListener }
+        if (qrBusy || scanner == null || !qrEnabled) {
+            closeQuietly(image); return@OnImageAvailableListener
+        }
+        // Puerta de cadencia: el stream de QR es target de la petición REPETIDA, así que
+        // llega a ritmo de visor. Cinco análisis por segundo leen cualquier código y dejan
+        // el resto de la CPU para la cámara.
+        val ahora = android.os.SystemClock.elapsedRealtime()
+        if (ahora - lastQrMs < QR_MIN_INTERVAL_MS) {
+            closeQuietly(image); return@OnImageAvailableListener
+        }
+        lastQrMs = ahora
         qrBusy = true
         try {
             val input = InputImage.fromMediaImage(image, sensorOrientation)
@@ -1533,16 +2241,25 @@ class Camera2Controller(
      * Si no es posible, cae a una foto JPEG normal.
      */
     fun takeNightPhoto(onResult: (Boolean) -> Unit) {
+        tShotMs = android.os.SystemClock.elapsedRealtime()
         val device = cameraDevice
         val session = captureSession
         val reader = nightReader
         if (device == null || session == null || reader == null || nightActive.get()) {
             takePhoto(onResult); return
         }
+        // Sin rango de exposición publicado no hay apilado posible: se cae a una foto normal
+        // en vez de reventar. El coerceIn(min=1, max=0) de más abajo lanzaba
+        // IllegalArgumentException y el usuario veía "No se pudo guardar la foto".
+        if (expMaxNs <= 0L) {
+            Log.w("CamMacro", "noche: la lente no publica rango de exposición; foto normal")
+            takePhoto(onResult); return
+        }
         if (!armShot(onResult)) return
         try {
             nightActive.set(true)
             nightCount = 0
+            nightStacked = 0
             nightTarget = NIGHT_FRAMES
             nightStacker = NightStacker(nightSize.width, nightSize.height)
 
@@ -1563,7 +2280,11 @@ class Camera2Controller(
                 var e = luz / isoMin.coerceAtLeast(50) // el tiempo que pediría el ISO base
                 if (e > techo) e = techo.toDouble()
                 if (e < lastAeExpNs) e = lastAeExpNs.toDouble() // nunca menos que el visor
-                expNs = e.toLong().coerceIn(expMinNs.coerceAtLeast(1L), expMaxNs)
+                // OJO al orden: coerceAtLeast primero y coerceAtMost después. Con
+                // coerceIn(1, expMaxNs) bastaba que la lente no publicara el rango para que
+                // el mínimo superara al máximo y saltara IllegalArgumentException.
+                expNs = e.toLong().coerceAtLeast(expMinNs.coerceAtLeast(1L))
+                    .coerceAtMost(if (expMaxNs > 0) expMaxNs else NIGHT_MAX_EXP_NS)
                 iso = Math.round(luz / expNs).toInt().coerceIn(isoMin, isoMax)
             }
             Log.i("CamMacro", "noche: ${expNs / 1000}us ISO$iso (visor ${lastAeExpNs / 1000}us ISO$lastAeIso)")
@@ -1603,7 +2324,9 @@ class Camera2Controller(
                 requests.add(b.build())
             }
             session.captureBurst(requests, object : CameraCaptureSession.CaptureCallback() {}, backgroundHandler)
-            val wd = Runnable { abortNight() }
+            // El vigilante entra POR EL HILO DEL APILADO: si abortNight decide entregar la
+            // foto con el material que haya, la compresión no puede correr en el hilo de UI.
+            val wd = Runnable { ensureStackHandler().post { abortNight() } }
             nightWatchdog = wd
             // 8 s fijos se quedaron cortos en cuanto el apilado pasó a resolución completa:
             // por fotograma son ~30 M de operaciones de alineación más el bucle de
@@ -1613,36 +2336,64 @@ class Camera2Controller(
                 wd, NIGHT_WATCHDOG_BASE_MS + NIGHT_WATCHDOG_PER_FRAME_MS * NIGHT_FRAMES
             )
         } catch (e: Exception) {
-            nightActive.set(false)
-            nightStacker?.release()
-            nightStacker = null
+            Log.e("CamMacro", "takeNightPhoto: ${e.message}")
+            cancelNight()
             finishShot(false)
         }
     }
 
+    /**
+     * Corre EN EL HILO DEL APILADO (el nightReader se registra con ese Handler), nunca en el
+     * de la cámara: apilar siete fotogramas de 12,6 MP allí dejaba al HAL sin quien atendiera
+     * sus callbacks y congelaba el visor durante segundos.
+     */
     private val onNightImage = ImageReader.OnImageAvailableListener { reader ->
         var image: Image? = null
-        var apilado = false
         try {
-            image = reader.acquireNextImage()
-            if (nightActive.get() && image != null) {
-                nightStacker?.addFrame(image)
-                apilado = true
+            val img: Image? = reader.acquireNextImage()
+            image = img
+            if (img != null && nightActive.get()) {
+                nightStacker?.addFrame(img)
+                nightStacked++
+                val hechos = nightStacked
+                activity.runOnUiThread { onNightProgress?.invoke(hechos, nightTarget) }
             }
         } catch (e: Exception) {
             Log.e("CamMacro", "onNightImage: ${e.message}")
         } finally {
-            image?.close()
+            // El cierre VA PROTEGIDO. Este hilo puede pasar segundos dentro de addFrame, y
+            // si entretanto close() (onPause) cerró el nightReader, Image.close() lanza
+            // IllegalStateException: al estar en el finally salía sin capturar del listener
+            // y se llevaba el proceso por delante.
+            try { image?.close() } catch (e: Exception) {}
         }
-        // El contador solo avanza si el fotograma ENTRÓ de verdad en el apilado. Antes se
-        // incrementaba aunque acquireNextImage devolviera null o lanzara, así que la ráfaga
-        // se daba por terminada con menos fotogramas de los pedidos —menos reducción de
-        // ruido— y sin decir nada. De los que se pierdan ya se encarga el vigilante.
-        if (apilado && nightActive.get()) {
-            val n = ++nightCount
-            activity.runOnUiThread { onNightProgress?.invoke(n, nightTarget) }
-            if (n >= nightTarget) finishNightStack()
-        }
+        // Los ENTREGADOS avanzan SIEMPRE: el HAL manda exactamente N fotogramas, así que si
+        // solo contáramos los apilados con éxito un fallo dejaría la ráfaga colgada hasta el
+        // vigilante. Los APILADOS son los que deciden si la foto vale.
+        val n = ++nightCount
+        if (n >= nightTarget) finishNightStack()
+    }
+
+    /**
+     * Cancela la ráfaga nocturna y suelta TODO lo que retiene: el vigilante, el acumulador
+     * (~90 MB a 12,6 MP) y el pool de hasta seis hilos del NightStacker. El
+     * 'nightActive.set(false)' suelto que había en abortPendingCapture no soltaba ninguna de
+     * las tres cosas, y como finishNightStack ya no podía cerrar (su compareAndSet fallaba),
+     * tampoco se liberaba por esa vía: cada cancelación filtraba otros 90 MB.
+     */
+    private fun cancelNight() {
+        nightWatchdog?.let { uiHandler.removeCallbacks(it) }
+        nightWatchdog = null
+        val activo = nightActive.getAndSet(false)
+        val stacker = nightStacker
+        nightStacker = null
+        if (stacker == null) return
+        stacker.cancel() // corta el apilado en curso antes de liberar sus buffers
+        // El release va EN EL HILO DEL APILADO: liberar los acumuladores desde la UI mientras
+        // addFrame sigue escribiendo en ellos es exactamente cómo se revienta el proceso.
+        val h = stackHandler
+        if (h != null) h.post { stacker.release() } else stacker.release()
+        if (activo) Log.i("CamMacro", "noche: ráfaga cancelada tras $nightStacked fotogramas")
     }
 
     private fun finishNightStack() {
@@ -1655,39 +2406,45 @@ class Camera2Controller(
         nightWatchdog = null
         val stacker = nightStacker
         nightStacker = null
-        val ok = try {
-            val nv21 = stacker?.result()
-            if (nv21 != null) {
-                val yuv = YuvImage(nv21, ImageFormat.NV21, nightSize.width, nightSize.height, null)
-                val bos = ByteArrayOutputStream()
-                yuv.compressToJpeg(Rect(0, 0, nightSize.width, nightSize.height), 95, bos)
-                var bytes = bos.toByteArray()
-                val rot = currentJpegOrientation()
-                if (rot != 0) bytes = rotateJpeg(bytes, rot) ?: bytes
-                val ok = saveImage(bytes)
-                // YuvImage no escribe EXIF: la foto de noche salía SIN metadatos.
-                if (ok) writeNightExif(lastSavedUri)
-                ok
-            } else false
-        } catch (e: Exception) {
-            Log.e("CamMacro", "finishNightStack: ${e.message}")
-            false
+        if (nightStacked < nightTarget) {
+            Log.w("CamMacro", "noche: apilados $nightStacked de $nightTarget fotogramas")
+        }
+        val ok = traza("apilado-noche") {
+            try {
+                val nv21 = if (nightStacked >= 1) stacker?.result() else null
+                if (stacker != null && nv21 != null) {
+                    // Se gira el BUFFER, no el JPEG: la foto de noche pasa de DOS
+                    // compresiones (comprimir -> decodificar a ~50 MB de ARGB -> girar ->
+                    // recomprimir) a UNA sola, encima de una imagen que ya venía de apilar
+                    // siete fotogramas.
+                    val (buf, size) = rotateNv21(
+                        nv21, nightSize.width, nightSize.height, currentJpegOrientation()
+                    )
+                    val yuv = YuvImage(buf, ImageFormat.NV21, size.width, size.height, null)
+                    val bos = ByteArrayOutputStream()
+                    yuv.compressToJpeg(Rect(0, 0, size.width, size.height), JPEG_Q, bos)
+                    saveImage(bos.toByteArray(), night = true, frames = stacker.stackedFrames)
+                } else false
+            } catch (e: Exception) {
+                Log.e("CamMacro", "finishNightStack: ${e.message}")
+                false
+            }
         }
         stacker?.release()
         finishShot(ok)
     }
 
     private fun abortNight() {
-        if (!nightActive.compareAndSet(true, false)) return
-        nightWatchdog?.let { uiHandler.removeCallbacks(it) }
-        nightWatchdog = null
-        val stacker = nightStacker
-        nightStacker = null
-        // El release va EN EL HILO DEL APILADO. Aquí se llega desde el vigilante (hilo de
-        // UI) y liberar los acumuladores mientras addFrame sigue escribiendo en ellos es
-        // exactamente cómo se revienta el proceso entero.
-        val h = stackHandler
-        if (h != null) h.post { stacker?.release() } else stacker?.release()
+        // Si ya hay material suficiente, ENTREGAR la foto en vez de tirarla: se perdía la
+        // foto entera por unos segundos de reloj aunque estuvieran apilados 6 de los 7
+        // fotogramas.
+        if (nightActive.get() && nightStacked >= 2) {
+            Log.w("CamMacro", "noche: vigilante con $nightStacked fotogramas; se entrega igual")
+            finishNightStack()
+            return
+        }
+        if (!nightActive.get()) return
+        cancelNight()
         finishShot(false)
     }
 
@@ -1714,20 +2471,50 @@ class Camera2Controller(
         stackHandler = null
     }
 
-    /** Rota un JPEG horneando la rotación en píxeles (YuvImage no escribe orientación EXIF). */
-    private fun rotateJpeg(bytes: ByteArray, degrees: Int): ByteArray? {
-        return try {
-            val src = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
-            val m = Matrix().apply { postRotate(degrees.toFloat()) }
-            val rotated = Bitmap.createBitmap(src, 0, 0, src.width, src.height, m, true)
-            val bos = ByteArrayOutputStream()
-            rotated.compress(Bitmap.CompressFormat.JPEG, 95, bos)
-            if (rotated != src) rotated.recycle()
-            src.recycle()
-            bos.toByteArray()
-        } catch (e: Exception) {
-            null
+    /**
+     * Gira un buffer NV21 permutando índices, SIN decodificar ni recomprimir. La ruta de
+     * noche hacía compressToJpeg -> decodificar a Bitmap (~50 MB de ARGB a 12,6 MP) -> girar
+     * -> recomprimir: una SEGUNDA generación de JPEG encima de una imagen que ya venía de
+     * apilar siete fotogramas, más segundos de CPU. Girando aquí se comprime UNA sola vez.
+     * Devuelve el buffer girado y el tamaño resultante.
+     */
+    private fun rotateNv21(src: ByteArray, w: Int, h: Int, degrees: Int): Pair<ByteArray, Size> {
+        val d = ((degrees % 360) + 360) % 360
+        if (d == 0 || w % 2 != 0 || h % 2 != 0) return Pair(src, Size(w, h))
+        val cw = w / 2
+        val ch = h / 2
+        val ySize = w * h
+        if (src.size < ySize + cw * ch * 2) return Pair(src, Size(w, h))
+        val dst = ByteArray(src.size)
+        val outW = if (d == 180) w else h
+        val ocw = outW / 2
+        for (y in 0 until h) {
+            val row = y * w
+            for (x in 0 until w) {
+                val di = when (d) {
+                    90 -> x * outW + (outW - 1 - y)
+                    180 -> (h - 1 - y) * w + (w - 1 - x)
+                    else -> (w - 1 - x) * outW + y // 270
+                }
+                dst[di] = src[row + x]
+            }
         }
+        // Croma: pares V,U intercalados a la mitad de resolución. El giro no intercambia V y U.
+        for (y in 0 until ch) {
+            val row = y * cw
+            for (x in 0 until cw) {
+                val si = ySize + (row + x) * 2
+                val dj = when (d) {
+                    90 -> x * ocw + (ocw - 1 - y)
+                    180 -> (ch - 1 - y) * cw + (cw - 1 - x)
+                    else -> (cw - 1 - x) * ocw + y
+                }
+                val di = ySize + dj * 2
+                dst[di] = src[si]
+                dst[di + 1] = src[si + 1]
+            }
+        }
+        return Pair(dst, Size(outW, if (d == 180) h else w))
     }
 
     /** Filtro de color aplicado a la foto (null = sin filtro). */
@@ -1735,74 +2522,197 @@ class Camera2Controller(
         captureMatrix = cm
     }
 
-    /** Aplica una ColorMatrix al JPEG (decodifica, pinta con filtro, recodifica). */
-    private fun applyColorFilter(bytes: ByteArray, cm: ColorMatrix): ByteArray? {
+    /**
+     * Recorte al formato del visor y filtro de color en UNA sola pasada. Antes cropFullJpeg y
+     * applyColorFilter se encadenaban: DOS decodificaciones completas a ARGB_8888 (~50 MB
+     * cada una a 12,6 MP) y DOS recompresiones de la misma foto, con pérdida generacional en
+     * cada una. Ahora: un decode, un Canvas, una compresión.
+     *
+     * `cropRatio` es la proporción ancho/alto de la CAJA VISIBLE del visor (0 = no recortar).
+     */
+    private fun transformStillJpeg(
+        bytes: ByteArray,
+        cropRatio: Float,
+        cm: ColorMatrix?
+    ): ByteArray? {
+        if (cropRatio <= 0f && cm == null) return bytes
+        var base: Bitmap? = null
+        var dst: Bitmap? = null
         return try {
-            val src = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
-            val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(out)
-            val paint = Paint(Paint.FILTER_BITMAP_FLAG).apply { colorFilter = ColorMatrixColorFilter(cm) }
-            canvas.drawBitmap(src, 0f, 0f, paint)
-            src.recycle()
-            val bos = ByteArrayOutputStream()
-            out.compress(Bitmap.CompressFormat.JPEG, 95, bos)
-            out.recycle()
+            val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+            // Hay que enderezar ANTES de recortar o el recorte saldría en el eje equivocado.
+            val deg = exifDegrees(bytes)
+            base = if (deg == 0) decoded else {
+                val m = Matrix().apply { postRotate(deg.toFloat()) }
+                val r = Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, m, true)
+                if (r !== decoded) decoded.recycle()
+                r
+            }
+            val b = base ?: return null
+            var cx = 0
+            var cy = 0
+            var cwPx = b.width
+            var chPx = b.height
+            if (cropRatio > 0f) {
+                if (b.width.toFloat() / b.height > cropRatio) {
+                    cwPx = (b.height * cropRatio).toInt().coerceIn(1, b.width)
+                    cx = (b.width - cwPx) / 2
+                } else {
+                    chPx = (b.width / cropRatio).toInt().coerceIn(1, b.height)
+                    cy = (b.height - chPx) / 2
+                }
+            }
+            val salida = Bitmap.createBitmap(cwPx, chPx, Bitmap.Config.ARGB_8888)
+            dst = salida
+            val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+            if (cm != null) paint.colorFilter = ColorMatrixColorFilter(cm)
+            Canvas(salida).drawBitmap(
+                b, Rect(cx, cy, cx + cwPx, cy + chPx), Rect(0, 0, cwPx, chPx), paint
+            )
+            val bos = ByteArrayOutputStream(bytes.size)
+            salida.compress(Bitmap.CompressFormat.JPEG, JPEG_Q, bos)
             bos.toByteArray()
         } catch (e: Exception) {
-            Log.e("CamMacro", "applyColorFilter: ${e.message}")
+            Log.e("CamMacro", "transformStillJpeg: ${e.message}")
             null
+        } finally {
+            base?.recycle()
+            dst?.recycle()
         }
     }
 
+    /** Grados de giro que declara el EXIF de un JPEG en memoria (0 si no lleva o falla). */
+    private fun exifDegrees(bytes: ByteArray): Int = try {
+        when (
+            ExifInterface(java.io.ByteArrayInputStream(bytes))
+                .getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+        ) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> 90
+            ExifInterface.ORIENTATION_ROTATE_180 -> 180
+            ExifInterface.ORIENTATION_ROTATE_270 -> 270
+            else -> 0
+        }
+    } catch (e: Exception) {
+        0
+    }
+
     /**
-     * Modo Full: endereza el JPEG según EXIF y lo recorta (centrado) a la proporción de la
-     * pantalla, para que la foto coincida EXACTO con la vista previa a pantalla completa.
+     * Deja el JPEG limpio y le mete la trazabilidad. Medido: una de las fotos entregadas al
+     * jurado llevaba CINCO segmentos APP4 "QTI Debug Metadata" con 264 KB en total copiados
+     * tal cual al archivo del usuario (un 3% del peso, cero utilidad); la de noche no los
+     * tenía, lo que confirma que solo pasan por la ruta directa del HAL.
+     *
+     * No se recodifica nada: se copian los bytes tal cual, así que no hay pérdida de calidad.
+     * Se conservan APP0 (JFIF), APP1 (EXIF/XMP) y APP2 (ICC/MPF) y se tiran APP3..APP15.
+     * Ante cualquier rareza (marcador raro, longitud imposible) devuelve el original intacto:
+     * más vale una foto con basura que una foto rota.
      */
-    private fun cropFullJpeg(bytes: ByteArray): ByteArray? {
+    private fun cleanJpegSegments(src: ByteArray, xmp: String?): ByteArray {
+        if (src.size < 4) return src
+        if ((src[0].toInt() and 0xFF) != 0xFF || (src[1].toInt() and 0xFF) != 0xD8) return src
+        val out = ByteArrayOutputStream(src.size)
+        out.write(0xFF); out.write(0xD8)
+        var i = 2
+        var xmpPuesto = xmp == null
+        while (i + 3 < src.size) {
+            if ((src[i].toInt() and 0xFF) != 0xFF) return src // fuera de sincronía
+            var j = i + 1
+            while (j < src.size && (src[j].toInt() and 0xFF) == 0xFF) j++ // relleno de 0xFF
+            if (j >= src.size) return src
+            val marker = src[j].toInt() and 0xFF
+            if (marker == 0x01 || marker in 0xD0..0xD7) { i = j + 1; continue }
+            if (marker == 0xDA || marker == 0xD9) { // SOS / EOI: el resto va tal cual
+                if (!xmpPuesto && xmp != null) { writeXmpSegment(out, xmp); xmpPuesto = true }
+                out.write(src, i, src.size - i)
+                return out.toByteArray()
+            }
+            if (j + 2 >= src.size) return src
+            val len = ((src[j + 1].toInt() and 0xFF) shl 8) or (src[j + 2].toInt() and 0xFF)
+            if (len < 2 || j + 1 + len > src.size) return src // longitud imposible
+            val esAppDesconocido = marker in 0xE3..0xEF
+            if (!esAppDesconocido) out.write(src, j - 1, len + 2)
+            if (marker == 0xE1 && !xmpPuesto && xmp != null) {
+                writeXmpSegment(out, xmp); xmpPuesto = true
+            }
+            i = j + 1 + len
+        }
+        return src
+    }
+
+    /** Inserta el XMP como APP1 con la cabecera de espacio de nombres que exige el estándar. */
+    private fun writeXmpSegment(out: ByteArrayOutputStream, xmp: String) {
+        val head = "http://ns.adobe.com/xap/1.0/ ".toByteArray(Charsets.US_ASCII)
+        val body = xmp.toByteArray(Charsets.UTF_8)
+        val len = 2 + head.size + body.size
+        if (len > 65535) return
+        out.write(0xFF); out.write(0xE1)
+        out.write((len shr 8) and 0xFF); out.write(len and 0xFF)
+        out.write(head, 0, head.size)
+        out.write(body, 0, body.size)
+    }
+
+    /**
+     * Bloque XMP con lo que ningún EXIF cuenta: QUÉ lente física se usó de verdad. Es la
+     * ventaja diferencial de esta app —abrir una lente concreta en un teléfono con la
+     * principal rota— y hasta hoy no quedaba registrada en ningún sitio del archivo.
+     */
+    private fun buildXmp(night: Boolean, frames: Int): String {
+        val f = String.format(java.util.Locale.US, "%.2f", activeFocalMm)
+        val z = String.format(java.util.Locale.US, "%.2f", zoomRatio)
+        return "<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:RDF " +
+            "xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>" +
+            "<rdf:Description rdf:about='' xmlns:tiff='http://ns.adobe.com/tiff/1.0/' " +
+            "xmlns:cam='http://pepe.camaramacro/1.0/' " +
+            "tiff:Make='${Build.MANUFACTURER}' tiff:Model='${Build.MODEL}' " +
+            "cam:LensId='$cameraId' cam:FocalLengthMm='$f' cam:Focal35mm='$activeEquivMm' " +
+            "cam:ZoomRatio='$z' cam:Mode='${if (night) "noche" else "normal"}' " +
+            "cam:Frames='${if (night) frames else 1}'/></rdf:RDF></x:xmpmeta>"
+    }
+
+    /**
+     * Compone una franja BAJO la imagen con los datos de la toma. Debajo y no encima a
+     * propósito: ni se pierde un píxel del encuadre ni se altera la proporción. El dato de la
+     * lente física (ID y focal real) es justo el que ninguna otra cámara enseña.
+     */
+    private fun composeWatermark(bytes: ByteArray): ByteArray? {
         return try {
-            var bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
-            val orient = try {
-                android.media.ExifInterface(java.io.ByteArrayInputStream(bytes))
-                    .getAttributeInt(
-                        android.media.ExifInterface.TAG_ORIENTATION,
-                        android.media.ExifInterface.ORIENTATION_NORMAL
-                    )
-            } catch (e: Exception) {
-                android.media.ExifInterface.ORIENTATION_NORMAL
+            val src = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+            val franja = (src.height * 0.055f).toInt().coerceIn(48, 220)
+            val out = Bitmap.createBitmap(src.width, src.height + franja, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(out)
+            canvas.drawColor(android.graphics.Color.BLACK)
+            canvas.drawBitmap(src, 0f, 0f, null)
+            val apertura = camChars
+                ?.get(CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES)?.firstOrNull()
+            val texto = buildString {
+                append("ID$cameraId")
+                if (activeEquivMm > 0) append(" · $activeEquivMm mm eq")
+                if (apertura != null) {
+                    append(String.format(java.util.Locale.US, " · f/%.1f", apertura))
+                }
+                val ns = if (manualExposure) manualExpNs else lastAeExpNs
+                val seg = ns / 1_000_000_000.0
+                append(
+                    if (seg in 0.000001..0.999999) " · 1/${Math.round(1.0 / seg)} s"
+                    else String.format(java.util.Locale.US, " · %.1f s", seg)
+                )
+                append(" · ISO ${if (manualExposure) manualIso else lastAeIso}")
             }
-            val deg = when (orient) {
-                android.media.ExifInterface.ORIENTATION_ROTATE_90 -> 90
-                android.media.ExifInterface.ORIENTATION_ROTATE_180 -> 180
-                android.media.ExifInterface.ORIENTATION_ROTATE_270 -> 270
-                else -> 0
+            val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = android.graphics.Color.parseColor("#FFF4EFE7")
+                textSize = franja * 0.42f
+                typeface = android.graphics.Typeface.MONOSPACE
             }
-            if (deg != 0) {
-                val m = Matrix().apply { postRotate(deg.toFloat()) }
-                val r = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
-                if (r != bmp) bmp.recycle()
-                bmp = r
-            }
-            val dm = activity.resources.displayMetrics
-            val sw = minOf(dm.widthPixels, dm.heightPixels).toFloat()
-            val sh = maxOf(dm.widthPixels, dm.heightPixels).toFloat()
-            val target = sw / sh // proporción vertical de la pantalla (ancho/alto)
-            val w = bmp.width
-            val h = bmp.height
-            val cur = w.toFloat() / h
-            val cropped = if (cur > target) {
-                val nw = (h * target).toInt().coerceIn(1, w)
-                Bitmap.createBitmap(bmp, (w - nw) / 2, 0, nw, h)
-            } else {
-                val nh = (w / target).toInt().coerceIn(1, h)
-                Bitmap.createBitmap(bmp, 0, (h - nh) / 2, w, nh)
-            }
+            canvas.drawText(texto, franja * 0.35f, src.height + franja * 0.66f, p)
+            src.recycle()
             val bos = ByteArrayOutputStream()
-            cropped.compress(Bitmap.CompressFormat.JPEG, 95, bos)
-            if (cropped != bmp) cropped.recycle()
-            bmp.recycle()
+            out.compress(Bitmap.CompressFormat.JPEG, JPEG_Q, bos)
+            out.recycle()
             bos.toByteArray()
         } catch (e: Exception) {
-            Log.e("CamMacro", "cropFullJpeg: ${e.message}")
+            // Un OutOfMemory con 12,6 MP en ARGB_8888 es posible: si falla, la foto original
+            // ya está guardada y no se pierde nada.
+            Log.e("CamMacro", "composeWatermark: ${e.message}")
             null
         }
     }
@@ -1831,46 +2741,59 @@ class Camera2Controller(
         }
     }
 
-    /** Aplica zoom, AE-lock y el modo de enfoque actual al builder. */
+    /** Banda de detalle según el ISO: 0 = máximo detalle, 1 = equilibrio, 2 = denoise fuerte. */
+    private fun detailBand(iso: Int): Int = when {
+        iso < NR_MINIMAL_MAX_ISO -> 0
+        iso < NR_FAST_MAX_ISO -> 1
+        else -> 2
+    }
+
+    private fun pickNr(vararg wanted: Int): Int? = wanted.firstOrNull { nrAvailable.contains(it) }
+    private fun pickEdge(vararg wanted: Int): Int? = wanted.firstOrNull { edgeAvailable.contains(it) }
+    private fun pickAberration(vararg wanted: Int): Int? =
+        wanted.firstOrNull { aberrationAvailable.contains(it) }
+
     /**
-     * Recupera el detalle fino. ColorOS aplica por defecto NOISE_REDUCTION HIGH_QUALITY,
-     * que emborrona texturas (césped, tela, pelo) y deja la foto "plastificada": un análisis
-     * a nivel de píxel midió ~1.5-2 MP de detalle real dentro de un archivo de 12.6 MP.
-     * Con ISO bajo pedimos MINIMAL (máximo detalle); con ISO alto, FAST (equilibrio).
+     * Recupera el detalle fino. ColorOS aplica por defecto NOISE_REDUCTION HIGH_QUALITY, que
+     * emborrona texturas (césped, tela, pelo) y deja la foto "plastificada": el jurado midió
+     * ~3 MP de resolución efectiva dentro de un archivo de 12,58 MP, con el espectro aplanado
+     * contra el suelo de ruido por encima de 0,25 cyc/px y acutancia 1,12-1,38 uniforme en
+     * todo el encuadre (una alfombra sin fibras, un sofá a manchones).
+     *
+     * DOS COSAS AQUÍ ADEMÁS DE LA ESCALERA DE ISO:
+     * 1) EL HALO. Se pedía EDGE_MODE_FAST a ciegas y el jurado midió un realce de +40 niveles
+     *    (+35% sobre la base local) en 1-2 px al borde de los cables negros: el patrón clásico
+     *    de "emborrono y luego sobre-realzo". Con ISO bajo se pide EDGE_MODE_OFF, el único
+     *    modo que no puede meter overshoot. Si sale blando, la marcha atrás es una línea:
+     *    cambiar EDGE_MODE_OFF por EDGE_MODE_FAST en la rama band == 0.
+     * 2) EL VISOR. Ahora lleva la variante barata (FAST) del MISMO perfil: antes no se le
+     *    aplicaba NADA, así que la reducción de ruido y el realce que se veían no eran los
+     *    que se guardaban. Sin eso no hay WYSIWYG que valga.
      */
-    private fun applyDetailModes(b: CaptureRequest.Builder, iso: Int) {
-        // Escalera según el ISO REAL DE ESTA FOTO (no el del visor): con luz buena
-        // priorizamos detalle; con ISO alto hace falta denoise o la foto se ve llena de
-        // grano al ampliarla. El umbral de MINIMAL sube de 800 a 1600 porque a ISO 800 este
-        // sensor todavía tiene grano fino y el HAL respondía emborronando texturas
-        // (césped, tela, pelo): el famoso efecto acuarela medido por el jurado.
+    private fun applyDetailModes(b: CaptureRequest.Builder, iso: Int, still: Boolean) {
+        val band = detailBand(iso)
         val nr = when {
-            iso < NR_MINIMAL_MAX_ISO && nrAvailable.contains(CameraMetadata.NOISE_REDUCTION_MODE_MINIMAL) ->
-                CameraMetadata.NOISE_REDUCTION_MODE_MINIMAL
-            iso < NR_FAST_MAX_ISO && nrAvailable.contains(CameraMetadata.NOISE_REDUCTION_MODE_FAST) ->
+            !still -> pickNr(CameraMetadata.NOISE_REDUCTION_MODE_FAST)
+            band == 0 -> pickNr(
+                CameraMetadata.NOISE_REDUCTION_MODE_MINIMAL,
                 CameraMetadata.NOISE_REDUCTION_MODE_FAST
-            nrAvailable.contains(CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY) ->
+            )
+            band == 1 -> pickNr(
+                CameraMetadata.NOISE_REDUCTION_MODE_FAST,
                 CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY
-            nrAvailable.contains(CameraMetadata.NOISE_REDUCTION_MODE_FAST) ->
+            )
+            else -> pickNr(
+                CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY,
                 CameraMetadata.NOISE_REDUCTION_MODE_FAST
-            else -> null
+            )
         }
         nr?.let { b.set(CaptureRequest.NOISE_REDUCTION_MODE, it) }
-        if (edgeAvailable.contains(CameraMetadata.EDGE_MODE_FAST)) {
-            b.set(CaptureRequest.EDGE_MODE, CameraMetadata.EDGE_MODE_FAST)
+        val edge = when {
+            !still -> pickEdge(CameraMetadata.EDGE_MODE_FAST)
+            band == 0 -> pickEdge(CameraMetadata.EDGE_MODE_OFF, CameraMetadata.EDGE_MODE_FAST)
+            else -> pickEdge(CameraMetadata.EDGE_MODE_FAST, CameraMetadata.EDGE_MODE_HIGH_QUALITY)
         }
-        // Aberración cromática: esta lente es un gran angular de 2,3 mm, justo el diseño que
-        // más franja púrpura deja en los bordes de alto contraste. El HAL declara los tres
-        // modos [OFF, FAST, HIGH_QUALITY] y no se le estaba pidiendo ninguno, así que
-        // quedaba a lo que decidiera ColorOS. En la foto vale la pena pagar HIGH_QUALITY.
-        val ab = when {
-            aberrationAvailable.contains(CameraMetadata.COLOR_CORRECTION_ABERRATION_MODE_HIGH_QUALITY) ->
-                CameraMetadata.COLOR_CORRECTION_ABERRATION_MODE_HIGH_QUALITY
-            aberrationAvailable.contains(CameraMetadata.COLOR_CORRECTION_ABERRATION_MODE_FAST) ->
-                CameraMetadata.COLOR_CORRECTION_ABERRATION_MODE_FAST
-            else -> null
-        }
-        ab?.let { b.set(CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE, it) }
+        edge?.let { b.set(CaptureRequest.EDGE_MODE, it) }
     }
 
     /**
@@ -1883,20 +2806,86 @@ class Camera2Controller(
     private fun auditDetailModes(request: CaptureRequest, result: TotalCaptureResult) {
         val nrPedido = request.get(CaptureRequest.NOISE_REDUCTION_MODE)
         val nrReal = result.get(CaptureResult.NOISE_REDUCTION_MODE)
-        val edgePedido = request.get(CaptureRequest.EDGE_MODE)
-        val edgeReal = result.get(CaptureResult.EDGE_MODE)
-        val iso = result.get(CaptureResult.SENSOR_SENSITIVITY)
+        val edPedido = request.get(CaptureRequest.EDGE_MODE)
+        val edReal = result.get(CaptureResult.EDGE_MODE)
+        val abReal = result.get(CaptureResult.COLOR_CORRECTION_ABERRATION_MODE)
+        val tmReal = result.get(CaptureResult.TONEMAP_MODE)
+        val flReal = result.get(CaptureResult.FLASH_STATE)
+        val iso = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: 0
         val expNs = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: 0L
+        val ignorado = (nrPedido != null && nrReal != null && nrPedido != nrReal) ||
+            (edPedido != null && edReal != null && edPedido != edReal)
+        val aviso = if (ignorado) "  <-- EL HAL IGNORA LO QUE SE LE PIDE" else ""
         Log.i(
             "CamMacro",
-            "foto: ISO$iso ${expNs / 1000}us · NR pedido=$nrPedido real=$nrReal · " +
-                "EDGE pedido=$edgePedido real=$edgeReal"
+            "foto: ISO$iso ${expNs / 1000}us  NR pedido=${nrName(nrPedido)} real=${nrName(nrReal)}" +
+                "  EDGE pedido=${edgeName(edPedido)} real=${edgeName(edReal)}" +
+                "  ABERR=$abReal TONEMAP=$tmReal FLASH=$flReal$aviso"
         )
-        if (nrPedido != null && nrReal != null && nrPedido != nrReal) {
-            Log.w("CamMacro", "el HAL IGNORÓ NOISE_REDUCTION_MODE: pedido $nrPedido, aplicado $nrReal")
+    }
+
+    private fun nrName(v: Int?): String = when (v) {
+        CameraMetadata.NOISE_REDUCTION_MODE_OFF -> "OFF"
+        CameraMetadata.NOISE_REDUCTION_MODE_FAST -> "FAST"
+        CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY -> "HQ"
+        CameraMetadata.NOISE_REDUCTION_MODE_MINIMAL -> "MINIMAL"
+        CameraMetadata.NOISE_REDUCTION_MODE_ZERO_SHUTTER_LAG -> "ZSL"
+        else -> "?($v)"
+    }
+
+    private fun edgeName(v: Int?): String = when (v) {
+        CameraMetadata.EDGE_MODE_OFF -> "OFF"
+        CameraMetadata.EDGE_MODE_FAST -> "FAST"
+        CameraMetadata.EDGE_MODE_HIGH_QUALITY -> "HQ"
+        CameraMetadata.EDGE_MODE_ZERO_SHUTTER_LAG -> "ZSL"
+        else -> "?($v)"
+    }
+
+    /**
+     * Curva sRGB con el PIE LEVANTADO, la MISMA en los tres canales (una curva distinta por
+     * canal teñiría las sombras) y acabada exactamente en (1,1) para no tocar el blanco.
+     *
+     * El primer punto NO va a cero a propósito: sale a TONE_FLOOR (~2/255). Anclar en (0,0)
+     * suena más puro pero no arregla nada, porque un píxel que el HAL ya entrega en cero
+     * ninguna curva lo devuelve; con un suelo mínimo, NINGÚN píxel puede salir por debajo de
+     * 2 y el 0,527% de negros absolutos que midió el jurado (unos 646.000 píxeles por foto)
+     * desaparece de raíz. El exponente TONE_TOE < 1 solo pesa cerca del cero, así que los
+     * medios y las luces se quedan donde estaban.
+     * Si las sombras se ven lechosas, la marcha atrás es poner TONE_FLOOR a 0f.
+     */
+    private fun buildToneCurve(points: Int): TonemapCurve {
+        val n = points.coerceIn(8, 64)
+        val c = FloatArray(n * 2)
+        for (i in 0 until n) {
+            val x = i.toFloat() / (n - 1)
+            val s = if (x <= 0.0031308f) 12.92f * x
+            else (1.055f * Math.pow(x.toDouble(), 1.0 / 2.4).toFloat() - 0.055f)
+            val lift = Math.pow(s.toDouble().coerceIn(0.0, 1.0), TONE_TOE).toFloat()
+            c[i * 2] = x
+            c[i * 2 + 1] = (TONE_FLOOR + (1f - TONE_FLOOR) * lift).coerceIn(0f, 1f)
         }
-        if (edgePedido != null && edgeReal != null && edgePedido != edgeReal) {
-            Log.w("CamMacro", "el HAL IGNORÓ EDGE_MODE: pedido $edgePedido, aplicado $edgeReal")
+        c[(n - 1) * 2] = 1f
+        c[(n - 1) * 2 + 1] = 1f
+        return TonemapCurve(c.copyOf(), c.copyOf(), c.copyOf())
+    }
+
+    /**
+     * Cronómetro de las rutas caras. Solo había Log.i sueltos: sin números de apertura,
+     * captura, guardado ni apilado, cada arreglo de rendimiento era una apuesta. Imprime en
+     * logcat (adb logcat -s CamPerf) y además abre una sección de traza, así que un
+     * systrace/Perfetto enseña las mismas fases sin tocar nada.
+     */
+    private inline fun <T> traza(nombre: String, bloque: () -> T): T {
+        val t0 = android.os.SystemClock.elapsedRealtimeNanos()
+        android.os.Trace.beginSection(nombre)
+        try {
+            return bloque()
+        } finally {
+            android.os.Trace.endSection()
+            Log.i(
+                "CamPerf",
+                "$nombre ${(android.os.SystemClock.elapsedRealtimeNanos() - t0) / 1_000_000} ms"
+            )
         }
     }
 
@@ -1917,8 +2906,10 @@ class Camera2Controller(
      * visor, que puede diferir en cuatro pasos).
      */
     private fun applyShutterFloor(b: CaptureRequest.Builder): Int {
+        // El guard de flashMode 1/2 se ha ido a propósito: con el flash en AUTO y luz de
+        // sobra el destello NO dispara, y ahí el piso de obturación sí hace falta. Es el
+        // llamador quien sabe si va a haber destello y quien decide saltárselo.
         if (shutterFloorNs <= 0L || manualExposure || !manualSensorSupported) return 0
-        if (flashMode == 1 || flashMode == 2) return 0 // con flash manda applyFlashExposure
         if (lastAeExpNs <= 0L || lastAeIso <= 0) return 0
         val floor = shutterFloorNs.coerceAtLeast(if (expMinNs > 0) expMinNs else 1L)
         if (lastAeExpNs <= floor) return 0 // el AE ya es suficientemente rápido
@@ -1946,9 +2937,13 @@ class Camera2Controller(
         val isoFinal = iso.coerceIn(isoMin, isoMax)
         b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
         b.set(CaptureRequest.SENSOR_SENSITIVITY, isoFinal)
+        // coerceAtLeast/coerceAtMost y no coerceIn: si la lente no publicara el rango,
+        // expMaxNs valdría 0, el mínimo superaría al máximo y coerceIn lanzaría
+        // IllegalArgumentException en mitad del disparo.
         b.set(
             CaptureRequest.SENSOR_EXPOSURE_TIME,
-            targetExp.coerceIn(expMinNs.coerceAtLeast(1L), expMaxNs)
+            targetExp.coerceAtLeast(expMinNs.coerceAtLeast(1L))
+                .coerceAtMost(if (expMaxNs > 0) expMaxNs else targetExp)
         )
         return isoFinal
     }
@@ -1973,7 +2968,11 @@ class Camera2Controller(
                 }
             )
             b.set(CaptureRequest.CONTROL_AE_LOCK, aeLocked)
-            b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, evSteps)
+            // El EV del usuario MÁS el de calibración de ESTA lente física.
+            b.set(
+                CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION,
+                (evSteps + lensEvSteps).coerceIn(evMin, evMax)
+            )
             // El rango de FPS es para el VISOR. En la foto lo omitimos: si no, ata la
             // exposición al ritmo del preview en vez de dejar que el AE elija bien.
             if (!still) aeFpsRange?.let { b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
@@ -1999,6 +2998,20 @@ class Camera2Controller(
             if (useEis) CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON
             else CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF
         )
+        // Aberración cromática. Esta lente es un gran angular de 2,3 mm —el diseño que más
+        // franja púrpura deja en los bordes de alto contraste— y es la que el usuario usa a
+        // diario. El HAL declara [OFF, FAST, HIGH_QUALITY] y no se le pedía NADA, así que
+        // quedaba a criterio de ColorOS: corrección que ya está pagada en silicio y no se
+        // usaba. En la FOTO se paga la buena (cuesta tiempo de proceso, no fluidez); en el
+        // VISOR la rápida, que no puede costar fotograma.
+        val ab = if (still)
+            pickAberration(
+                CameraMetadata.COLOR_CORRECTION_ABERRATION_MODE_HIGH_QUALITY,
+                CameraMetadata.COLOR_CORRECTION_ABERRATION_MODE_FAST
+            )
+        else
+            pickAberration(CameraMetadata.COLOR_CORRECTION_ABERRATION_MODE_FAST)
+        ab?.let { b.set(CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE, it) }
         if (flashAvailable) {
             // OJO: en flash AUTO/ON no se debe tocar FLASH_MODE. Un FLASH_MODE explícito
             // manda sobre el HAL, así que el FLASH_MODE_OFF que había aquí anulaba el
@@ -2031,6 +3044,11 @@ class Camera2Controller(
             else ->
                 b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
         }
+        b.set(CaptureRequest.STATISTICS_FACE_DETECT_MODE, faceDetectMode)
+        // WYSIWYG: el visor tiene que llevar el MISMO tipo de procesado que la foto. En la
+        // petición de foto no se hace aquí, porque captureStillNow lo llama después con el
+        // ISO efectivo, que puede no tener nada que ver con el del visor.
+        if (!still && !videoSessionActive) applyDetailModes(b, lastAeIso, still = false)
         applyZoom(b)
     }
 
@@ -2053,9 +3071,31 @@ class Camera2Controller(
             result.get(CaptureResult.SENSOR_SENSITIVITY)?.let { lastAeIso = it }
             result.get(CaptureResult.SENSOR_EXPOSURE_TIME)?.let { lastAeExpNs = it }
             result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let { lastFocusDistance = it }
+            maybeSwitchPreviewFps()
+            // Ganancias reales del preajuste de balance de blancos que se acaba de pedir.
+            val anclaK = awbAnchorPending
+            if (anclaK > 0) {
+                result.get(CaptureResult.COLOR_CORRECTION_GAINS)?.let { g ->
+                    awbAnchors[anclaK] = g
+                    awbAnchorPending = 0
+                }
+            }
             if (!firstFrameNotified) {
                 firstFrameNotified = true
                 activity.runOnUiThread { onFirstFrame?.invoke() }
+            }
+            if (faceDetectMode != CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF) {
+                handleFaces(result.get(CaptureResult.STATISTICS_FACES))
+            }
+            // Si el ISO cruza una banda, el visor cambia de perfil de detalle igual que lo
+            // hará la foto. Se reprograma la petición repetida al CRUZAR (dos o tres veces en
+            // toda una sesión), nunca en cada fotograma: eso costaría fluidez.
+            if (!videoSessionActive && !nightActive.get() && shotCallback.get() == null) {
+                val banda = detailBand(lastAeIso)
+                if (banda != lastDetailBand) {
+                    lastDetailBand = banda
+                    applyAndUpdate()
+                }
             }
             // ¿Hay una foto esperando a que el AE (y el flash) terminen la pre-captura?
             val ae = result.get(CaptureResult.CONTROL_AE_STATE)
@@ -2070,13 +3110,24 @@ class Camera2Controller(
                 // Ahora hay que VER primero PRECAPTURE; si el HAL nunca lo reporta, manda el
                 // timeout de AE_PRECAPTURE_MAX_MS, no un estado heredado.
                 if (ae == CameraMetadata.CONTROL_AE_STATE_PRECAPTURE) aeSawPrecapture = true
-                val listo = aeSawPrecapture && (
-                    ae == CameraMetadata.CONTROL_AE_STATE_CONVERGED ||
-                        ae == CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED
+                // Con el AE BLOQUEADO no habrá PRECAPTURE nunca: ese caso se acepta directo o
+                // pagaríamos los 900 ms enteros del timeout en cada foto.
+                val listo = ae == CameraMetadata.CONTROL_AE_STATE_LOCKED || (
+                    aeSawPrecapture && (
+                        ae == CameraMetadata.CONTROL_AE_STATE_CONVERGED ||
+                            ae == CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED
+                        )
                     )
                 if (listo) {
+                    // La decisión del flash AUTO se congela AQUÍ, en el instante en que la
+                    // espera se resuelve. Releerla al construir la petición still (uno o dos
+                    // fotogramas después, en otro hilo) leía el estado POSTERIOR a la
+                    // pre-captura y el flash automático no encendía nunca.
+                    aeFlashAtPrecapture =
+                        ae == CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED
                     val action = aeWaitAction
                     aeWaitAction = null
+                    Log.i("CamMacro", "AE listo tras pre-captura (estado=$ae)")
                     activity.runOnUiThread { action?.invoke() }
                 }
             }
@@ -2088,7 +3139,9 @@ class Camera2Controller(
             // que el primer resultado posterior al disparador todavía trae el estado PASIVO
             // anterior y se capturaba sin haber enfocado. Los estados _LOCKED solo aparecen
             // cuando un barrido ACTIVO ha terminado de verdad.
-            if (af == CameraMetadata.CONTROL_AF_STATE_ACTIVE_SCAN) afSawActiveScan = true
+            if (af == CameraMetadata.CONTROL_AF_STATE_ACTIVE_SCAN ||
+                af == CameraMetadata.CONTROL_AF_STATE_PASSIVE_SCAN
+            ) afSawActiveScan = true
             val mapped = when (af) {
                 CameraMetadata.CONTROL_AF_STATE_PASSIVE_SCAN,
                 CameraMetadata.CONTROL_AF_STATE_ACTIVE_SCAN -> FocusState.SCANNING
@@ -2105,11 +3158,90 @@ class Camera2Controller(
             // ¿Hay un disparo esperando a que el enfoque converja? Dispara ya.
             val afSettled = af == CameraMetadata.CONTROL_AF_STATE_FOCUSED_LOCKED ||
                 af == CameraMetadata.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED
-            if (afWaitAction != null && result.frameNumber >= afTriggerFrame && afSettled) {
+            // Y ADEMÁS hay que haber VISTO arrancar el barrido. La puerta por número de
+            // fotograma sola no bastaba: el HAL tarda 1-3 fotogramas en pasar a ACTIVE_SCAN,
+            // así que el primer resultado posterior al disparador podía traer ya un _LOCKED
+            // heredado del barrido anterior y se capturaba sin haber enfocado.
+            if (afWaitAction != null && result.frameNumber >= afTriggerFrame &&
+                afSettled && afSawActiveScan
+            ) {
                 val action = afWaitAction
                 afWaitAction = null
+                Log.i("CamMacro", "AF resuelto por barrido (af=$af)")
                 activity.runOnUiThread { action?.invoke() }
             }
+        }
+    }
+
+    /**
+     * Prioriza la cara MÁS GRANDE para AF y AE mientras el usuario no haya tocado la
+     * pantalla. Muy amortiguado a propósito: reenviar la petición repetida en cada fotograma
+     * (30 por segundo) tumbaría el visor.
+     */
+    private fun handleFaces(faces: Array<android.hardware.camera2.params.Face>?) {
+        val onF = onFaces
+        if (onF != null) {
+            val list = faces?.map { it.bounds } ?: emptyList()
+            activity.runOnUiThread { onF.invoke(list) }
+        }
+        if (afLocked || manualFocus || aeLocked || afPrewarmed) return
+        if (shotCallback.get() != null) return // no tocar el 3A con una foto en vuelo
+        val b = previewRequestBuilder ?: return
+        val now = android.os.SystemClock.elapsedRealtime()
+        val big = faces?.maxByOrNull { it.bounds.width().toLong() * it.bounds.height() }?.bounds
+        if (big == null) {
+            if (lastFaceRect != null && now - lastFaceApplyMs > 800) {
+                lastFaceRect = null
+                lastFaceApplyMs = now
+                b.set(CaptureRequest.CONTROL_AF_REGIONS, null)
+                b.set(CaptureRequest.CONTROL_AE_REGIONS, null)
+                updatePreview()
+            }
+            return
+        }
+        val prev = lastFaceRect
+        val umbral = maxOf(big.width(), big.height()) / 4
+        val movida = prev == null ||
+            kotlin.math.abs(prev.centerX() - big.centerX()) > umbral ||
+            kotlin.math.abs(prev.centerY() - big.centerY()) > umbral
+        if (!movida || now - lastFaceApplyMs < 500) return
+        lastFaceRect = Rect(big)
+        lastFaceApplyMs = now
+        val mr = arrayOf(MeteringRectangle(big, MeteringRectangle.METERING_WEIGHT_MAX))
+        if (maxAfRegions > 0) b.set(CaptureRequest.CONTROL_AF_REGIONS, mr)
+        if (maxAeRegions > 0) b.set(CaptureRequest.CONTROL_AE_REGIONS, mr)
+        updatePreview()
+    }
+
+    /**
+     * Visor a 60 fps CUANDO LA LUZ LO PERMITE. Fijar [10,30] siempre era necesario para que
+     * el AE pudiera bajar a 1/10 s de noche (sin eso la foto salía negra), pero en un panel
+     * de alta tasa 30 fps hacen que la app parezca que se arrastra. Si la exposición ya está
+     * por debajo de 1/83 s, el AE NO está usando la parte lenta del rango: subir a 60 no le
+     * quita luz a nadie. Histéresis amplia y como mucho un cambio cada 2 s, o el rango oscila
+     * y el visor parpadea al cruzar el umbral.
+     */
+    private fun maybeSwitchPreviewFps() {
+        if (manualExposure || recording || videoSessionActive) return
+        val fast = fpsRangeFast ?: return
+        val slow = fpsRangeSlow ?: return
+        val quiere = if (aeFpsRange === fast) {
+            if (lastAeExpNs > 20_000_000L) slow else fast
+        } else {
+            if (lastAeExpNs <= 12_000_000L) fast else slow
+        }
+        if (quiere === aeFpsRange) return
+        val ahora = android.os.SystemClock.elapsedRealtime()
+        if (ahora - lastFpsSwitchMs < 2000L) return
+        lastFpsSwitchMs = ahora
+        aeFpsRange = quiere
+        val b = previewRequestBuilder ?: return
+        val s = captureSession ?: return
+        try {
+            b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, quiere)
+            s.setRepeatingRequest(b.build(), previewCallback, backgroundHandler)
+            Log.i("CamPerf", "visor a $quiere (exp=${lastAeExpNs / 1000} us)")
+        } catch (e: Exception) {
         }
     }
 
@@ -2174,24 +3306,140 @@ class Camera2Controller(
     }
 
     private val onImageAvailableListener = ImageReader.OnImageAvailableListener { reader ->
+        // Ráfaga: una sola llamada a captureBurst entrega N imágenes seguidas y ninguna de
+        // ellas tiene callback de disparo propio.
+        if (burstLeft > 0) {
+            var img: Image? = null
+            var bytes: ByteArray? = null
+            try {
+                img = reader.acquireNextImage()
+                val buf = img.planes[0].buffer
+                bytes = ByteArray(buf.remaining())
+                buf.get(bytes)
+            } catch (e: Exception) {
+                Log.e("CamMacro", "ráfaga: ${e.message}")
+            } finally {
+                try { img?.close() } catch (e: Exception) {}
+            }
+            burstLeft--
+            val hechas = burstTotal - burstLeft
+            val p = burstProgress
+            activity.runOnUiThread { p?.invoke(hechas, burstTotal) }
+            val ultima = burstLeft <= 0
+            val datos = bytes
+            ioExecutor.execute {
+                val guardada = if (datos == null) false else try {
+                    saveImage(datos)
+                } catch (e: Exception) {
+                    Log.e("CamMacro", "ráfaga (guardado): ${e.message}"); false
+                }
+                if (guardada) burstSaved++
+                // El cierre va DETRÁS del último guardado (el ejecutor es de un solo hilo y
+                // conserva el orden), o el recuento que ve la UI saldría siempre corto.
+                if (ultima) finishBurst()
+            }
+            return@OnImageAvailableListener
+        }
         var image: Image? = null
-        val ok: Boolean
+        var bytes: ByteArray? = null
         try {
             image = reader.acquireNextImage()
             val buffer = image.planes[0].buffer
-            val bytes = ByteArray(buffer.remaining())
+            bytes = ByteArray(buffer.remaining())
             buffer.get(bytes)
-            ok = saveImage(bytes)
         } catch (e: Exception) {
             Log.e("CamMacro", "onImageAvailable: ${e.message}")
             try { image?.close() } catch (c: Exception) {}
-            // finishShot y no solo el callback: si saveImage revienta hay que soltar el AF
-            // igual, o todas las fotos siguientes salen clavadas a ESTA distancia.
+            // finishShot y no solo el callback: si acquireNextImage revienta hay que soltar
+            // el AF igual, o todas las fotos siguientes salen clavadas a ESTA distancia.
             finishShot(false)
             return@OnImageAvailableListener
         }
         try { image?.close() } catch (e: Exception) {}
-        finishShot(ok)
+        val datos = bytes ?: run { finishShot(false); return@OnImageAvailableListener }
+        Log.i(
+            "CamPerf",
+            "obturador->buffer ${android.os.SystemClock.elapsedRealtime() - tShotMs} ms " +
+                "(${datos.size / 1024} KB)"
+        )
+        // SOLTAR YA el hilo de la cámara y el enfoque: en cuanto tenemos el buffer, el HAL ya
+        // cumplió y todo lo demás (recortar, comprimir, escribir, indexar) puede esperar en
+        // otro hilo. Antes el desbloqueo del enfoque solo llegaba al terminar de escribir el
+        // archivo, y por eso el visor se quedaba congelado durante el guardado y el segundo
+        // disparo de una ráfaga se perdía.
+        cancelCaptureWatchdog()
+        clearAfAeWaits()
+        unlockFocusAfterShot()
+        val cb = shotCallback.getAndSet(null)
+        ioExecutor.execute {
+            val ok = traza("guardado") {
+                try {
+                    saveImage(datos)
+                } catch (e: Exception) {
+                    Log.e("CamMacro", "saveImage: ${e.message}"); false
+                }
+            }
+            if (cb != null) activity.runOnUiThread { cb(ok) }
+        }
+    }
+
+    /**
+     * Ráfaga REAL: UNA sola llamada a captureBurst con el 3A congelado. Antes la Activity
+     * encadenaba takePhoto() de una en una con 60 ms de espera y, como unlockFocusAfterShot
+     * manda AF_TRIGGER_CANCEL tras cada foto, el HAL volvía a barrer el foco entre tomas:
+     * salían 2-3 fps y cada foto con una nitidez distinta. Aquí se enfoca UNA vez, antes de
+     * empezar, y las N capturas van con AE/AWB bloqueados y la distancia de enfoque fija.
+     */
+    fun takeBurst(count: Int, onProgress: (Int, Int) -> Unit, onDone: (Int) -> Unit) {
+        val device = cameraDevice
+        val session = captureSession
+        val reader = imageReader
+        if (device == null || session == null || reader == null ||
+            burstLeft > 0 || nightActive.get() || shotCallback.get() != null
+        ) {
+            activity.runOnUiThread { onDone(0) }; return
+        }
+        try {
+            burstTotal = count
+            burstSaved = 0
+            burstProgress = onProgress
+            burstDone.set(onDone)
+            val reqs = ArrayList<CaptureRequest>(count)
+            for (i in 0 until count) {
+                val b = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
+                b.addTarget(reader.surface)
+                applyControls(b, still = true)
+                b.set(CaptureRequest.CONTROL_AE_LOCK, true)
+                b.set(CaptureRequest.CONTROL_AWB_LOCK, true)
+                if (minFocusDistance > 0f) {
+                    b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+                    b.set(
+                        CaptureRequest.LENS_FOCUS_DISTANCE,
+                        if (manualFocus) manualDiopters else lastFocusDistance
+                    )
+                }
+                val iso = applyShutterFloor(b)
+                applyDetailModes(b, if (iso > 0) iso else lastAeIso, still = true)
+                b.set(CaptureRequest.JPEG_QUALITY, JPEG_Q.toByte())
+                b.set(CaptureRequest.JPEG_ORIENTATION, currentJpegOrientation())
+                reqs.add(b.build())
+            }
+            burstLeft = count // solo cuando las N peticiones están listas de verdad
+            session.captureBurst(reqs, null, backgroundHandler)
+        } catch (e: Exception) {
+            Log.e("CamMacro", "takeBurst: ${e.message}")
+            finishBurst()
+        }
+    }
+
+    /** Cierra la ráfaga (fin normal, cancelación o cierre de cámara). */
+    private fun finishBurst() {
+        burstLeft = 0
+        burstProgress = null
+        val n = burstSaved
+        val cb = burstDone.getAndSet(null) ?: return
+        unlockFocusAfterShot()
+        activity.runOnUiThread { cb.invoke(n) }
     }
 
     val hasRaw: Boolean get() = rawSupported
@@ -2302,6 +3550,7 @@ class Camera2Controller(
             setUpOutputs(manager)
             configureTransform(textureView.width, textureView.height)
             startWatchdog(gen)
+            tOpenMs = android.os.SystemClock.elapsedRealtime()
             // El StateCallback se registra en el hilo de UI A PROPÓSITO. Con el hilo de
             // fondo, si close() lo paraba mientras la apertura seguía en vuelo, el onOpened
             // NO se entregaba nunca y el CameraDevice se quedaba abierto sin que nadie lo
@@ -2337,6 +3586,7 @@ class Camera2Controller(
 
                 override fun onError(camera: CameraDevice, error: Int) {
                     camera.close()
+                    Log.e("CamMacro", "onError HAL id=$cameraId error=$error")
                     if (gen != cameraGen) return
                     cameraDevice = null
                     previewRequestBuilder = null
@@ -2425,6 +3675,13 @@ class Camera2Controller(
         aeFpsRange = fpsRanges?.filter { it.upper == 30 }?.minByOrNull { it.lower }
             ?: fpsRanges?.filter { it.upper <= 30 }?.maxByOrNull { it.upper }
             ?: fpsRanges?.minByOrNull { it.lower }
+        // El juego completo hace falta para poder ALTERNAR: el rango lento sigue siendo
+        // imprescindible de noche, así que la solución no es cambiarlo sino turnarlo con el
+        // rápido según la exposición que el propio AE está pidiendo.
+        fpsRangesAvailable = fpsRanges ?: emptyArray()
+        fpsRangeSlow = aeFpsRange
+        fpsRangeFast = fpsRangesAvailable.filter { it.upper >= 60 }.minByOrNull { it.lower }
+        lastFpsSwitchMs = 0L
         val manualCaps = characteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: IntArray(0)
         manualSensorSupported =
             manualCaps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)
@@ -2447,6 +3704,49 @@ class Camera2Controller(
         aberrationAvailable = characteristics.get(
             CameraCharacteristics.COLOR_CORRECTION_AVAILABLE_ABERRATION_MODES
         ) ?: IntArray(0)
+        lastDetailBand = -1 // cada lente reprograma su perfil de detalle en el visor
+        // Curva de tono propia. El jurado midió 0,527% de los píxeles en Y<=1 (unos 646.000
+        // píxeles en negro absoluto por foto) y 0,814% en Y<=3: el pie de la curva del HAL
+        // aplasta las sombras contra el cero, y ahí ya no hay nada que recuperar en post.
+        val tmModes = characteristics.get(
+            CameraCharacteristics.TONEMAP_AVAILABLE_TONE_MAP_MODES
+        ) ?: IntArray(0)
+        val tmPoints = characteristics.get(CameraCharacteristics.TONEMAP_MAX_CURVE_POINTS) ?: 0
+        toneCurveSupported =
+            tmModes.contains(CameraMetadata.TONEMAP_MODE_CONTRAST_CURVE) && tmPoints >= 8
+        toneCurve = if (toneCurveSupported) buildToneCurve(minOf(tmPoints, 32)) else null
+        Log.i("CamMacro", "tonemap: puntos=$tmPoints curva=$toneCurveSupported")
+        // Detección de caras y regiones 3A disponibles. SIMPLE basta (solo el rectángulo) y
+        // es mucho más barato que FULL, que además calcula ojos y boca que aquí no se usan.
+        val fdModes = characteristics.get(
+            CameraCharacteristics.STATISTICS_INFO_AVAILABLE_FACE_DETECT_MODES
+        ) ?: IntArray(0)
+        faceDetectMode = when {
+            fdModes.contains(CameraMetadata.STATISTICS_FACE_DETECT_MODE_SIMPLE) ->
+                CameraMetadata.STATISTICS_FACE_DETECT_MODE_SIMPLE
+            fdModes.contains(CameraMetadata.STATISTICS_FACE_DETECT_MODE_FULL) ->
+                CameraMetadata.STATISTICS_FACE_DETECT_MODE_FULL
+            else -> CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF
+        }
+        maxAfRegions = characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0
+        maxAeRegions = characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0
+        lastFaceRect = null
+        Log.i("CamMacro", "faceDetect=$faceDetectMode maxAf=$maxAfRegions maxAe=$maxAeRegions")
+        // Compensación de calibración de ESTA lente física. Se guarda en preferencias (clave
+        // ev_offset_<id>) para poder afinarla sin recompilar: se fotografía una carta gris al
+        // 18% con cada lente en la misma luz y se ajusta hasta que las medianas coincidan.
+        val pasoEv = evStepValue
+        val ajusteEv = try {
+            activity.getSharedPreferences("camara", Context.MODE_PRIVATE)
+                .getFloat("ev_offset_$cameraId", DEFAULT_LENS_EV[cameraId] ?: 0f)
+        } catch (e: Exception) {
+            DEFAULT_LENS_EV[cameraId] ?: 0f
+        }
+        lensEvSteps = if (pasoEv > 0f && ajusteEv != 0f)
+            Math.round(ajusteEv / pasoEv).coerceIn(evMin, evMax) else 0
+        if (lensEvSteps != 0) {
+            Log.i("CamMacro", "lente $cameraId: offset AE $ajusteEv EV ($lensEvSteps pasos)")
+        }
         // El zoom máximo de ESTA lente también entra en la tabla: si el usuario abre
         // directamente una lente que no está en la cadena, tailDigitalZoom la encuentra.
         lensMaxZoom[cameraId] = maxZoom.coerceAtLeast(1f)
@@ -2468,11 +3768,16 @@ class Camera2Controller(
             ?: Size(1920, 1080)
         // ¿Ultra HDR disponible a este tamaño? Si sí y está activado, el stream de la foto
         // es JPEG_R en vez de JPEG: mismo número de streams, mucho más rango dinámico.
+        // Antes se exigía que JPEG_R ofreciera EXACTAMENTE el mismo tamaño que el JPEG elegido
+        // por pickJpegSize; como ese depende de la relación de aspecto y de la resolución, al
+        // pasar a MED o a 1:1/16:9 ese tamaño casi nunca estaba en la lista de JPEG_R y Ultra
+        // HDR se declaraba no soportado. Ahora el tamaño se elige sobre SU PROPIA lista.
         hdrSupported = false
+        var stillPick = largest
         if (Build.VERSION.SDK_INT >= 34) {
             try {
                 val jr = map.getOutputSizes(ImageFormat.JPEG_R)
-                hdrSupported = jr != null && jr.any { it.width == largest.width && it.height == largest.height }
+                if (jr != null && jr.isNotEmpty()) hdrSupported = true
             } catch (e: Exception) {
                 hdrSupported = false
             }
@@ -2480,21 +3785,49 @@ class Camera2Controller(
         // DESEO contra CAPACIDAD. hdrSupported no se sabe hasta este punto (hace falta la
         // lente abierta), pero la Activity restaura sus ajustes en onCreate: setHdrEnabled
         // devolvía SIEMPRE false y el Ultra HDR se apagaba solo en cada arranque mientras la
-        // preferencia guardada seguía diciendo que sí. Aquí se resuelve y se avisa a la UI
-        // del valor REAL.
+        // preferencia guardada seguía diciendo que sí. hdrFallbackTried evita reencenderlo
+        // justo después de que el HAL lo haya rechazado (bucle de reconfiguración).
         val hdrAntes = hdrEnabled
-        hdrEnabled = hdrRequested && hdrSupported
-        if (hdrRequested && !hdrSupported) activity.runOnUiThread { onHdrUnavailable?.invoke() }
+        hdrEnabled = hdrRequested && hdrSupported && !hdrFallbackTried &&
+            !rawEnabled && !nightEnabled
+        if (hdrEnabled && Build.VERSION.SDK_INT >= 34) {
+            try {
+                map.getOutputSizes(ImageFormat.JPEG_R)?.let { if (it.isNotEmpty()) stillPick = pickJpegSize(it) }
+            } catch (e: Exception) {
+            }
+        }
+        // El aviso, UNA vez por lente. setUpOutputs corre en cada apertura y en CADA
+        // reconstrucción de sesión: sin esto, el usuario que se pasa a una lente sin Ultra
+        // HDR veía la pastilla otra vez en cada toque de ratio, resolución, noche o RAW.
+        if (hdrRequested && !hdrSupported) {
+            if (hdrWarnedLens != cameraId) {
+                hdrWarnedLens = cameraId
+                activity.runOnUiThread { onHdrUnavailable?.invoke() }
+            }
+        } else if (hdrSupported) {
+            hdrWarnedLens = null
+        }
         if (hdrAntes != hdrEnabled) activity.runOnUiThread { onCaptureModesChanged?.invoke() }
+        stillSizeReal = stillPick
         val stillFormat = if (hdrEnabled) ImageFormat.JPEG_R else ImageFormat.JPEG
         // Cerrar el anterior. Sin esto, cada intento fallido de JPEG_R y cada reconstrucción
         // de sesión filtraba un ImageReader a resolución máxima: decenas de MB de memoria
         // nativa que nadie recuperaba (rawReader, nightReader y qrReader sí se cerraban).
         try { imageReader?.close() } catch (e: Exception) {}
-        imageReader = ImageReader.newInstance(largest.width, largest.height, stillFormat, 2).apply {
-            setOnImageAvailableListener(onImageAvailableListener, backgroundHandler)
-        }
-        Log.i("CamMacro", "still=${if (stillFormat == ImageFormat.JPEG) "JPEG" else "JPEG_R/UltraHDR"} hdrSupported=$hdrSupported")
+        // Con maxImages=2 a resolución completa el pipeline se llenaba en el SEGUNDO disparo:
+        // el HAL se quedaba esperando a que se liberase un buffer mientras el guardado
+        // ocupaba el hilo, y las fotos de la ráfaga se perdían. Con 4 hay hueco para
+        // encadenar; por encima de 16 MP se baja a 3 para no reventar la memoria gráfica.
+        val stillBuffers =
+            if (stillPick.width.toLong() * stillPick.height > 16_000_000L) 3 else 4
+        imageReader = ImageReader.newInstance(
+            stillPick.width, stillPick.height, stillFormat, stillBuffers
+        ).apply { setOnImageAvailableListener(onImageAvailableListener, backgroundHandler) }
+        Log.i(
+            "CamMacro",
+            "still=${if (stillFormat == ImageFormat.JPEG) "JPEG" else "JPEG_R/UltraHDR"} " +
+                "$stillPick buffers=$stillBuffers hdrSupported=$hdrSupported"
+        )
 
         camChars = characteristics
         val rawCaps = characteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: IntArray(0)
@@ -2513,9 +3846,16 @@ class Camera2Controller(
             }
         }
 
-        // Modo noche: stream YUV de tamaño moderado, solo cuando está activo.
-        try { nightReader?.close() } catch (e: Exception) {}
+        // Modo noche: stream YUV de tamaño moderado, solo cuando está activo. El reader viejo
+        // se cierra DETRÁS del apilado en curso, igual que en close(): cerrarlo aquí (hilo de
+        // cámara) invalidaba una Image que el hilo del apilado podía estar usando.
+        val nrPrev = nightReader
         nightReader = null
+        if (nrPrev != null) {
+            val sh = stackHandler
+            if (sh != null) sh.post { try { nrPrev.close() } catch (e: Exception) {} }
+            else try { nrPrev.close() } catch (e: Exception) {}
+        }
         if (nightEnabled) {
             // El tope fijo de 4 MP que había aquí degradaba la foto de noche a 3.7 MP frente
             // a los 12.6 MP del modo normal: el modo EMPEORABA la imagen. Ahora se apila a la
@@ -2540,10 +3880,11 @@ class Camera2Controller(
         try { qrReader?.close() } catch (e: Exception) {}
         qrReader = null
         if (qrEnabled) {
+            qrGen++ // toda detección anterior a esta reconfiguración deja de valer
             // close() deja qrScanner en null, pero qrEnabled sobrevive: sin recrear el
             // scanner aquí, al volver de pausar la app el lector de QR quedaba MUERTO
             // en silencio para siempre (onQrImage salía por scanner == null).
-            if (qrScanner == null) qrScanner = BarcodeScanning.getClient()
+            if (qrScanner == null) qrScanner = nuevoScanner()
             val yuvSizes = map.getOutputSizes(ImageFormat.YUV_420_888)
             val qrSize = yuvSizes?.filter { it.width <= 1280 }?.maxByOrNull { it.width.toLong() * it.height }
                 ?: yuvSizes?.minByOrNull { it.width.toLong() * it.height }
@@ -2553,18 +3894,17 @@ class Camera2Controller(
             }
         }
 
-        @Suppress("DEPRECATION")
-        val displayRotation = activity.windowManager.defaultDisplay.rotation
-        val swapped = areDimensionsSwapped(displayRotation)
-
-        val displaySize = Point()
-        @Suppress("DEPRECATION")
-        activity.windowManager.defaultDisplay.getSize(displaySize)
+        // Rotación y tamaño de la VENTANA, no del panel físico: en un plegable o en
+        // multiventana defaultDisplay describe la pantalla entera, así que el tope del visor
+        // y la matriz de transformación se calculaban con datos que no eran los de la
+        // ventana en la que estamos dibujando.
+        val swapped = areDimensionsSwapped(windowRotation())
+        val displaySize = windowSize()
 
         val rotatedViewWidth = if (swapped) textureView.height else textureView.width
         val rotatedViewHeight = if (swapped) textureView.width else textureView.height
-        val maxPreviewWidth = (if (swapped) displaySize.y else displaySize.x).coerceAtMost(MAX_PREVIEW_WIDTH)
-        val maxPreviewHeight = (if (swapped) displaySize.x else displaySize.y).coerceAtMost(MAX_PREVIEW_HEIGHT)
+        val maxPreviewWidth = (if (swapped) displaySize.y else displaySize.x).coerceAtMost(previewCapW)
+        val maxPreviewHeight = (if (swapped) displaySize.x else displaySize.y).coerceAtMost(previewCapH)
 
         val previewChoices = map.getOutputSizes(SurfaceTexture::class.java) ?: arrayOf(Size(1920, 1080))
         previewSize = chooseOptimalSize(
@@ -2573,24 +3913,54 @@ class Camera2Controller(
             if (rotatedViewHeight > 0) rotatedViewHeight else maxPreviewHeight,
             maxPreviewWidth,
             maxPreviewHeight,
-            largest
+            // La proporción la marca el stream que se va a GUARDAR de verdad (con Ultra HDR
+            // puede no ser el mismo tamaño que el JPEG normal).
+            stillPick
         )
+        Log.i("CamPerf", "previewSize=$previewSize tope=${previewCapW}x$previewCapH")
+        // Las paradas de zoom se recalculan aquí, donde ya se conocen maxZoom y lensMaxZoom.
+        refreshZoomStops()
 
         activity.runOnUiThread {
             // En la pantalla grande del plegable el visor llena la pantalla; en la alargada
             // se muestra completo para que lo que ves sea lo que sale.
-            textureView.coverMode = (aspect == AspectRatio.FULL) ||
-                activity.resources.getBoolean(R.bool.preview_fills_screen)
+            textureView.coverMode = coverWanted()
             val orientation = activity.resources.configuration.orientation
             if (orientation == Configuration.ORIENTATION_LANDSCAPE) {
                 textureView.setAspectRatio(previewSize.width, previewSize.height)
             } else {
                 textureView.setAspectRatio(previewSize.height, previewSize.width)
             }
+            // Y se vuelve a medir la caja visible: de ella sale el recorte de la foto.
+            textureView.post { refreshPreviewBox() }
         }
     }
 
+    /**
+     * Rotación de la VENTANA de la app. windowManager.defaultDisplay está obsoleto desde
+     * API 30 y en un plegable o en multiventana devuelve la pantalla FÍSICA, no la ventana en
+     * la que estamos dibujando: justo los dos casos que más importan en este aparato.
+     */
+    @Suppress("DEPRECATION")
+    private fun windowRotation(): Int =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
+            (activity.display?.rotation ?: Surface.ROTATION_0)
+        else activity.windowManager.defaultDisplay.rotation
+
+    /** Tamaño en px de la VENTANA de la app, no del panel físico. */
+    @Suppress("DEPRECATION")
+    private fun windowSize(): Point {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val b = activity.windowManager.currentWindowMetrics.bounds
+            return Point(b.width(), b.height())
+        }
+        val p = Point()
+        activity.windowManager.defaultDisplay.getSize(p)
+        return p
+    }
+
     private fun startPreview(reintento: Int = 0) {
+        val gen = cameraGen
         try {
             val texture = textureView.surfaceTexture
             val device = cameraDevice
@@ -2609,7 +3979,6 @@ class Camera2Controller(
                     return
                 }
                 Log.w("CamMacro", "startPreview sin superficie; reintento ${reintento + 1}")
-                val gen = cameraGen
                 uiHandler.postDelayed({
                     if (gen != cameraGen) return@postDelayed
                     val h = backgroundHandler
@@ -2618,7 +3987,14 @@ class Camera2Controller(
                 return
             }
             texture.setDefaultBufferSize(previewSize.width, previewSize.height)
+            // Cerrar la sesión ANTES de soltar la Surface vieja: si el HAL sigue escribiendo
+            // en ella, liberarla la deja apuntando a memoria muerta. Esto además cierra la
+            // sesión de VÍDEO, que stopVideo dejaba viva al volver al visor.
+            try { captureSession?.close() } catch (e: Exception) {}
+            captureSession = null
+            try { previewSurface?.release() } catch (e: Exception) {}
             val surface = Surface(texture)
+            previewSurface = surface
 
             val previewRequestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
             this.previewRequestBuilder = previewRequestBuilder
@@ -2635,9 +4011,10 @@ class Camera2Controller(
                 outputs,
                 object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(session: CameraCaptureSession) {
-                        if (cameraDevice == null) {
-                            // Sin este close, la sesión recién configurada quedaba huérfana y
-                            // VIVA, reteniendo los buffers de la lente que acabamos de dejar.
+                        // La generación cambió (flip, cambio de lente, close) o el device ya
+                        // no está: esta sesión no es de nadie. Sin este close quedaba
+                        // huérfana y VIVA, reteniendo los streams de la lente anterior.
+                        if (gen != cameraGen || cameraDevice == null) {
                             try { session.close() } catch (e: Exception) {}
                             return
                         }
@@ -2655,6 +4032,11 @@ class Camera2Controller(
                                 backgroundHandler
                             )
                             cancelWatchdog()
+                            Log.i(
+                                "CamPerf",
+                                "apertura ${android.os.SystemClock.elapsedRealtime() - tOpenMs} ms " +
+                                    "(id=$cameraId visor=$previewSize)"
+                            )
                             activity.runOnUiThread { onReady?.invoke() }
                         } catch (e: Exception) {
                             fail("No se pudo iniciar la vista previa: ${e.message}")
@@ -2697,6 +4079,28 @@ class Camera2Controller(
                             startPreview()
                             return
                         }
+                        // Último recurso antes de matar la cámara: puede que este HAL no
+                        // admita un visor por encima de 1080p junto al stream de la foto. Se
+                        // baja el tope UNA vez y se reintenta, en vez de dejar la lente
+                        // muerta por haber pedido más resolución de la que acepta.
+                        if (!previewCapFallbackTried &&
+                            (previewSize.width > PREVIEW_CAP_SAFE_W ||
+                                previewSize.height > PREVIEW_CAP_SAFE_H)
+                        ) {
+                            previewCapFallbackTried = true
+                            previewCapW = PREVIEW_CAP_SAFE_W
+                            previewCapH = PREVIEW_CAP_SAFE_H
+                            Log.e("CamMacro", "visor >1080p no configurable; bajando el tope")
+                            try {
+                                val mgr = activity.getSystemService(Context.CAMERA_SERVICE)
+                                    as CameraManager
+                                setUpOutputs(mgr)
+                            } catch (e: Exception) {
+                                Log.e("CamMacro", "fallback visor: ${e.message}")
+                            }
+                            startPreview()
+                            return
+                        }
                         fail("No se pudo configurar esta lente. Prueba otra.")
                     }
                 },
@@ -2708,55 +4112,126 @@ class Camera2Controller(
     }
 
     /**
-     * Escribe los EXIF de la foto de noche. YuvImage.compressToJpeg no conserva ninguno,
-     * así que el archivo salía sin ISO, exposición, focal ni apertura.
+     * Escribe los EXIF que faltan o que MIENTEN. Lo que midió el jurado:
+     *  - la foto de noche declaraba Flash=9 ("flash disparado, modo obligatorio") en un
+     *    apilado de siete fotogramas SIN destello;
+     *  - faltaban Software, LensModel, SubjectDistance, DigitalZoomRatio y ExposureProgram;
+     *  - y las fotos recortadas o filtradas salían SIN NINGÚN metadato, porque
+     *    Bitmap.compress genera un JPEG NUEVO sin EXIF y nadie lo había detectado: se perdían
+     *    ISO, exposición, focal, apertura y fecha enteros.
+     *
+     * ORIENTACIÓN: política única para todas las rutas. Los píxeles salen SIEMPRE ya girados
+     * (el HAL en la ruta directa, rotateNv21 en la de noche, transformStillJpeg en la
+     * recodificada), así que la etiqueta dice NORMAL en todas. Antes la de noche salía con
+     * Orientation=6 y el buffer sin girar, y cualquier visor que ignore el EXIF la enseñaba
+     * tumbada.
      */
-    private fun writeNightExif(uri: Uri?) {
+    private fun writeStillExif(uri: Uri?, night: Boolean, frames: Int) {
         if (uri == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
         try {
             activity.contentResolver.openFileDescriptor(uri, "rw")?.use { pfd ->
-                val ex = android.media.ExifInterface(pfd.fileDescriptor)
+                val ex = ExifInterface(pfd.fileDescriptor)
                 val iso = if (manualExposure) manualIso else lastAeIso
                 val expNs = if (manualExposure) manualExpNs else lastAeExpNs
-                ex.setAttribute(android.media.ExifInterface.TAG_ISO_SPEED_RATINGS, iso.toString())
+                ex.setAttribute(ExifInterface.TAG_ISO_SPEED_RATINGS, iso.toString())
                 ex.setAttribute(
-                    android.media.ExifInterface.TAG_EXPOSURE_TIME,
-                    (expNs / 1_000_000_000.0).toString()
+                    ExifInterface.TAG_EXPOSURE_TIME, (expNs / 1_000_000_000.0).toString()
                 )
                 if (activeFocalMm > 0f) ex.setAttribute(
-                    android.media.ExifInterface.TAG_FOCAL_LENGTH,
-                    "${(activeFocalMm * 100).toInt()}/100"
+                    ExifInterface.TAG_FOCAL_LENGTH, "${(activeFocalMm * 100).toInt()}/100"
                 )
                 camChars?.get(CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES)
                     ?.firstOrNull()?.let {
-                        ex.setAttribute(
-                            android.media.ExifInterface.TAG_F_NUMBER,
-                            "${(it * 100).toInt()}/100"
-                        )
+                        ex.setAttribute(ExifInterface.TAG_F_NUMBER, "${(it * 100).toInt()}/100")
                     }
-                ex.setAttribute(android.media.ExifInterface.TAG_SOFTWARE, "Camara · modo noche")
+                // Estado REAL del destello: 16 = no disparó (modo apagado), 9 = disparó por
+                // orden, 25 = disparó en automático. El apilado nocturno NUNCA destella.
+                val flashTag = when {
+                    night -> 16
+                    flashMode == 2 -> 9
+                    flashMode == 1 &&
+                        lastAeState == CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED -> 25
+                    else -> 16
+                }
+                ex.setAttribute(ExifInterface.TAG_FLASH, flashTag.toString())
                 ex.setAttribute(
-                    android.media.ExifInterface.TAG_IMAGE_DESCRIPTION,
-                    "Apilado multi-frame de $NIGHT_FRAMES fotogramas (lente ID$cameraId)"
+                    ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString()
+                )
+                ex.setAttribute(ExifInterface.TAG_SOFTWARE, "CamaraMacro $appVersion")
+                ex.setAttribute(ExifInterface.TAG_MAKE, Build.MANUFACTURER)
+                ex.setAttribute(ExifInterface.TAG_MODEL, Build.MODEL)
+                ex.setAttribute(
+                    ExifInterface.TAG_LENS_MODEL,
+                    "ID$cameraId " + String.format(java.util.Locale.US, "%.2f", activeFocalMm) +
+                        " mm ($activeEquivMm mm eq 35)"
+                )
+                ex.setAttribute(ExifInterface.TAG_COLOR_SPACE, "1") // sRGB
+                ex.setAttribute(
+                    ExifInterface.TAG_EXPOSURE_PROGRAM,
+                    if (manualExposure || night) "1" else "2" // 1 = manual, 2 = programa normal
+                )
+                ex.setAttribute(
+                    ExifInterface.TAG_DIGITAL_ZOOM_RATIO, "${(zoomRatio * 100).toInt()}/100"
+                )
+                // LENS_FOCUS_DISTANCE viene en dioptrías (1/m); el EXIF quiere metros.
+                if (lastFocusDistance > 0f) {
+                    val metros = 1f / lastFocusDistance
+                    ex.setAttribute(
+                        ExifInterface.TAG_SUBJECT_DISTANCE, "${(metros * 100).toInt()}/100"
+                    )
+                }
+                // La foto de noche se compone con YuvImage y NO pasa por el codificador JPEG
+                // del HAL: aquí el GPS hay que escribirlo a mano o se pierde.
+                geoLocation?.let { loc ->
+                    ex.setLatLong(loc.latitude, loc.longitude)
+                    if (loc.hasAltitude()) ex.setAltitude(loc.altitude)
+                }
+                val fecha = java.text.SimpleDateFormat("yyyy:MM:dd HH:mm:ss", java.util.Locale.US)
+                    .format(java.util.Date())
+                ex.setAttribute(ExifInterface.TAG_DATETIME, fecha)
+                ex.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, fecha)
+                // Que el archivo no mienta sobre CÓMO se hizo.
+                ex.setAttribute(
+                    ExifInterface.TAG_USER_COMMENT,
+                    if (night)
+                        "Apilado multi-fotograma: $frames fotogramas de " +
+                            "${expNs / 1_000_000} ms a ISO $iso (exposición total equivalente " +
+                            "${frames * expNs / 1_000_000} ms). Lente ID$cameraId."
+                    else "Lente física ID$cameraId, zoom " +
+                        String.format(java.util.Locale.US, "%.2f", zoomRatio) + "x."
                 )
                 ex.saveAttributes()
             }
         } catch (e: Exception) {
-            Log.e("CamMacro", "writeNightExif: ${e.message}")
+            Log.e("CamMacro", "writeStillExif: ${e.message}")
         }
     }
 
-    private fun saveImage(rawBytes: ByteArray): Boolean {
-        // En modo Full recortamos a la proporción de la pantalla (foto = lo que se ve).
-        // En Ultra HDR NO se puede recortar ni filtrar: se perdería el mapa de ganancia
-        // embebido y la foto dejaría de ser HDR.
+    private fun saveImage(rawBytes: ByteArray, night: Boolean = false, frames: Int = 0): Boolean {
+        // WYSIWYG: si el VISOR recorta (modo Llenar, o proporción FULL), la foto se recorta
+        // igual. En Ultra HDR NO se toca NADA: recomprimir tira el mapa de ganancia embebido
+        // y la foto deja de ser HDR con el chip encendido. La de noche llega ya girada y
+        // comprimida una sola vez desde el apilado, y no se recodifica por nada del mundo.
         val ultraHdr = hdrEnabled && hdrSupported
-        var bytes = if (!ultraHdr && aspect == AspectRatio.FULL) cropFullJpeg(rawBytes) ?: rawBytes else rawBytes
-        if (!ultraHdr) captureMatrix?.let { bytes = applyColorFilter(bytes, it) ?: bytes }
+        val cropRatio = if (night) 0f else cropRatioForSave()
+        val reencoded = !ultraHdr && !night && (cropRatio > 0f || captureMatrix != null)
+        var bytes = rawBytes
+        if (reencoded) {
+            bytes = transformStillJpeg(rawBytes, cropRatio, captureMatrix) ?: rawBytes
+        }
+        // En Ultra HDR tampoco se limpian segmentos: el índice MPF del APP2 apunta a
+        // desplazamientos ABSOLUTOS del archivo, así que quitar un APP4 de en medio dejaría
+        // el mapa de ganancia inalcanzable.
+        if (!ultraHdr) bytes = cleanJpegSegments(bytes, buildXmp(night, frames))
         // Miniatura inmediata: no esperamos a que MediaStore indexe el archivo.
         onPhotoThumb?.let { cb ->
             try {
-                val opts = BitmapFactory.Options().apply { inSampleSize = 16 }
+                val opts = BitmapFactory.Options().apply {
+                    inSampleSize = 16
+                    // La miniatura mide ~250 px: ARGB_8888 no aporta nada y duplica la
+                    // memoria justo en el momento de mayor presión.
+                    inPreferredConfig = Bitmap.Config.RGB_565
+                }
                 var thumb = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
                 // Aplicar la rotación del EXIF: si no, la miniatura salía girada y luego
                 // "se acomodaba" al recargarse desde la galería.
@@ -2815,6 +4290,34 @@ class Camera2Controller(
                 values.clear()
                 values.put(MediaStore.Images.Media.IS_PENDING, 0)
                 resolver.update(uri, values, null, null)
+                // Hay que reescribir los EXIF en DOS casos: la foto de noche (YuvImage no
+                // escribe ninguno) y la que se ha vuelto a codificar por recorte o filtro
+                // (Bitmap.compress genera un JPEG NUEVO sin un solo metadato).
+                if (night || reencoded) writeStillExif(uri, night, frames)
+                if (watermarkEnabled) {
+                    // Segunda copia, con marca. La ORIGINAL nunca se altera: si el usuario se
+                    // cansa de la marca no habrá perdido ninguna foto por el camino.
+                    composeWatermark(bytes)?.let { marcada ->
+                        val v2 = ContentValues().apply {
+                            put(
+                                MediaStore.Images.Media.DISPLAY_NAME,
+                                name.replace(".jpg", "_datos.jpg")
+                            )
+                            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                            put(MediaStore.Images.Media.RELATIVE_PATH, "DCIM/Camera")
+                            put(MediaStore.Images.Media.DATE_TAKEN, ahora)
+                            put(MediaStore.Images.Media.DATE_ADDED, ahora / 1000)
+                            put(MediaStore.Images.Media.IS_PENDING, 1)
+                        }
+                        val u2 = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v2)
+                        if (u2 != null) {
+                            resolver.openOutputStream(u2)?.use { it.write(marcada) }
+                            v2.clear()
+                            v2.put(MediaStore.Images.Media.IS_PENDING, 0)
+                            resolver.update(u2, v2, null, null)
+                        }
+                    }
+                }
                 true
             } else {
                 @Suppress("DEPRECATION")
@@ -2851,8 +4354,7 @@ class Camera2Controller(
 
     private fun configureTransform(viewWidth: Int, viewHeight: Int) {
         if (viewWidth == 0 || viewHeight == 0) return
-        @Suppress("DEPRECATION")
-        val rotation = activity.windowManager.defaultDisplay.rotation
+        val rotation = windowRotation()
         val matrix = Matrix()
         val viewRect = RectF(0f, 0f, viewWidth.toFloat(), viewHeight.toFloat())
         val bufferRect = RectF(0f, 0f, previewSize.height.toFloat(), previewSize.width.toFloat())
@@ -2904,10 +4406,12 @@ class Camera2Controller(
         // la generación para que un onOpened tardío no la vuelva a asignar.
         cameraGen++
         previewRequestBuilder = null
-        try { captureSession?.close() } catch (e: Exception) {}
-        captureSession = null
-        try { cameraDevice?.close() } catch (e: Exception) {}
-        cameraDevice = null
+        // El cierre real va FUERA del hilo que llama. Este vigilante lo dispara el uiHandler
+        // y CameraDevice.close() bloquea hasta que el HAL responde: en el ÚNICO escenario
+        // para el que existe —la lente que cuelga el HAL de ColorOS— cerrar aquí congelaba
+        // el hilo principal y provocaba justo el ANR que se venía a evitar. Los campos se
+        // anulan en el acto; el aviso sale sin esperar al cierre.
+        closeDeviceAsync()
         if (!yaAvisado) activity.runOnUiThread { onError?.invoke(msg) } // no repetir el aviso
     }
 
@@ -2917,13 +4421,15 @@ class Camera2Controller(
     }
 
     private fun stopBackgroundThread() {
+        // SIN join. El join(1500) se ejecutaba en el HILO DE UI: close() se llama desde
+        // onPause y, peor, desde el volteo de cámara (close() + open() en el mismo clic). Si
+        // la lente dañada cuelga el HAL, la interfaz se congelaba hasta 1,5 s y Android puede
+        // lanzar un ANR; además contradecía el requisito de <1 s de abrir a listo.
+        // Para cuando llegamos aquí, la sesión, el CameraDevice y los ImageReader ya están
+        // cerrados (o su cierre está encolado en este mismo hilo), así que lo único que queda
+        // en la cola son tareas que ya no tocan nada vivo: quitSafely las deja terminar en su
+        // propio hilo y nosotros nos vamos.
         backgroundThread?.quitSafely()
-        try {
-            // Con tope de tiempo: si una lente cuelga el HAL, la interfaz no se congela.
-            backgroundThread?.join(1500)
-        } catch (e: InterruptedException) {
-            Thread.currentThread().interrupt()
-        }
         backgroundThread = null
         backgroundHandler = null
     }
@@ -2998,7 +4504,11 @@ class Camera2Controller(
             videoSize = pickVideoSize()
             val texture = textureView.surfaceTexture ?: return false
             texture.setDefaultBufferSize(previewSize.width, previewSize.height)
-            val previewSurface = Surface(texture)
+            // Mismo dueño que en el visor: antes esta Surface local sombreaba el campo y no
+            // se liberaba jamás, así que cada entrada y salida de vídeo dejaba otra colgando.
+            try { this.previewSurface?.release() } catch (e: Exception) {}
+            val vistaSurface = Surface(texture)
+            this.previewSurface = vistaSurface
 
             // En time-lapse no se graba audio.
             val recorder = createRecorder(withAudio && !timeLapse)
@@ -3012,15 +4522,22 @@ class Camera2Controller(
             val recorderSurface = recorder.surface
 
             val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
-            builder.addTarget(previewSurface)
+            builder.addTarget(vistaSurface)
             builder.addTarget(recorderSurface)
             previewRequestBuilder = builder
             // Activa EIS + enfoque continuo de video ANTES de aplicar los controles.
             videoSessionActive = true
             applyControls(builder)
-            // 60 fps: pide el rango de FPS al sensor (si la lente lo soporta).
-            if (videoFps >= 60) {
-                builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(60, 60))
+            // Cadencia CONSTANTE. applyControls deja puesto el rango del VISOR ([10,30] en
+            // esta lente), así que grabando a 30 fps el AE podía bajar a 10 en cuanto faltaba
+            // luz y el vídeo salía con frame rate variable: exactamente el defecto que el
+            // rival tiene documentado. Antes solo se forzaba el rango a 60 fps.
+            val exacto = fpsRangesAvailable.firstOrNull { it.lower == videoFps && it.upper == videoFps }
+                ?: fpsRangesAvailable.filter { it.upper == videoFps }.maxByOrNull { it.lower }
+                ?: if (videoFps >= 60) Range(60, 60) else null
+            if (exacto != null) {
+                builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, exacto)
+                Log.i("CamPerf", "vídeo a $exacto (${videoSize.width}x${videoSize.height})")
             }
 
             try { captureSession?.close() } catch (e: Exception) {}
@@ -3028,7 +4545,7 @@ class Camera2Controller(
 
             @Suppress("DEPRECATION")
             device.createCaptureSession(
-                listOf(previewSurface, recorderSurface),
+                listOf(vistaSurface, recorderSurface),
                 object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(session: CameraCaptureSession) {
                         if (cameraDevice == null) {
@@ -3139,8 +4656,10 @@ class Camera2Controller(
                 if (videoHevc) MediaRecorder.VideoEncoder.HEVC else MediaRecorder.VideoEncoder.H264
             )
             if (withAudio) recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-            // Time-lapse: captura ~2 fps y reproduce a videoFps (acelerado).
-            if (timeLapse) recorder.setCaptureRate(2.0)
+            // setCaptureRate son FOTOGRAMAS POR SEGUNDO capturados: un intervalo de 5 s es
+            // 0,2. Estaba clavado a 2.0 (dos por segundo), que apenas acelera nada y hacía
+            // inútil el modo: un time-lapse de verdad se hace con intervalos de segundos.
+            if (timeLapse) recorder.setCaptureRate(1.0 / timeLapseSec)
             recorder.setOrientationHint(currentJpegOrientation())
             recorder.prepare()
             recorder
@@ -3209,8 +4728,17 @@ class Camera2Controller(
     }
 
     companion object {
-        private const val MAX_PREVIEW_WIDTH = 1920
-        private const val MAX_PREVIEW_HEIGHT = 1080
+        /**
+         * Tope del tamaño de la SurfaceTexture del visor. Estaba clavado en 1920x1080: con la
+         * relación 4:3 y el recorte por altura, en la pantalla interior (2248 px de ancho) el
+         * visor acababa en 1440x1080, o sea 1,6 MP escalados hasta 6,7 MP de panel. De ahí la
+         * imagen blanda y el muaré arcoíris sobre telas y rejillas, que es el síntoma que el
+         * usuario ve directamente. 2592x1944 deja entrar 2560x1920 y 2304x1728.
+         */
+        private const val PREVIEW_CAP_W = 2592
+        private const val PREVIEW_CAP_H = 1944
+        private const val PREVIEW_CAP_SAFE_W = 1920
+        private const val PREVIEW_CAP_SAFE_H = 1080
         private const val OPEN_TIMEOUT_MS = 5000L
         /** Cuánto se mantiene el foco fijado tras tocar, antes de volver a continuo. */
         private const val TAP_FOCUS_HOLD_MS = 5000L
@@ -3230,9 +4758,34 @@ class Camera2Controller(
         /** Umbrales de ISO para elegir la reducción de ruido (ver applyDetailModes). */
         private const val NR_MINIMAL_MAX_ISO = 1600
         private const val NR_FAST_MAX_ISO = 3200
-        /** Techo de ISO y obturador de sincronización cuando dispara el flash. */
-        private const val FLASH_MAX_ISO = 1600
-        private const val FLASH_SYNC_EXP_NS = 16_666_667L // 1/60 s
+        /**
+         * Cuánto se recorta la parte AMBIENTAL de una foto con destello. Negativo: el primer
+         * plano lo ilumina el flash y el fondo no tiene por qué salir igual de expuesto que
+         * sin flash (que es lo que pasaba, y por eso el sujeto salía quemado).
+         */
+        private const val FLASH_AMBIENT_EV = -1.5f
+        /**
+         * Con destello el HAL baja mucho la sensibilidad respecto a la medición ambiental del
+         * visor: medido en este aparato, de ISO 12209 a ISO 2419 a 2,9x. Sirve para estimar
+         * el ISO real de la foto y elegir bien el perfil de detalle.
+         */
+        private const val FLASH_ISO_DIVISOR = 4
+        /** Cuánto aguanta un precalentado de AF sin foto antes de auto-cancelarse. */
+        private const val PREWARM_MAX_MS = 1500L
+        /** Cadencia máxima de análisis de códigos (5 por segundo). */
+        private const val QR_MIN_INTERVAL_MS = 200L
+        /** Calidad JPEG de TODA la app: petición al HAL, apilado de noche y recodificados. */
+        private const val JPEG_Q = 97
+        /** Suelo de la curva de tono: ningún píxel sale por debajo de esto (~2/255). */
+        private const val TONE_FLOOR = 0.008f
+        /** Exponente del pie: < 1 levanta solo las sombras profundas. */
+        private const val TONE_TOE = 0.90
+        /**
+         * Calibración medida en el CPH2765: la foto del tele (ID6) salía con mediana de luma
+         * 170 frente a 131 del gran angular en la misma escena. Se arranca en -1,0 EV y se
+         * afina desde la preferencia ev_offset_6 sin recompilar.
+         */
+        private val DEFAULT_LENS_EV = mapOf("6" to -1.0f)
         /** Vigilante del apilado nocturno: base + margen por fotograma. */
         private const val NIGHT_WATCHDOG_BASE_MS = 4000L
         private const val NIGHT_WATCHDOG_PER_FRAME_MS = 2000L

@@ -11,3 +11,13 @@ captures/
 *.keystore
 !debug.keystore
 !camara.keystore
+
+# Ficheros de trabajo: capturas de pantalla, volcados de dumpsys, fotos y vídeos de
+# prueba. Vivían sueltos en la raíz (116 ficheros scratch_* SEGUIDOS por git) y competían
+# visualmente con el código real: cualquier listado o búsqueda del proyecto salía
+# enterrada en ellos, y un clon arrastraba cientos de MB de capturas.
+# OJO: ignorarlos no basta, ya están en el índice. Hace falta, una sola vez:
+#   git rm --cached scratch_*   (los deja de seguir sin borrarlos del disco)
+#   mkdir scratch && mv scratch_* scratch/
+scratch/
+scratch_*

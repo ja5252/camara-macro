@@ -1,13 +1,59 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
     Superficie de CHIP (nivel 1 de la escala 8 / 16 / 28dp).
-    Estaba en #66000000 (40% de negro) con texto #CCFFFFFF: sobre la escena de la
-    cocina a contraluz eso daba ~1,8:1 y la fila superior de chips desaparecia.
-    Subimos el fondo al 60% y anadimos un filo de 1dp para que el chip tenga borde
-    propio incluso sobre una pared blanca quemada.
+
+    Era un <shape> plano, y de ahí salían dos fallos distintos:
+
+    1) ESTADO ACTIVO INVISIBLE DE REOJO. setChipState() ya pone chip.isSelected = active,
+       pero como el fondo era un shape sin estados ese isSelected no pintaba NADA: lo
+       único que distinguía un ajuste puesto de uno quitado era el color de la letra, y
+       mientras se compone no se mira la letra. Ahora el chip activo lleva filo ámbar de
+       1,5dp y un lavado ámbar al 18%, el mismo lenguaje que ya usa la parada de zoom
+       seleccionada (zoom_stop_bg), así que la HUD habla en un solo idioma.
+       El fondo del estado activo es 85% de negro y no 80%: bajo el lavado ámbar el texto
+       ámbar se queda en 4,36:1 sobre el 80% (falla el 4,5:1) y sube a 5,12:1 sobre el 85%.
+
+    2) SIN SEÑAL DE FOCO. Quien navega con teclado o Switch Access no tenía forma de saber
+       dónde estaba, porque el chip es un TextView plano. El trazo se dibuja DENTRO de los
+       límites del drawable, así que no desplaza el texto ni cambia el tamaño del chip: el
+       chip enfocado no da el salto de un píxel que delata un borde mal hecho.
+
+    El orden importa: el foco va primero, para que un chip activo Y enfocado enseñe el
+    foco, que es lo que hace falta para saber dónde va a caer la pulsación.
 -->
-<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
-    <solid android:color="@color/surface_chip" />
-    <stroke android:width="1dp" android:color="@color/hairline" />
-    <corners android:radius="8dp" />
-</shape>
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <item android:state_focused="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/surface_chip" />
+            <stroke android:width="2dp" android:color="@color/accent_bright" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+
+    <item android:state_selected="true">
+        <layer-list>
+            <item>
+                <shape android:shape="rectangle">
+                    <solid android:color="@color/surface_panel" />
+                    <corners android:radius="8dp" />
+                </shape>
+            </item>
+            <item>
+                <shape android:shape="rectangle">
+                    <solid android:color="@color/accent_soft" />
+                    <stroke android:width="1.5dp" android:color="@color/accent" />
+                    <corners android:radius="8dp" />
+                </shape>
+            </item>
+        </layer-list>
+    </item>
+
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/surface_chip" />
+            <stroke android:width="1dp" android:color="@color/hairline" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+</selector>

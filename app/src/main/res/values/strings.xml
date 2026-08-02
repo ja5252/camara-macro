@@ -113,6 +113,14 @@
     <string name="cd_qr_close">Cerrar el aviso del código</string>
     <string name="cd_rec_time">Tiempo grabado</string>
     <string name="cd_countdown">Cuenta atrás del temporizador</string>
+    <string name="cd_qr">Lector de códigos QR</string>
+    <string name="cd_fit">Ver el fotograma entero o llenar la pantalla</string>
+
+    <!-- La foto a pantalla completa y cada celda del carrete reutilizaban cd_thumbnail
+         ("Ver última foto"), que es la acción de un botón de OTRA pantalla: el lector
+         decía lo mismo en las cien celdas del carrete y no se podía navegar. -->
+    <string name="cd_photo_full">Foto a pantalla completa</string>
+    <string name="cd_media_cell">Abrir</string>
     <string name="state_on">activado</string>
     <string name="state_off">desactivado</string>
     <string name="state_auto">automático</string>
@@ -150,7 +158,17 @@
     <string name="chip_full">FULL</string>
     <string name="chip_med">MED</string>
     <string name="chip_wa">WHATSAPP</string>
+    <string name="chip_qr">QR</string>
+    <!-- Texto inicial del chip AJUSTAR/LLENAR. CameraActivity lo alterna al pulsarlo. -->
+    <string name="chip_fill">LLENAR</string>
+    <string name="chip_fit">AJUSTAR</string>
     <string name="night_stacking">Apilando…</string>
     <string name="qr_detected">Código detectado · toca para ver</string>
     <string name="cd_lens_chip">Lente %1$s: %2$s</string>
+
+    <!-- Literales que estaban incrustados en activity_camera.xml: sin esto la tarjeta
+         del código QR salía siempre en castellano aunque el teléfono estuviera en otro
+         idioma, porque los botones llevaban el texto escrito a mano en el layout. -->
+    <string name="copy">Copiar</string>
+    <string name="open">Abrir</string>
 </resources>

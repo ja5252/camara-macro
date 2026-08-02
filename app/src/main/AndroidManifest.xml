@@ -16,8 +16,23 @@
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
 
+    <!--
+        allowBackup="false": lo único que guarda la app en sus preferencias es "cameraId",
+        el ID de la lente FÍSICA elegida (aquí la 3). Con el respaldo activado ese ID se
+        sube a la nube y se restaura en CUALQUIER otro teléfono, donde apunta a una lente
+        que no existe o —lo peor posible— a la principal averiada: exactamente el fallo
+        que esta app existe para evitar. No hay nada más que respaldar: las fotos y los
+        vídeos viven en MediaStore, no en los datos de la app, así que no se pierde nada.
+        Nota para quien continúe: la variante fina (allowBackup="true" con
+        @xml/backup_rules y @xml/data_extraction_rules excluyendo camara.xml) exige dos
+        ficheros nuevos en res/xml; mientras no existan, referenciarlos rompe la
+        compilación en AAPT2. Con "false" el efecto práctico es el mismo salvo la
+        transferencia directa entre teléfonos (Android 12+), que allowBackup no gobierna:
+        ese hueco se cierra en código, validando el ID guardado contra cameraIdList al
+        arrancar CameraActivity antes de abrir nada.
+    -->
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -84,6 +99,17 @@
             android:screenOrientation="portrait"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|uiMode|keyboardHidden" />
 
+        <!-- El lector de códigos ya NO viaja dentro del APK: se pasó a la variante de
+             Google Play Services (play-services-mlkit-barcode-scanning), que pesa unos
+             pocos KB porque el modelo lo guarda Play Services. Este meta-data es el
+             mecanismo documentado para que Play Services se descargue el modelo AL
+             INSTALAR; sin él, el modelo se baja la primera vez que se pide un escaneo y
+             el primer intento del usuario falla en silencio (en el log aparece
+             "Waiting for the barcode module to be downloaded"). -->
+        <meta-data
+            android:name="com.google.mlkit.vision.DEPENDENCIES"
+            android:value="barcode" />
+
         <!-- Entrega de la foto a otras apps por content:// con permiso temporal -->
         <provider
             android:name="androidx.core.content.FileProvider"
@@ -97,6 +123,17 @@
 
         <activity
             android:name=".GalleryActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden"
+            android:theme="@style/Theme.CamaraMacro" />
+
+        <!-- Ajustes. exported="false": solo se llega desde el panel "..." de la cámara,
+             ninguna app de fuera debe poder abrirla. Lleva los mismos configChanges que
+             las demás porque en el plegable abrir el teléfono recreaba la Activity y
+             devolvía al usuario al principio de la lista, perdiendo lo que estaba
+             cambiando. -->
+        <activity
+            android:name=".SettingsActivity"
             android:exported="false"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden"
             android:theme="@style/Theme.CamaraMacro" />

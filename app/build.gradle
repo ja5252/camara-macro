@@ -11,16 +11,31 @@ android {
         applicationId "com.pepe.camaramacro"
         minSdk 26
         targetSdk 34
-        versionCode 1
-        versionName "1.0"
+        // Estaba congelado en 1 desde el primer día: para Android TODAS las publicaciones
+        // eran "la misma versión", el usuario no podía saber qué APK llevaba instalado y
+        // cualquier medida o informe de error quedaba sin trazabilidad. En CI se usa el
+        // número de ejecución del workflow, que es monótono creciente; en local queda 1
+        // para no adelantar la numeración. El workflow publica siempre con el tag
+        // "latest", así que no hay tags de versión de los que derivar el número.
+        versionCode((System.getenv("GITHUB_RUN_NUMBER") ?: "1") as Integer)
+        versionName("1." + (System.getenv("GITHUB_RUN_NUMBER") ?: "0"))
     }
 
     signingConfigs {
         camara {
             storeFile file('camara.keystore')
-            storePassword 'camara123'
+            // Las contraseñas estaban en claro y repetidas dentro de este mismo fichero,
+            // que está en el repositorio. Ahora salen del entorno (secretos de CI) o de
+            // gradle.properties; el valor histórico queda como último recurso para no
+            // romper la compilación mientras no se rote la clave (si se quitara hoy, el
+            // workflow dejaría de firmar y no habría APK que instalar).
+            storePassword(System.getenv("CAMARA_STORE_PASSWORD")
+                    ?: project.findProperty("camaraStorePassword")
+                    ?: 'camara123')
             keyAlias 'camara'
-            keyPassword 'camara123'
+            keyPassword(System.getenv("CAMARA_KEY_PASSWORD")
+                    ?: project.findProperty("camaraKeyPassword")
+                    ?: 'camara123')
         }
     }
 
@@ -61,5 +76,19 @@ dependencies {
     implementation 'androidx.recyclerview:recyclerview:1.3.2'
     implementation 'androidx.viewpager2:viewpager2:1.1.0'
     implementation 'io.coil-kt:coil:2.6.0'
-    implementation 'com.google.mlkit:barcode-scanning:17.2.0'
+    // Variante NO empaquetada del lector de códigos: el modelo vive en Google Play
+    // Services y se descarga al instalar (ver el meta-data com.google.mlkit.vision.DEPENDENCIES
+    // del manifiesto) en vez de viajar dentro del APK, que por eso pesaba 21,7 MB. La API
+    // es exactamente la misma (com.google.mlkit.vision.barcode.*), así que no hay que
+    // tocar ni una línea de Kotlin: BarcodeScanning.getClient() e InputImage siguen igual.
+    implementation 'com.google.android.gms:play-services-mlkit-barcode-scanning:18.3.1'
+    // Compila por adelantado (AOT) las rutas del arranque a partir del perfil que se
+    // empaqueta en src/main/baseline-prof.txt. R8 ya recortó el bytecode y bajó el
+    // arranque de 539 a 355 ms; lo que queda por ganar es que ART no tenga que
+    // INTERPRETAR el camino MAIN -> primer fotograma de visor la primera vez.
+    // El perfil va SIN comentarios a propósito: profgen (quien lo compila en la tarea
+    // compileReleaseArtProfile) espera una regla por línea. Si esa tarea llegara a fallar
+    // en Actions, basta con BORRAR app/src/main/baseline-prof.txt: nada más depende de él
+    // y esta dependencia es inofensiva sin perfil.
+    implementation 'androidx.profileinstaller:profileinstaller:1.3.1'
 }
