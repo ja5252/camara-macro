@@ -554,6 +554,41 @@
             android:visibility="gone" />
     </LinearLayout>
 
+    <!-- TIRA DE ZOOM FLOTANTE, fuera de la banda a proposito.
+         La aritmetica no daba: un visor 16:9 a todo el ancho mide 2027 px y la banda de
+         controles 756; suman 2783 en una pantalla con 2464 utiles. Faltan 319 px y algo
+         tiene que ceder. Meter los 319 px de recorte en el visor deja franjas negras a los
+         lados; dejar que la banda ENTERA se monte encima devuelve "los controles estorban
+         dentro de la foto", que es la queja de la que se viene.
+         La salida es la que usan iPhone y Pixel: el obturador y el selector de modo NUNCA
+         se dibujan sobre la imagen, y solo la tira de zoom flota sobre el borde inferior,
+         que es donde menos encuadre se pierde y donde el pulgar ya la busca. Se apoya en el
+         borde superior de la banda, asi que sube y baja con ella sola. -->
+<!-- Tira de zoom con scroll: con 6 paradas pedía 360dp sobre 351dp de pantalla
+             y se recortaba por los DOS lados, escondiendo justo el gran angular y el
+             teleobjetivo. Las píldoras se construyen por código, todas del mismo
+             tamaño exacto (@dimen/zoom_stop_width). -->
+        <HorizontalScrollView
+        app:layout_constraintBottom_toTopOf="@+id/control_band"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+            android:id="@+id/zoom_scroll"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            
+            android:clipToPadding="false"
+            android:fillViewport="true"
+            android:paddingHorizontal="@dimen/hud_side_margin"
+            android:scrollbars="none">
+
+            <LinearLayout
+                android:id="@+id/zoom_strip"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:orientation="horizontal" />
+        </HorizontalScrollView>
+
     <!-- ==================== 3. BANDA DE CONTROLES ==================== -->
     <LinearLayout
         android:id="@+id/control_band"
@@ -1266,27 +1301,7 @@
             android:paddingVertical="7dp"
             android:text="1.0x" />
 
-        <!-- Tira de zoom con scroll: con 6 paradas pedía 360dp sobre 351dp de pantalla
-             y se recortaba por los DOS lados, escondiendo justo el gran angular y el
-             teleobjetivo. Las píldoras se construyen por código, todas del mismo
-             tamaño exacto (@dimen/zoom_stop_width). -->
-        <HorizontalScrollView
-            android:id="@+id/zoom_scroll"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:clipToPadding="false"
-            android:fillViewport="true"
-            android:paddingHorizontal="@dimen/hud_side_margin"
-            android:scrollbars="none">
-
-            <LinearLayout
-                android:id="@+id/zoom_strip"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:gravity="center"
-                android:orientation="horizontal" />
-        </HorizontalScrollView>
+        
 
         <!-- Fila de modo. El selector FOTO/VIDEO sigue CENTRADO en la pantalla (es el
              ancla visual de la franja) y a su derecha va el atajo de WhatsApp, que antes
