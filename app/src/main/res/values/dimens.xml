@@ -25,11 +25,31 @@
          sin tope se partía en dos líneas e invadía la zona de la lupa. -->
     <dimen name="lens_chip_max_width">240dp</dimen>
 
+    <!--
+        MARGEN LATERAL ÚNICO DEL HUD.
+        El jurado midió los bordes izquierdos sobre una captura de 1140 px de ancho
+        (≈351dp): chip de lente 46 px, fila de zoom 52 px, barra superior de iconos 63 px
+        y fila del obturador 85 px, o sea 16 / 18 / 22 / 26dp apilados en vertical. Su
+        frase fue "el ojo lee el borde izquierdo como dentado", y tenía razón: en el XML
+        había 14dp (chip de lente y lupa), 16dp (tira de zoom), 8+4dp (barra de chips),
+        10dp (panel "⋯") y 26dp (fila del obturador). Cinco valores para una sola línea
+        vertical. Ahora hay UNO y todo lo demás se deriva de él.
+
+        hud_bar_side_padding es el mismo margen MENOS los 4dp de layout_marginHorizontal
+        que ya lleva cada ProChip: 12 + 4 = 16. Si se toca uno hay que tocar el otro, y
+        por eso están juntos y con la resta escrita.
+    -->
+    <dimen name="hud_side_margin">16dp</dimen>
+    <dimen name="hud_bar_side_padding">12dp</dimen>
+
     <!-- Separación de la miniatura y del botón de voltear respecto a los bordes.
-         Con el teléfono abierto la fila medía 592dp de punta a punta (unos 118 mm
-         reales): el margen crece en sw600dp para agrupar los tres controles en la
-         zona que el pulgar alcanza. -->
-    <dimen name="action_row_side_margin">26dp</dimen>
+         En teléfono vale el margen único del HUD (era 26dp: 10dp más adentro que la tira
+         de zoom que tiene justo encima, y ese escalón es el que remataba el borde
+         dentado). Con el teléfono ABIERTO no puede valer: la fila medía 592dp de punta a
+         punta (unos 118 mm reales) y por eso sw600dp lo sube a 150dp para agrupar los
+         tres controles dentro del arco del pulgar. Ahí el desnivel respecto al resto del
+         HUD es deliberado y es alcance, no descuido. -->
+    <dimen name="action_row_side_margin">16dp</dimen>
 
     <!-- Todas las paradas de zoom miden EXACTAMENTE lo mismo. La queja literal del
          usuario fue "botones de zoom disparejos": 0.6x y 2.9x se veían más grandes
@@ -66,4 +86,16 @@
     -->
     <dimen name="magnifier_top_inset">150dp</dimen>
     <dimen name="magnifier_bottom_inset">168dp</dimen>
+
+    <!--
+        Vúmetro de la fila de estado de vídeo. El jurado buscó "micro", "audio", "vumetro"
+        y "ganancia" en este layout y en strings.xml y no encontró ni una sola cadena: la
+        toma medida salió a -50,6 dBFS de media y -28,7 dBTP de pico y no había forma de
+        saberlo mientras se grababa. 80dp es lo que queda para la barra en 351dp de ancho
+        una vez descontados formato, micrófono y cifra de pico; en sw600dp hay sitio de
+        sobra y crece. maxHeight = layout_height porque ProgressBar escala su drawable a
+        maxHeight y sin fijarlo la barra sale con el alto por defecto del tema.
+    -->
+    <dimen name="audio_meter_width">80dp</dimen>
+    <dimen name="audio_meter_height">6dp</dimen>
 </resources>

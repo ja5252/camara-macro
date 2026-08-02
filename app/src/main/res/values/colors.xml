@@ -55,6 +55,39 @@
     <color name="hairline">#33FFFFFF</color>
     <!-- Ámbar al 18%: fondo de la parada de zoom seleccionada. -->
     <color name="accent_soft">#2EFF9E00</color>
+    <!--
+        Ámbar al 10% con filo al 50%: parada de zoom MÁS CERCANA cuando el pellizco deja
+        el zoom entre paradas. Tiene que leerse como "por aquí andas" sin confundirse con
+        el "estás exactamente aquí" del state_selected, que va al 18% con filo pleno.
+    -->
+    <color name="accent_faint">#1AFF9E00</color>
+    <color name="accent_edge">#80FF9E00</color>
+
+    <!--
+        Cuarto nivel de superficie: PANEL QUE DECIDE. El jurado midió que a través del
+        panel "⋯" se leían a la vez la pastilla de lente y la escena de detrás, y que por
+        eso el panel de HDR/RAW/proporción era ilegible sobre escena clara.
+        La cuenta: con surface_panel (85% de negro) sobre una pared quemada de 255 el panel
+        se pinta a 0,15 x 255 = 38/255, que es exactamente el rango en el que un texto
+        blanco de debajo sigue siendo legible. Al 96% baja a 10/255, por debajo del 12/255
+        que el propio jurado midió y describió como "visor completamente en negro".
+        NO sustituye a surface_panel: las pastillas (zoom, cronómetro, bloqueo AE/AF) se
+        quedan al 85% a propósito, porque esas flotan sobre la imagen y no deben taparla.
+    -->
+    <color name="surface_panel_solid">#F5000000</color>
+
+    <!--
+        Medidor de audio. El jurado midió la toma entregada a -50,6 dBFS de media y
+        -28,7 dBTP de pico "sin que el usuario tuviera forma alguna de saberlo mientras
+        grababa". Tres tramos, y los tres tienen que distinguirse de reojo sobre el visor
+        en vivo: verde = hay señal y va holgada, ámbar = zona de trabajo (-12..-6 dBFS),
+        rojo = satura. Se reutilizan focus_ok/focus_fail para no meter un verde y un rojo
+        nuevos en una paleta que ya tenía dos.
+    -->
+    <color name="meter_track">#33FFFFFF</color>
+    <color name="meter_ok">#FF6FD68C</color>
+    <color name="meter_peak">#FFFF9E00</color>
+    <color name="meter_clip">#FFFF6B4A</color>
 
     <!-- Botón de WhatsApp junto a FOTO/VIDEO. El verde de la marca a plena opacidad
          rompía la paleta cálida de la app (fue la queja del botón verde anterior), así

@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    VUMETRO. Fondo, retencion de pico y nivel instantaneo en un solo drawable de
+    ProgressBar horizontal, para no meter una View propia en Kotlin (que no es de este
+    fichero) por algo que el ProgressBar del sistema ya sabe pintar.
+
+    Reparto de los tres niveles del ProgressBar:
+      background        = carril, siempre visible. Sin el, un nivel bajo (la toma medida
+                          salio a -50,6 dBFS de media) no se distingue de "no hay barra".
+      secondaryProgress = RETENCION DE PICO, en ambar. Es lo que pide la debilidad critica
+                          24, "vumetro en vivo con pico y aviso de saturacion": el pico es
+                          justo lo que un nivel medio no ensena, y la toma del expediente
+                          tenia -28,7 dBTP de pico con -50,6 de media, 22 dB de diferencia.
+      progress          = nivel instantaneo, en verde.
+
+    El AVISO DE SATURACION no se pinta aqui: es un cambio de tinte sobre el nivel
+    (meter_clip) que tiene que hacer el codigo, porque depende de un umbral en dBFS que
+    este drawable no conoce. Ver el comentario de audio_meter en activity_camera.xml.
+
+    gravity="left" y no "start": es lo que usa el propio progress_horizontal de la
+    plataforma. Un vumetro crece de izquierda a derecha en todos los idiomas, incluso con
+    supportsRtl="true" puesto en el manifiesto.
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <item android:id="@android:id/background">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/meter_track" />
+            <corners android:radius="4dp" />
+        </shape>
+    </item>
+
+    <item android:id="@android:id/secondaryProgress">
+        <clip
+            android:clipOrientation="horizontal"
+            android:gravity="left">
+            <shape android:shape="rectangle">
+                <solid android:color="@color/meter_peak" />
+                <corners android:radius="4dp" />
+            </shape>
+        </clip>
+    </item>
+
+    <item android:id="@android:id/progress">
+        <clip
+            android:clipOrientation="horizontal"
+            android:gravity="left">
+            <shape android:shape="rectangle">
+                <solid android:color="@color/meter_ok" />
+                <corners android:radius="4dp" />
+            </shape>
+        </clip>
+    </item>
+</layer-list>

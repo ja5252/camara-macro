@@ -17,11 +17,19 @@
     <!-- Aquí cabe el nombre completo de la lente sin recortar. -->
     <dimen name="lens_chip_max_width">420dp</dimen>
 
+    <!-- El margen único del HUD respira más aquí: 16dp sobre 716dp de ancho dejaba los
+         chips pegados al canto. La regla no cambia (un solo valor para las cuatro filas),
+         cambia el valor. hud_bar_side_padding sigue siendo hud_side_margin menos los 4dp
+         de marginHorizontal del ProChip: 20 + 4 = 24. -->
+    <dimen name="hud_side_margin">24dp</dimen>
+    <dimen name="hud_bar_side_padding">20dp</dimen>
+
     <!--
-        La clave del alcance con una mano: con 26dp la miniatura y el botón de voltear
-        quedaban a 592dp de distancia (unos 118 mm), imposibles de tocar sin cambiar
+        La clave del alcance con una mano: con el margen del HUD la miniatura y el botón de
+        voltear quedaban a 592dp de distancia (unos 118 mm), imposibles de tocar sin cambiar
         la mano de sitio. Con 150dp los tres controles quedan agrupados en el centro,
-        dentro del arco natural del pulgar.
+        dentro del arco natural del pulgar. Es la ÚNICA fila que se sale del margen común,
+        y se sale por alcance, no por descuido.
     -->
     <dimen name="action_row_side_margin">150dp</dimen>
 
@@ -40,4 +48,9 @@
     -->
     <dimen name="magnifier_top_inset">170dp</dimen>
     <dimen name="magnifier_bottom_inset">320dp</dimen>
+
+    <!-- Aquí sobra ancho: el vúmetro puede ser largo de verdad, que es lo que hace
+         legible la diferencia entre -20 y -6 dBFS de un vistazo. -->
+    <dimen name="audio_meter_width">160dp</dimen>
+    <dimen name="audio_meter_height">7dp</dimen>
 </resources>

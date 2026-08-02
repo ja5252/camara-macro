@@ -100,8 +100,29 @@ class GalleryActivity : AppCompatActivity() {
         if (missing.isEmpty()) loadAndShow() else permLauncher.launch(missing.toTypedArray())
     }
 
+    /**
+     * loadMedia() son CUATRO consultas a MediaStore (imágenes y vídeos, carpeta actual y las
+     * dos antiguas) con ORDER BY sobre carpetas que pueden tener miles de filas, y corrían
+     * EN EL HILO PRINCIPAL antes de pintar nada: la galería se abría con la pantalla
+     * congelada el tiempo que tardara el proveedor, y en un carrete grande eso es un ANR a
+     * un mal día de distancia. Ahora se consultan en el hilo de fondo que esta pantalla ya
+     * tenía montado para las miniaturas y solo se vuelve al hilo de UI para colgar los
+     * adaptadores. Si la Activity se ha ido mientras tanto, no se toca nada.
+     */
     private fun loadAndShow() {
-        loadMedia()
+        // El resultado del diálogo de permisos puede llegar con la pantalla ya cerrándose y
+        // onDestroy hace bg.shutdownNow(): encolar ahí lanzaría RejectedExecutionException y
+        // se llevaría el proceso por delante.
+        try {
+            bg.execute {
+                loadMedia()
+                runOnUiThread { if (!isFinishing && !isDestroyed) mostrarMedia() }
+            }
+        } catch (e: Exception) {
+        }
+    }
+
+    private fun mostrarMedia() {
         binding.pager.adapter = Adapter()
         binding.grid.layoutManager = GridLayoutManager(this, gridColumns())
         binding.grid.adapter = GridAdapter()

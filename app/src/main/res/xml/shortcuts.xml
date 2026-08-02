@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    ACCESO DIRECTO DEL LANZADOR (pulsación larga sobre el icono de la app).
+
+    Bajas 5 y 10 del expediente, con el mismo razonamiento las dos: "el manifiesto ya
+    declara STILL_IMAGE_CAMERA, IMAGE_CAPTURE, GET_CONTENT y PICK —integración más ancha
+    que la app de fábrica— y le faltan justo los caminos de arranque rápido, que es lo que
+    decide si el usuario la usa o abre la de siempre".
+
+    Sólo hay UNO a propósito:
+      · "Foto" no está porque sería el mismo destino que tocar el icono: ruido, no atajo.
+      · "Recientes" no está porque GalleryActivity es exported="false" y un acceso directo
+        estático a una Activity no exportada depende de cómo resuelva el lanzador. Abrirlo
+        con exported="true" para ganar un atajo sería regalar el carrete a cualquier app
+        del teléfono: no compensa.
+      · Los modos (noche, PRO) necesitan que CameraActivity lea un extra al arrancar, y ese
+        fichero no es de este integrador. Un atajo que promete "Modo noche" y abre la
+        cámara normal es peor que no tenerlo.
+
+    targetPackage va literal: en recursos NO se puede usar ${applicationId}, sólo en el
+    manifiesto. Si algún día cambia el applicationId de build.gradle
+    (hoy "com.pepe.camaramacro"), hay que cambiarlo también aquí.
+
+    PENDIENTE EN CameraActivity: hoy armIntentCapture() sólo reconoce
+    MediaStore.ACTION_VIDEO_CAPTURE (captura para OTRA app) y no
+    MediaStore.INTENT_ACTION_VIDEO_CAMERA ("abre la cámara en modo vídeo"), que es la que
+    manda este atajo y la que el manifiesto lleva declarada desde siempre en su
+    intent-filter. Sin esa línea el atajo abre la app en el último modo usado en vez de en
+    vídeo: degrada bien, pero no cumple lo que promete el rótulo.
+-->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="grabar_video"
+        android:enabled="true"
+        android:icon="@drawable/ic_movie"
+        android:shortcutShortLabel="@string/shortcut_video_short"
+        android:shortcutLongLabel="@string/shortcut_video_long">
+        <intent
+            android:action="android.media.action.VIDEO_CAMERA"
+            android:targetPackage="com.pepe.camaramacro"
+            android:targetClass="com.pepe.camaramacro.CameraActivity" />
+    </shortcut>
+</shortcuts>

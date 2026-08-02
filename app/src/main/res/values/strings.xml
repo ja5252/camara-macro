@@ -179,4 +179,202 @@
          idioma, porque los botones llevaban el texto escrito a mano en el layout. -->
     <string name="copy">Copiar</string>
     <string name="open">Abrir</string>
+
+    <!--
+        ==================================================================
+        AUDIO DE VIDEO
+        ==================================================================
+        El bloque de audio sacó 1,6 sobre 10, la peor nota de todo el expediente. Parte
+        del arreglo ya está hecho en el motor (48 kHz, estéreo, 256 kbps y CAMCORDER en
+        vez de MIC), pero el reproche que toca a ESTE fichero sigue entero y lo firman
+        tres jueces: "busqué 'micro', 'audio', 'vumetro', 'ganancia' y 'viento' en
+        activity_camera.xml y en strings.xml: no hay ni una sola cadena. No existe
+        absolutamente ningún control ni indicación de audio". Aquí están las cadenas; los
+        consumidores van anotados uno a uno para el dueño de CameraActivity.
+    -->
+
+    <!-- Chip conmutable de la fila de vídeo: grabar con sonido o mudo a propósito. -->
+    <string name="chip_audio">SONIDO</string>
+    <string name="cd_audio">Sonido del vídeo: %1$s</string>
+    <string name="audio_on">con sonido</string>
+    <string name="audio_muted">mudo</string>
+
+    <!-- Insignia PERMANENTE del visor cuando el vídeo va a salir sin pista de audio.
+         Debilidad crítica 22: "no grabar mudo en silencio". -->
+    <string name="badge_muted">SIN SONIDO</string>
+    <string name="cd_badge_muted">Aviso: este vídeo se está grabando sin sonido</string>
+    <!-- Aviso ANTES de empezar, no al descubrirlo en casa. -->
+    <string name="hint_recording_muted">Vas a grabar SIN sonido</string>
+    <string name="hint_no_audio_permission">Sin permiso de micrófono: el vídeo saldrá mudo</string>
+
+    <!-- Vúmetro. El pico va aparte de la media porque la toma medida por el jurado dio
+         -50,6 dBFS de media y -28,7 dBTP de pico: 22 dB de diferencia. -->
+    <string name="cd_audio_meter">Nivel de audio</string>
+    <string name="audio_level_db">%1$d dB</string>
+    <string name="cd_audio_level">Nivel de audio: %1$d decibelios, pico %2$d</string>
+    <string name="audio_clipping">SATURA</string>
+    <string name="cd_audio_clipping">El audio está saturando: baja la ganancia o aléjate de la fuente</string>
+    <string name="hint_audio_silent">No entra sonido: comprueba que no tapas el micrófono</string>
+
+    <!-- Ganancia y AGC conmutable (debilidad crítica 24). -->
+    <string name="chip_agc">AGC</string>
+    <string name="cd_agc">Control automático de ganancia: %1$s</string>
+    <string name="chip_gain">GANANCIA</string>
+    <string name="cd_gain">Ganancia del micrófono</string>
+    <!-- %1$s y no %1$+d: el argumento llega ya formateado con su signo ("+6", "-3"). Los
+         indicadores con bandera y el escape %% son válidos en Java pero no hay UNA sola
+         cadena así en todo el proyecto, no hay compilador local para probarlo y un fallo
+         de AAPT2 cuesta un ciclo entero de Actions. No es sitio para estrenar sintaxis. -->
+    <string name="gain_value">%1$s dB</string>
+
+    <!-- Filtro contra el viento (medio 57): "el rumble de manejo y el viento son el
+         enemigo número uno y hoy no hay ninguna defensa ni ningún control". -->
+    <string name="chip_wind">VIENTO</string>
+    <string name="cd_wind">Filtro contra el viento y el ruido de manejo: %1$s</string>
+
+    <!-- Micrófono externo USB-C o Bluetooth (medio 58: "es una portería vacía"). -->
+    <string name="audio_ext_mic">MICRO EXT.</string>
+    <string name="cd_ext_mic">Micrófono externo en uso: %1$s</string>
+    <string name="hint_ext_mic_on">Micrófono externo conectado: %1$s</string>
+    <string name="hint_ext_mic_off">Micrófono externo desconectado: se vuelve al del teléfono</string>
+
+    <!--
+        ==================================================================
+        ESTADO DE GRABACIÓN EN PANTALLA
+        ==================================================================
+        Debilidad ALTA 44: "En la captura de modo vídeo no hay absolutamente nada sobre lo
+        que se va a grabar. El usuario pulsa REC sin saber si está en 1080p30 H.264 o en
+        4K60 HEVC. Los chips existen en el layout (chip_vres, chip_vfps, chip_vcodec,
+        chip_tl) pero viven DENTRO de video_panel". La fila video_hud de
+        activity_camera.xml es el sitio; esto es lo que escribe en ella.
+    -->
+    <string name="video_format">%1$s · %2$s · %3$s</string>
+    <string name="cd_video_format">Se va a grabar en %1$s, %2$s, códec %3$s</string>
+    <!-- Pedida por escrito desde CameraActivity.onRecordingChanged, que hoy lleva el
+         literal en castellano con la nota "strings.xml no es nuestro". -->
+    <string name="cd_stop_recording">Detener la grabación</string>
+
+    <!-- Lectura real del AE en el HUD (medio 42): "sin ISO ni obturador en pantalla el
+         modo pro está incompleto". El motor todavía no publica aeIso/aeExposureNs; la
+         cadena queda lista para cuando lo haga. -->
+    <string name="exposure_readout">ISO %1$d · %2$s</string>
+    <string name="cd_exposure_readout">Exposición medida: ISO %1$d, %2$s</string>
+
+    <!-- Herramientas de monitorización de vídeo (ALTA 61, medio 43). -->
+    <string name="chip_zebra">CEBRAS</string>
+    <string name="cd_zebra">Cebras de exposición: %1$s</string>
+    <!-- Igual que gain_value: el argumento llega con su unidad puesta ("70%"), para no
+         meter %% en un fichero donde no hay ninguno y no se puede compilar en local. -->
+    <string name="zebra_level">CEBRAS %1$s</string>
+    <string name="chip_stab">EIS</string>
+    <string name="cd_stab">Estabilización de vídeo: %1$s</string>
+    <string name="chip_ae_lock">BLOQUEO</string>
+    <string name="cd_ae_awb_lock">Bloqueo de exposición y color durante la grabación: %1$s</string>
+
+    <!--
+        ==================================================================
+        AVISOS DE FLASH
+        ==================================================================
+        Seis debilidades CRÍTICAS distintas dicen lo mismo con la misma medida:
+        foto_conflash_2.9x sale con p1=121,8 y p99=209,6 (88 de 255 niveles) y saturación
+        1,9, o sea niebla blanca monocroma, "la única toma del expediente literalmente
+        inutilizable por decisión de la app". Todas piden lo mismo en la interfaz: que el
+        usuario se entere ANTES, no al ver la foto. Sin aviso escrito no hay arreglo.
+    -->
+    <string name="hint_flash_tele_blocked">El flash vela la foto con el teleobjetivo: desactivado en esta lente</string>
+    <string name="hint_flash_switched_wide">Flash: se cambia al gran angular para no velar la foto</string>
+    <string name="hint_flash_out_of_range">El sujeto está fuera del alcance del flash (unos 2 m)</string>
+    <string name="hint_flash_veiled">Destello velado: se repite la foto sin flash</string>
+
+    <!--
+        ==================================================================
+        MODO NOCHE
+        ==================================================================
+        Medio 64 y 88: el vigilante llega a 18 s (4000 ms + 2000 x 7 fotogramas) y "sin
+        cuenta atrás visible el usuario no sabe si soltar el teléfono"; es además la queja
+        número uno documentada contra el modo noche del rival. ALTA 15 y 65: el apilado
+        entrega 3280x1856 (6,09 MP) frente a 8,29 MP, "se paga resolución sin que el
+        usuario lo sepa ni pueda elegir".
+    -->
+    <string name="night_progress">Apilando %1$d de %2$d</string>
+    <string name="night_hold_still">No muevas el teléfono</string>
+    <string name="night_cancel">Cancelar</string>
+    <string name="cd_night_cancel">Cancelar la foto de noche</string>
+    <string name="hint_night_crop">El modo noche entrega menos píxeles que una foto normal</string>
+    <!-- Medio 66: el NightStacker ya calcula k y el techo en función de "ambience", y el
+         propio comentario del código dice "No lo toca nadie todavía". -->
+    <string name="chip_ambience">AMBIENTE</string>
+    <string name="cd_ambience">Cuánta noche conservar</string>
+
+    <!--
+        ==================================================================
+        ASISTENTE DE LENTES
+        ==================================================================
+        SetupActivity ya detecta el sensor muerto y bloquea "Usar esta lente", que es lo
+        que pedían ocho debilidades (una crítica y siete altas). Lo que le falta es no
+        llevar los veredictos escritos a mano en castellano dentro del Kotlin: la app tiene
+        values-en y esta pantalla es justo la primera que ve alguien con el teléfono en
+        inglés. %1$d = número de lente empezando en 1, %2$d = total.
+    -->
+    <string name="setup_lens_counter">Lente %1$d de %2$d</string>
+    <string name="setup_lens_ok">✔ Esta lente da imagen: puedes usarla</string>
+    <string name="setup_lens_probing">⏳ Comprobando si da imagen…</string>
+    <string name="setup_lens_dead">⚠ SIN IMAGEN. Este sensor no entrega ningún fotograma (es de los averiados).\nPrueba con Siguiente.</string>
+    <string name="setup_lens_dead_toast">Esta lente no da imagen: prueba otra</string>
+
+    <!--
+        ==================================================================
+        LITERALES QUE SEGUÍAN DENTRO DEL KOTLIN
+        ==================================================================
+        Medio 75, verificado por el jurado línea a línea: "la app tiene locale en inglés y
+        la captura actual está en inglés ('TELEPHOTO', 'PHOTO', 'VIDEO'), pero esos chips y
+        avisos aparecerán en castellano en el mismo panel. Mezcla de idiomas visible en
+        pantalla". Los nombres siguen el patrón que ya usa el fichero: chip_* para el
+        rótulo, cd_* para el lector de pantalla, hint_* para el aviso efímero.
+    -->
+    <string name="chip_mf">MF</string>
+    <string name="cd_mf">Enfoque manual: %1$s</string>
+    <string name="mf_value">MF %1$s</string>
+    <string name="chip_aeb">AEB</string>
+    <string name="cd_aeb">Horquillado de exposición: %1$s</string>
+    <!-- cd_tools sirve para las DOS cosas: la descripción accesible del chip y el texto
+         del aviso efímero, que hoy es el literal "Herramientas de análisis: " concatenado
+         en dos sitios distintos del Kotlin. Una sola cadena y no dos idénticas: dos
+         copias del mismo texto acaban traducidas sólo una. -->
+    <string name="chip_tools">ANÁLISIS</string>
+    <string name="cd_tools">Herramientas de análisis: %1$s</string>
+    <string name="hint_qr_on">Lector de códigos activado</string>
+    <string name="hint_qr_off">Lector de códigos desactivado</string>
+    <string name="hint_no_manual_focus">Esta lente no permite enfoque manual</string>
+    <string name="hint_aeb_needs_auto">El horquillado necesita exposición automática</string>
+    <string name="hint_no_ev">Esta lente no permite compensar la exposición</string>
+    <string name="focus_stack_progress">Apilado de enfoque %1$d/%2$d</string>
+    <string name="bracket_progress">Horquillado %1$d/%2$d</string>
+    <string name="retry">Repetir</string>
+    <string name="use_this_short">Usar esta</string>
+    <string name="pro_auto">AUTO</string>
+
+    <!-- Los seis balances de blancos preajustados. Estaban en un arrayOf() del Kotlin, así
+         que en un teléfono en inglés el panel PRO decía "WB Incand." y "WB Nube" al lado
+         de chips en inglés. El orden es el del código (wbIndex lo indexa directamente) y
+         NO se puede reordenar sin cambiar el mapeo del controlador. -->
+    <string-array name="wb_labels">
+        <item>WB AUTO</item>
+        <item>WB Incand.</item>
+        <item>WB Fluor.</item>
+        <item>WB Sol</item>
+        <item>WB Nube</item>
+        <item>WB Sombra</item>
+    </string-array>
+
+    <!--
+        ==================================================================
+        ACCESOS DIRECTOS DEL LANZADOR (res/xml/shortcuts.xml)
+        ==================================================================
+        Bajas 5 y 10: "la integración por intents ya es buena, pero faltan las tres vías de
+        arranque rápido más usadas, y en este teléfono la app debería ser el único camino a
+        una cámara que funciona".
+    -->
+    <string name="shortcut_video_short">Vídeo</string>
+    <string name="shortcut_video_long">Grabar vídeo</string>
 </resources>

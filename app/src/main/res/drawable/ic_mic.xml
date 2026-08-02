@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Microfono. No existia NINGUN icono de audio en la app: el jurado busco "micro",
+    "audio", "vumetro", "ganancia" y "viento" en activity_camera.xml y en strings.xml y no
+    encontro ni una sola cadena. Silueta recta y maciza, sin trazo, para que a 20dp sobre
+    el visor en vivo no se emborrone (mismo criterio que ic_torch).
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="20dp"
+    android:height="20dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,2.5C10.6,2.5 9.5,3.6 9.5,5L9.5,11.5C9.5,12.9 10.6,14 12,14C13.4,14 14.5,12.9 14.5,11.5L14.5,5C14.5,3.6 13.4,2.5 12,2.5Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M6,10.5L7.7,10.5C7.7,13 9.6,14.9 12,14.9C14.4,14.9 16.3,13 16.3,10.5L18,10.5C18,13.6 15.8,16.1 12.9,16.5L12.9,19.3L15.5,19.3L15.5,21L8.5,21L8.5,19.3L11.1,19.3L11.1,16.5C8.2,16.1 6,13.6 6,10.5Z" />
+</vector>

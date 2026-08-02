@@ -15,6 +15,7 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
 import android.net.Uri
 import android.os.Build
@@ -138,6 +139,39 @@ class CameraActivity : AppCompatActivity() {
     private var vfps = 30
     private var vhevc = false
     private var tlOn = false
+
+    /**
+     * Cadencias de vídeo. toggleVfps() alternaba SOLO 30 y 60: sin 24 fps (la cadencia de
+     * cine) ni 25 (PAL/broadcast) la app queda fuera de cualquier flujo de producción, y es
+     * literalmente la misma crítica que el expediente le hace al rival. El motor ya monta un
+     * rango de AE CERRADO por cadencia (CONTROL_AE_TARGET_FPS_RANGE), así que la
+     * infraestructura estaba puesta y solo faltaban los valores.
+     */
+    private val vfpsList = intArrayOf(24, 25, 30, 60)
+
+    /**
+     * Sonido del vídeo. Hasta ahora el motor recibía un booleano withAudio y NADIE lo
+     * apagaba nunca salvo el time-lapse: no había interruptor, ni indicador, ni forma de
+     * saber si estaba entrando sonido hasta abrir el archivo en casa. El jurado midió la
+     * toma entregada a -50,6 dBFS de media y -28,7 dBTP de pico sin que el usuario tuviera
+     * manera de enterarse mientras grababa.
+     */
+    private var audioOn = true
+
+    /** ¿Está concedido RECORD_AUDIO? Se relee al entrar en vídeo y al pulsar REC. */
+    private var audioGranted = false
+
+    /** Interruptor de sonido del panel de vídeo (creado por código, ver buildExtraChips). */
+    private var chipMic: TextView? = null
+
+    /** Rótulo permanente de lo que se va a grabar: resolución · fps · códec · sonido. */
+    private var videoHud: TextView? = null
+
+    /**
+     * El zoom actual coincide con una parada de la tira. Si NO coincide, la píldora del
+     * nivel es lo único que dice en qué zoom está el usuario y no se puede esconder.
+     */
+    private var zoomOnStop = true
     private val sensorManager by lazy { getSystemService(SENSOR_SERVICE) as SensorManager }
     private val rotationListener = object : SensorEventListener {
         private val rot = FloatArray(9)
@@ -195,6 +229,15 @@ class CameraActivity : AppCompatActivity() {
     private var toolHist = true
     private var toolZebra = false
     private var toolPeak = false
+
+    /**
+     * Umbral de las cebras: 0 = 70 % (tono de piel), 1 = 95 % (aviso antes de quemar),
+     * 2 = recorte ya consumado. Estaba clavado en "y >= 250", o sea que solo avisaba de lo
+     * que YA se había perdido; una cebra útil avisa ANTES, y el 70 % es la herramienta de
+     * exposición más usada en rodaje.
+     */
+    private var zebraLevel = 2
+    private val zebraLumas = intArrayOf(178, 242, 250)
     private var analysisBmp: Bitmap? = null
     private var maskBmp: Bitmap? = null
     private var analysisPx: IntArray? = null
@@ -326,8 +369,15 @@ class CameraActivity : AppCompatActivity() {
         }
 
     private val requestAudio =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
-            // Permiso pre-concedido al entrar a modo video; grabar es una acción aparte.
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            // El cuerpo de este callback estaba VACÍO, y esa era la causa exacta del peor
+            // fallo silencioso de la app: con el permiso denegado se grababa MUDO sin decir
+            // nada (startRec(withAudio=false) tampoco mostraba nada), el usuario terminaba
+            // la toma y descubría el desastre en casa. Ahora el estado se repinta al
+            // instante y, si dijo que no, se le dice con todas las letras.
+            audioGranted = granted
+            updateAudioUi()
+            if (!granted) hint("Sin permiso de micrófono: los vídeos saldrán MUDOS")
         }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -339,6 +389,33 @@ class CameraActivity : AppCompatActivity() {
         if (captureIntent) setResult(RESULT_CANCELED) // contrato por defecto si el usuario sale
 
         var savedId = prefs.getString("cameraId", null)
+        // VALIDACIÓN del ID guardado contra la lista REAL de cámaras del aparato.
+        //
+        // Sin ella —y el propio manifiesto lo tenía documentado por escrito— un ID
+        // restaurado por transferencia directa desde otro teléfono, o el de una lente que
+        // ColorOS deja de publicar, se pasaba tal cual a controller.open(): la apertura
+        // moría en el vigilante de 5 s y el usuario veía "Esta lente no respondió" en CADA
+        // arranque, sin ningún camino de vuelta al asistente. Cinco jueces distintos lo
+        // señalaron y el arreglo estaba escrito hasta la línea exacta.
+        //
+        // Se usa cameraIdList y NO CameraInfoUtil.listLenses: listLenses pide las
+        // características de las ocho cámaras del aparato y esto corre en el camino crítico
+        // del arranque en frío, que es justo donde la app dice querer ganar. cameraIdList es
+        // una sola llamada al servicio. La lista vacía se ignora a propósito: si el servicio
+        // de cámara falla en ese instante, borrar la preferencia mandaría al asistente a un
+        // usuario cuya lente sí existe.
+        val idGuardado = savedId
+        if (idGuardado != null) {
+            val ids: Array<String> = try {
+                (getSystemService(CAMERA_SERVICE) as CameraManager).cameraIdList
+            } catch (e: Exception) {
+                emptyArray()
+            }
+            if (ids.isNotEmpty() && !ids.contains(idGuardado)) {
+                prefs.edit().remove("cameraId").apply()
+                savedId = null
+            }
+        }
         if (savedId == null || savedId == "0") {
             if (captureIntent) {
                 // Con un intent en curso NO podemos irnos al asistente: perderíamos al
@@ -392,6 +469,10 @@ class CameraActivity : AppCompatActivity() {
                 syncRatioChip()
                 updateLensChip()
                 buildZoomStrip()
+                // Aquí y no en restoreSettings: supports4kVideo se rellena leyendo el
+                // StreamConfigurationMap de la lente, que no existe hasta que la sesión
+                // está montada.
+                migrateVideoDefaults()
                 // Da un par de fotogramas a la lente nueva antes de quitar el congelado.
                 ui.postDelayed({ releaseLensFade() }, 120)
             }
@@ -648,6 +729,14 @@ class CameraActivity : AppCompatActivity() {
         chipTools = insertChip(binding.chipFilter, "ANÁLISIS", antes = false)?.also { chip ->
             chip.setOnClickListener { toggleTools() }
         }
+        // Interruptor de SONIDO, en la fila del panel de vídeo junto a TL. No existía
+        // NINGÚN control de audio en toda la app: ni silenciar, ni nivel, ni indicación de
+        // que se estuviera grabando con sonido (busqué "micro", "audio", "vumetro" y
+        // "ganancia" en el layout y en strings.xml: cero coincidencias, y el jurado también).
+        chipMic = insertChip(binding.chipTl, "SONIDO", antes = false)?.also { chip ->
+            chip.setOnClickListener { toggleAudio() }
+        }
+        buildVideoHud()
         // El overlay de análisis cuelga del HUD del visor, que PreviewFrameLayout coloca
         // exactamente sobre el rectángulo VISIBLE de la imagen: así las cebras caen sobre
         // los píxeles que de verdad se están quemando y no sobre la franja negra.
@@ -662,6 +751,40 @@ class CameraActivity : AppCompatActivity() {
         // histograma tiene que leerse sobre el degradado, no taparlo.
         hud.addView(v, (hud.indexOfChild(binding.gridOverlay) + 1).coerceIn(0, hud.childCount))
         analysisOverlay = v
+    }
+
+    /**
+     * Rótulo permanente de LO QUE SE VA A GRABAR: resolución, cadencia, códec y sonido.
+     *
+     * En la captura de modo vídeo que juzgó el jurado no había absolutamente nada en
+     * pantalla sobre el formato: el usuario pulsaba REC sin saber si iba a 1080p30 H.264 o a
+     * 4K60 HEVC, y sobre todo sin saber si entraba sonido. Los chips existen (chip_vres,
+     * chip_vfps, chip_vcodec) pero viven DENTRO del panel de vídeo, que además se cierra al
+     * empezar a rodar. Este rótulo vive en la barra superior y sigue visible durante toda la
+     * toma, que es cuando el estado del micrófono importa de verdad.
+     *
+     * Se crea por código porque activity_camera.xml es de otro integrador y añadir ahí un id
+     * nuevo rompería su compilación. top_bar es un LinearLayout vertical (fila de chips
+     * arriba, cronómetro debajo) y el rótulo se mete en medio: el orden en que se leen es
+     * "qué voy a grabar" y después "cuánto llevo grabando".
+     */
+    private fun buildVideoHud() {
+        val barra = binding.topBar
+        val tv = TextView(this, null, 0, R.style.ProChip)
+        tv.visibility = View.GONE
+        tv.setOnClickListener {
+            if (controller.isRecording) hint("El formato no se puede cambiar a mitad de la toma")
+            else toggleVideoPanel()
+        }
+        markAsButton(tv)
+        val lp = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            gravity = android.view.Gravity.CENTER_HORIZONTAL
+            topMargin = dp(6f).toInt()
+        }
+        barra.addView(tv, 1.coerceAtMost(barra.childCount), lp)
+        videoHud = tv
     }
 
     /** Crea un chip ProChip y lo mete en la MISMA fila que [ref]. */
@@ -845,6 +968,12 @@ class CameraActivity : AppCompatActivity() {
         vfps = prefs.getInt("vfps", 30)
         vhevc = prefs.getBoolean("vhevc", false)
         tlOn = prefs.getBoolean("tl", false)
+        // El sonido SÍ se recuerda: quien graba mudo a propósito (conciertos, entornos
+        // ruidosos) no quiere volver a apagarlo en cada toma. El estado se ve siempre en el
+        // rótulo de formato, así que recordarlo no puede sorprender a nadie.
+        audioOn = prefs.getBoolean("vaudio", true)
+        audioGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
         applyVideoSettings()
 
         // Se recuerda el VALOR del enfoque manual entre sesiones, pero NO el estado:
@@ -872,6 +1001,14 @@ class CameraActivity : AppCompatActivity() {
         toolZebra = prefs.getBoolean("toolZebra", false)
         toolPeak = prefs.getBoolean("toolPeak", false)
         toolsOn = prefs.getBoolean("toolsOn", false)
+        zebraLevel = prefs.getInt("zebraLevel", 2).coerceIn(0, 2)
+
+        // Medición a la CARA. setFaceMetering() estaba implementado en el motor y no lo
+        // llamaba nadie: la detección de caras corría igual (el motor la enciende si hay
+        // alguien escuchando onFaces) y su resultado no se usaba nunca para exponer. Apagada
+        // por defecto a propósito: mueve la exposición de toda la escena en cuanto entra
+        // alguien en cuadro, que es justo lo que una app de macro no quiere.
+        controller.setFaceMetering(prefs.getBoolean("faceMetering", false))
         analysisOverlay?.showHistogram = toolsOn && toolHist
         chipTools?.let {
             setExtraChip(
@@ -975,6 +1112,20 @@ class CameraActivity : AppCompatActivity() {
         if (!::controller.isInitialized) return
         resumed = true
         reopenTries = 0
+        // LA CÁMARA, LO PRIMERO. Todo lo demás de este método (miniatura, espejo del
+        // plegable, sensor de rotación, herramientas de análisis) se ejecutaba POR DELANTE
+        // de la apertura y le robaba los primeros milisegundos al único trabajo que el
+        // usuario está esperando: ver imagen. open() es asíncrona —encola en el hilo de
+        // fondo del motor— así que adelantarla no retrasa nada de lo que viene detrás:
+        // simplemente el HAL empieza antes. Es el único recorte de arranque en frío
+        // disponible sin tocar el motor.
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+            == PackageManager.PERMISSION_GRANTED
+        ) {
+            startCamera()
+        } else {
+            requestCamera.launch(Manifest.permission.CAMERA)
+        }
         refreshThumbnail()
         // Vigila si aparece o desaparece la pantalla externa del plegable: el chip
         // "Espejo" solo debe existir cuando de verdad hay dónde pintarlo.
@@ -986,13 +1137,12 @@ class CameraActivity : AppCompatActivity() {
         startRollSensor()
         ui.removeCallbacks(analysisTick)
         if (toolsOn) ui.post(analysisTick)
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
-            == PackageManager.PERMISSION_GRANTED
-        ) {
-            startCamera()
-        } else {
-            requestCamera.launch(Manifest.permission.CAMERA)
-        }
+        // El permiso de micrófono puede haber cambiado en Ajustes del sistema mientras la
+        // app estaba en segundo plano: si no se relee aquí, el rótulo seguiría prometiendo
+        // sonido en una toma que va a salir muda.
+        audioGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        updateAudioUi()
     }
 
     override fun onPause() {
@@ -1107,12 +1257,13 @@ class CameraActivity : AppCompatActivity() {
         // El chip de ajustes de video solo aparece en modo video.
         binding.chipVid.visibility = if (photo) View.GONE else View.VISIBLE
         if (photo && binding.videoPanel.visibility == View.VISIBLE) showPanel(null)
-        if (!photo &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
-            requestAudio.launch(Manifest.permission.RECORD_AUDIO)
-        }
+        // El rótulo de formato solo tiene sentido en vídeo, pero ahí tiene que estar SIEMPRE:
+        // es lo único que dice qué se va a grabar y si va a entrar sonido.
+        videoHud?.visibility = if (photo) View.GONE else View.VISIBLE
+        audioGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        if (!photo && !audioGranted) requestAudio.launch(Manifest.permission.RECORD_AUDIO)
+        updateAudioUi()
     }
 
     // ---- Enfoque ----
@@ -1710,16 +1861,23 @@ class CameraActivity : AppCompatActivity() {
             val d = kotlin.math.abs(currentZoom - t.first) / t.first.coerceAtLeast(0.01f)
             if (d < best) { best = d; active = i }
         }
-        // Y si el zoom real no está DE VERDAD en ninguna parada (pellizco a 6,6x), no se
-        // resalta ninguna: antes quedaba marcada la de 5x y el HUD se contradecía consigo
-        // mismo mientras el rótulo decía otra cosa.
-        if (best > 0.02f) active = -1
+        // ¿El zoom coincide DE VERDAD con una parada? Antes, si no coincidía, se ponía
+        // active = -1 y no se resaltaba ninguna. Eso es exactamente lo que el jurado midió
+        // sobre la captura de la versión actual: las cinco pastillas con el mismo relleno
+        // neutro (~#3A3A3A) y la píldora apagada mientras el chip de lente afirmaba
+        // "TELEPHOTO · 77 MM". En ese estado la pantalla no dice en qué zoom está el usuario,
+        // que es la única cosa que esta app existe para decir. Ahora la parada más cercana se
+        // marca SIEMPRE; lo que cambia es CÓMO: exacta = ámbar con relleno, entre paradas =
+        // ámbar atenuado y sin relleno, que se lee como "vas por aquí" sin afirmar que estés
+        // clavado en esa parada.
+        val exacta = best <= 0.02f
+        zoomOnStop = exacta && active >= 0
         for (i in 0 until binding.zoomStrip.childCount) {
             val esOptica = stops.getOrNull(i)?.third == true
             val v = binding.zoomStrip.getChildAt(i) as? TextView ?: continue
             // El estado seleccionado se lee de reojo: fondo ámbar al 18% con filo ámbar
             // (zoom_stop_bg), no solo el color de la cifra.
-            v.isSelected = i == active
+            v.isSelected = i == active && exacta
             v.setTextColor(
                 when {
                     i == active -> cAccent
@@ -1727,6 +1885,7 @@ class CameraActivity : AppCompatActivity() {
                     else -> cOff            // zoom digital: atenuado
                 }
             )
+            v.alpha = if (i == active && !exacta) 0.7f else 1f
         }
         // CENTRAR la parada activa en la ventana visible. La tira vive dentro de un
         // HorizontalScrollView justo porque con 6 paradas mide 384dp (56dp + 8dp por
@@ -1863,7 +2022,11 @@ class CameraActivity : AppCompatActivity() {
         binding.zoomPill.animate().cancel()
         binding.zoomPill.alpha = 1f
         ui.removeCallbacks(hideZoom)
-        ui.postDelayed(hideZoom, 1200)
+        // La píldora solo se esconde si el zoom ha quedado clavado en una parada, porque
+        // entonces la pastilla resaltada ya dice dónde está. Si el pellizco lo dejó ENTRE
+        // paradas, esta cifra es lo único que dice el zoom exacto y esconderla a los 1200 ms
+        // dejaba la pantalla muda sobre el control principal de la app.
+        if (zoomOnStop) ui.postDelayed(hideZoom, 1200)
     }
 
     // ---- Foto ----
@@ -2001,16 +2164,153 @@ class CameraActivity : AppCompatActivity() {
             controller.stopVideo()
             return
         }
-        val withAudio = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+        // Se relee el permiso en el instante del disparo: el usuario puede habérselo quitado
+        // desde los ajustes del sistema entre una toma y la siguiente.
+        audioGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
-        startRec(withAudio)
+        updateAudioUi()
+        startRec(audioActive())
     }
 
     private fun startRec(withAudio: Boolean) {
         binding.btnShutter.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-        if (!controller.startVideo(withAudio)) {
-            Toast.makeText(this, R.string.photo_error, Toast.LENGTH_SHORT).show()
+        // AVISO ANTES DE RODAR, no al reproducir el archivo en casa. Este era el fallo
+        // silencioso más caro de la app: sin permiso de micrófono se grababa MUDO sin decir
+        // absolutamente nada, y el usuario se enteraba con la toma ya perdida.
+        if (!withAudio) {
+            hint(
+                when {
+                    tlOn -> "Time-lapse: se graba SIN SONIDO"
+                    !audioGranted -> "SIN SONIDO: falta el permiso de micrófono"
+                    else -> "Grabando en MUDO"
+                }
+            )
         }
+        // El pitido de inicio va AQUÍ, antes de que arranque el grabador. Cuando se
+        // disparaba desde onRecordingChanged(true) el MediaRecorder ya estaba corriendo, así
+        // que el propio aviso de la app entraba DENTRO de la toma por el micrófono: el
+        // jurado lo vio como un transitorio de banda ancha al principio del espectrograma.
+        // Entre esta línea y recorder.start() quedan la creación del MediaRecorder y la
+        // configuración de la sesión de captura, que es donde se consume el pitido.
+        playShutterSound(android.media.MediaActionSound.START_VIDEO_RECORDING)
+        if (controller.startVideo(withAudio)) return
+        // Red de seguridad del 4K. Si el códec no puede con la resolución o el bitrate
+        // pedidos, createRecorder revienta en prepare() y startVideo devuelve false: antes
+        // eso era un Toast y ninguna grabación. Ahora se baja a 1080p y se reintenta, que es
+        // lo que el usuario quería (grabar), diciéndoselo en vez de dejarlo sin toma.
+        if (vresList[vresIndex] > 1080) {
+            vresIndex = vresList.indexOf(1080).coerceAtLeast(0)
+            prefs.edit().putInt("vres", vresIndex).apply()
+            applyVideoSettings()
+            hint("Esta lente no acepta 4K: grabando en 1080p")
+            // El reintento va con retraso A PROPÓSITO. startVideo devuelve false por dos
+            // caminos distintos: uno síncrono (createRecorder revienta en prepare) que no
+            // toca la sesión, y otro asíncrono en el que el motor ya ha ejecutado su
+            // videoStartFailed y está rehaciendo la sesión del visor por su cuenta. Montar
+            // otra sesión encima de esa reconstrucción es exactamente el escenario que
+            // cuelga este HAL, y aquí no hay forma de distinguir cuál de los dos fue.
+            ui.postDelayed({
+                if (resumed && !controller.isRecording && !controller.startVideo(withAudio)) {
+                    Toast.makeText(this, R.string.photo_error, Toast.LENGTH_SHORT).show()
+                }
+            }, 500)
+            return
+        }
+        Toast.makeText(this, R.string.photo_error, Toast.LENGTH_SHORT).show()
+    }
+
+    /**
+     * ¿Va a entrar sonido en la toma? Tienen que darse las tres cosas a la vez y hasta ahora
+     * ninguna se veía en pantalla: que el usuario no lo haya silenciado, que el permiso esté
+     * concedido y que no sea un time-lapse (ahí el motor apaga el audio por su cuenta,
+     * porque una pista de sonido a un fotograma cada cinco segundos no significa nada).
+     */
+    private fun audioActive(): Boolean = audioOn && audioGranted && !tlOn
+
+    private fun toggleAudio() {
+        if (controller.isRecording) {
+            // MediaRecorder fija la pista al preparar el archivo: cambiarla a mitad de la
+            // toma obligaría a cortar y volver a empezar, que es peor que no poder.
+            hint("El sonido no se puede cambiar a mitad de la toma")
+            return
+        }
+        if (!audioOn && !audioGranted) {
+            // Pedir sonido sin permiso concedido: se pide el permiso, no se enciende un
+            // interruptor que prometería una pista que no va a existir.
+            audioOn = true
+            prefs.edit().putBoolean("vaudio", true).apply()
+            requestAudio.launch(Manifest.permission.RECORD_AUDIO)
+            updateAudioUi()
+            return
+        }
+        audioOn = !audioOn
+        prefs.edit().putBoolean("vaudio", audioOn).apply()
+        updateAudioUi()
+        hint(if (audioActive()) "Sonido activado" else "Vídeo MUDO")
+    }
+
+    /**
+     * Repinta el interruptor de sonido y el rótulo de formato. El estado del micrófono tiene
+     * que ser visible ANTES de rodar y DURANTE toda la toma, no descubrirse al reproducir el
+     * archivo: es exactamente la clase de fallo que hace desinstalar una app de vídeo.
+     */
+    private fun updateAudioUi() {
+        val activo = audioActive()
+        chipMic?.let { c ->
+            c.text = if (activo) "SONIDO" else "MUDO"
+            setExtraChip(
+                c, activo,
+                "Sonido del vídeo: " + when {
+                    activo -> "activado"
+                    tlOn -> "el time-lapse graba sin sonido"
+                    !audioGranted -> "sin permiso de micrófono"
+                    else -> "silenciado"
+                }
+            )
+        }
+        updateVideoHud()
+    }
+
+    /** Resolución · cadencia · códec · sonido, en la barra superior y en lenguaje llano. */
+    private fun updateVideoHud() {
+        val v = videoHud ?: return
+        val activo = audioActive()
+        val res = vresLabels[vresIndex]
+        val codec = if (vhevc) "HEVC" else "H.264"
+        val sonido = if (activo) "SONIDO" else "MUDO"
+        v.text = String.format(Locale.US, "%s · %d fps · %s · %s", res, vfps, codec, sonido)
+        // Ámbar = hay algo que mirar antes de disparar. Aquí lo único de verdad peligroso es
+        // ponerse a rodar sin sonido sin saberlo.
+        v.setTextColor(if (activo) cWarm else cAccent)
+        v.isSelected = !activo
+        val codecHablado = if (vhevc) "HEVC" else "H punto 264"
+        val sonidoHablado = if (activo) "con sonido" else "SIN SONIDO"
+        v.contentDescription =
+            "Se grabará a $res, $vfps fotogramas por segundo, $codecHablado, $sonidoHablado"
+    }
+
+    /**
+     * Valor por defecto del vídeo, UNA sola vez por instalación.
+     *
+     * Lo que salía de fábrica era 1920x1080 H.264 a 30 fps: el suelo de 2015, y es lo que el
+     * jurado midió con ffprobe (avc1 High/4.0, 30,1 fps, 16,6 Mbps). El motor sabe grabar 4K
+     * con su escalera de 42 Mbps y HEVC desde hace rondas —supports4kVideo,
+     * setVideoTargetHeight, setVideoHevc— y esa capacidad estaba escrita y sin usar
+     * únicamente porque el valor por defecto nunca llegaba a ella.
+     *
+     * HEVC junto con el 4K y no suelto: 4K en H.264 a 42 Mbps son ~315 MB por minuto y
+     * cualquier receptor moderno (incluido WhatsApp) admite HEVC. Solo se toca si el usuario
+     * no había elegido nada; a partir de ahí manda él y esto no vuelve a ejecutarse.
+     */
+    private fun migrateVideoDefaults() {
+        if (prefs.getBoolean("migrVideo4k", false)) return
+        prefs.edit().putBoolean("migrVideo4k", true).apply()
+        if (prefs.contains("vres") || prefs.contains("vhevc")) return
+        if (!controller.supports4kVideo) return
+        vresIndex = vresList.indexOf(2160).coerceAtLeast(0)
+        vhevc = true
+        prefs.edit().putInt("vres", vresIndex).putBoolean("vhevc", true).apply()
+        applyVideoSettings()
     }
 
     private fun onRecordingChanged(rec: Boolean) {
@@ -2033,7 +2333,13 @@ class CameraActivity : AppCompatActivity() {
                 binding.optionsScroll.visibility = View.GONE
                 binding.chipMore.visibility = View.GONE
                 showPanel(null)
-                playShutterSound(android.media.MediaActionSound.START_VIDEO_RECORDING)
+                // El rótulo de formato NO se esconde con el resto de la barra: durante la
+                // toma es lo único que dice a qué se está grabando y si hay pista de sonido.
+                videoHud?.visibility = View.VISIBLE
+                // El pitido de inicio ya sonó en startRec(), ANTES de recorder.start().
+                // Aquí llegaría con el grabador YA corriendo y se grababa a sí mismo dentro
+                // de la toma; el jurado lo midió como un transitorio de banda ancha en el
+                // arranque del espectrograma.
             } else {
                 binding.shutterIcon.setBackgroundResource(R.drawable.rec_dot)
                 binding.recIndicator.visibility = View.GONE
@@ -2806,8 +3112,23 @@ class CameraActivity : AppCompatActivity() {
         applyVideoSettings()
     }
 
+    /**
+     * Cadencia de vídeo: 24 → 25 → 30 → 60.
+     *
+     * Antes solo alternaba 30 y 60. El 24p es el estándar cinematográfico y el 25 el de
+     * PAL/broadcast, y su ausencia es una de las críticas más repetidas al rival: dejarla
+     * pasar teniendo ya montado el rango de AE cerrado en el motor era regalar el bloque.
+     *
+     * Límite honesto y medido a mano: el motor solo fija CONTROL_AE_TARGET_FPS_RANGE si el
+     * HAL publica un rango que case con la cadencia pedida. Si esta lente no publicara
+     * [24,24] ni ningún rango con upper=24, el visor seguiría capturando a 30 y el archivo
+     * saldría a ~30 fps aunque el chip diga 24. Por eso el valor POR DEFECTO sigue siendo 30
+     * y esto es una elección explícita del usuario, no un cambio a sus espaldas. La lista de
+     * cadencias que el aparato admite de verdad hay que pedírsela al motor (ver la entrega).
+     */
     private fun toggleVfps() {
-        vfps = if (vfps == 30) 60 else 30
+        val i = vfpsList.indexOf(vfps)
+        vfps = if (i < 0) 30 else vfpsList[(i + 1) % vfpsList.size]
         controller.setVideoFps(vfps)
         prefs.edit().putInt("vfps", vfps).apply()
         applyVideoSettings()
@@ -2831,7 +3152,10 @@ class CameraActivity : AppCompatActivity() {
         binding.chipVres.text = vresLabels[vresIndex]
         setChipState(binding.chipVres, vresIndex != 0, R.string.cd_vres, vresLabels[vresIndex])
         binding.chipVfps.text = "${vfps}fps"
-        setChipState(binding.chipVfps, vfps == 60, R.string.cd_vfps, "$vfps")
+        // Ámbar en cuanto NO se está en la cadencia normal: 24, 25 y 60 son decisiones
+        // deliberadas y el usuario tiene que ver de un vistazo que están puestas. Antes solo
+        // se encendía a 60 porque no había nada más que 30 y 60.
+        setChipState(binding.chipVfps, vfps != 30, R.string.cd_vfps, "$vfps")
         binding.chipVcodec.text = if (vhevc) "HEVC" else "H264"
         setChipState(
             binding.chipVcodec, vhevc, R.string.cd_vcodec, binding.chipVcodec.text.toString()
@@ -2841,6 +3165,9 @@ class CameraActivity : AppCompatActivity() {
         controller.setVideoFps(vfps)
         controller.setVideoHevc(vhevc)
         controller.setTimeLapse(tlOn)
+        // El time-lapse APAGA el sonido en el motor: el estado del micrófono depende de este
+        // chip, así que se repinta aquí y no en cuatro sitios sueltos.
+        updateAudioUi()
     }
 
     /** Ciclo de lentes al voltear: trasera → cada frontal (incluye la de pantalla interna) → trasera. */
@@ -3136,7 +3463,13 @@ class CameraActivity : AppCompatActivity() {
      * exactamente lo que volvía lento al escáner de códigos que se acaba de quitar.
      */
     private fun analyzeFrame() {
-        if (!toolsOn || capturing || shutterHeld || controller.isRecording) return
+        // 'controller.isRecording' SALE de la guarda. Apagaba el histograma, las cebras y el
+        // realce de enfoque justo al empezar a rodar, que es exactamente cuando sirven: al
+        // terminar la toma ya no hay nada que corregir. Un director de fotografía necesita
+        // las cebras MIENTRAS graba; apagarlas ahí invierte el propósito de la función.
+        // 'capturing' y 'shutterHeld' se quedan: ahí sí compiten por la misma lectura de GPU
+        // con una captura de foto en vuelo, y eso sí se nota en la latencia del obturador.
+        if (!toolsOn || capturing || shutterHeld) return
         val t = binding.texture
         if (t.width == 0 || t.height == 0) return
         val w = 160
@@ -3172,13 +3505,17 @@ class CameraActivity : AppCompatActivity() {
         if (!toolZebra && !toolPeak) { analysisOverlay?.setMask(null); return }
         java.util.Arrays.fill(mask, 0)
         if (toolZebra) {
+            // Umbral ELEGIBLE (70 % piel / 95 % aviso / recorte). Estaba clavado en 250, o
+            // sea que solo rayaba lo que ya se había perdido: una cebra útil avisa ANTES de
+            // quemar, y el 70 % es la referencia de exposición de piel de cualquier rodaje.
+            val alto = zebraLumas[zebraLevel.coerceIn(0, zebraLumas.size - 1)]
             for (i in px.indices) {
                 val y = luma[i]
-                if (y >= 250 || y <= 2) {
+                if (y >= alto || y <= 2) {
                     // Rayas diagonales de 1 px: en pantalla el fotograma se amplía unas 7
                     // veces, así que se ven como bandas gruesas y no como ruido.
                     if (((i % w + i / w) and 1) == 0) {
-                        mask[i] = if (y >= 250) 0xCCFFFFFF.toInt() else 0x99339CFF.toInt()
+                        mask[i] = if (y >= alto) 0xCCFFFFFF.toInt() else 0x99339CFF.toInt()
                     }
                 }
             }

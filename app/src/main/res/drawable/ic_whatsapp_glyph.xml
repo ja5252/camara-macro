@@ -1,27 +1,49 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    Solo el auricular, sin el disco verde de ic_whatsapp.
+    Atajo de WhatsApp: BOCADILLO con el auricular dentro, no el auricular suelto.
 
-    Por qué hace falta: el botón junto a FOTO/VIDEO ya lleva su propio círculo verde
-    SEMITRANSPARENTE (wa_circle_bg). Poner encima el icono completo, que trae un disco
-    verde opaco, tapaba esa transparencia y devolvía justo el botón verde macizo que
-    rompía la paleta. Aquí el auricular va en blanco sobre el círculo translúcido.
+    Por qué hace falta el bocadillo. Tres jueces, uno de impacto ALTO y dos de MEDIO/BAJO,
+    describen el mismo botón con las mismas palabras: "un círculo verde con icono de
+    auricular telefónico... en una cámara, un auricular verde se lee como 'llamar'" y "su
+    glifo es un AURICULAR: lee 'llamar', no 'compartir a WhatsApp'". Tenían razón y la
+    causa era exactamente esta: al recortar el disco verde de ic_whatsapp para no tapar la
+    transparencia de wa_circle_bg se recortó también el bocadillo, y lo que quedó fue el
+    auricular a solas escalado 1,8x, que es el icono universal de "llamada".
+    El bocadillo es lo que convierte el auricular en la marca de WhatsApp. Va como CONTORNO
+    (stroke, sin relleno) para no devolver la mancha maciza que rompía la paleta cálida:
+    el botón sigue siendo el círculo verde al 35% de wa_circle_bg.
 
-    El grupo escala el trazo porque, dentro del icono original, el auricular ocupa solo
-    el 45% central del lienzo: suelto y sin escalar se veía diminuto y descentrado.
+    Por qué no se cambia por ic_share, que también estaba sobre la mesa: el botón no
+    comparte a cualquier sitio, comparte a WhatsApp, y el nodo de compartir genérico
+    obligaría a un paso más. Lo que fallaba era la identificación, no la jerarquía: la
+    jerarquía ya está resuelta (46dp aquí contra 78dp del obturador, y verde al 35%).
+
+    El auricular conserva su pathData BYTE A BYTE. Lo único que cambia es la transformación
+    del grupo: de 1,8x (llenaba el lienzo entero) a 0,88x centrado dentro del bocadillo.
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
     android:viewportWidth="24"
     android:viewportHeight="24">
+
+    <!-- Bocadillo con la cola abajo a la izquierda, simétrico: los dos flancos cierran
+         a la misma altura (y=11.3) para que no salga escorado a 20dp. -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.7"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M12,2.6 C6.8,2.6 2.6,6.5 2.6,11.3 C2.6,13.4 3.4,15.4 4.8,16.9 L2.6,21.4 L7.8,20.0 C9.1,20.6 10.5,21.0 12,21.0 C17.2,21.0 21.4,17.1 21.4,11.3 C21.4,6.5 17.2,2.6 12,2.6 Z" />
+
     <group
         android:pivotX="11.7"
         android:pivotY="12.45"
-        android:scaleX="1.8"
-        android:scaleY="1.8"
-        android:translateX="0.3"
-        android:translateY="-0.45">
+        android:scaleX="0.88"
+        android:scaleY="0.88"
+        android:translateX="0.25"
+        android:translateY="-0.7">
         <path
             android:fillColor="#FFFFFFFF"
             android:pathData="M16.6,14.04 c-0.25,-0.12 -1.47,-0.72 -1.69,-0.81 -0.23,-0.08 -0.39,-0.12 -0.56,0.12 -0.17,0.25 -0.64,0.81 -0.79,0.97 -0.14,0.17 -0.29,0.19 -0.54,0.06 -0.25,-0.12 -1.05,-0.39 -1.99,-1.23 -0.74,-0.66 -1.23,-1.47 -1.38,-1.72 -0.14,-0.25 -0.02,-0.38 0.11,-0.51 0.11,-0.11 0.25,-0.29 0.37,-0.43 0.13,-0.14 0.17,-0.25 0.25,-0.41 0.08,-0.17 0.04,-0.31 -0.02,-0.43 -0.06,-0.12 -0.56,-1.34 -0.76,-1.84 -0.2,-0.48 -0.4,-0.42 -0.56,-0.43 -0.14,0 -0.31,-0.01 -0.48,-0.01 -0.17,0 -0.43,0.06 -0.66,0.31 -0.22,0.25 -0.86,0.85 -0.86,2.07 0,1.22 0.89,2.4 1.01,2.56 0.12,0.17 1.75,2.67 4.23,3.74 0.59,0.26 1.05,0.41 1.41,0.52 0.59,0.19 1.13,0.16 1.56,0.1 0.48,-0.07 1.47,-0.6 1.68,-1.18 0.21,-0.58 0.21,-1.07 0.14,-1.18 -0.06,-0.11 -0.22,-0.17 -0.47,-0.29 Z" />

@@ -28,6 +28,7 @@ import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.DngCreator
 import android.hardware.camera2.TotalCaptureResult
+import android.hardware.camera2.params.ColorSpaceTransform
 import android.hardware.camera2.params.MeteringRectangle
 import android.hardware.camera2.params.RggbChannelVector
 import android.hardware.camera2.params.TonemapCurve
@@ -287,6 +288,14 @@ class Camera2Controller(
     private var hdrWarnedLens: String? = null
     /** Ultra HDR no se pudo activar y se cayó a JPEG normal. */
     var onHdrUnavailable: (() -> Unit)? = null
+
+    /**
+     * El flash está PEDIDO pero la lente activa lo tiene bloqueado por velo (ver
+     * flashFlareLens). Se avisa UNA vez por lente, igual que onHdrUnavailable, para que la
+     * interfaz pueda decir "esta lente no puede usar flash" en vez de entregar niebla blanca
+     * sin explicación: el usuario apretaba el botón y se llevaba la foto destruida.
+     */
+    var onFlashBlocked: (() -> Unit)? = null
     var hdrEnabled = false
         private set
     private var nrAvailable: IntArray = IntArray(0)
@@ -465,13 +474,44 @@ class Camera2Controller(
     // 1/60 s. Antes estaba en 1/125 y disparaba el ISO hasta 20.000 en interiores:
     // congelaba el movimiento pero las fotos salían llenas de ruido. Con OIS, 1/60
     // es de sobra para escenas normales a pulso.
-    private var shutterFloorNs = 16_666_667L
+    private var shutterFloorNs = DEFAULT_SHUTTER_FLOOR_NS
     /** Tope de ISO al que estamos dispuestos a llegar por acortar la exposición. */
     private val isoCeilingForFloor = 3200
 
     // Flash
     private var flashAvailable = false
     private var flashMode = 0 // 0 off, 1 auto, 2 on, 3 torch
+
+    /**
+     * true si el LED VELA esta lente física y por tanto no se puede usar aquí. Medido en el
+     * CPH2765 con la ID6 (tele de 10,55 mm): la foto con destello sale con p1=121,8 y
+     * p99=209,6 —toda la imagen metida en 88 de los 255 niveles, NI UN SOLO píxel por debajo
+     * de 114 en 8,29 MP— saturación media 1,9 (prácticamente monocroma) y nitidez 32,8 frente
+     * a 348,6 de la MISMA escena con la MISMA lente sin flash. Es luz parásita del LED
+     * entrando en la óptica del tele, y era la única foto del expediente inservible por
+     * decisión de la app y no por el hardware.
+     */
+    private var flashFlareLens = false
+    private var flashBlockWarnedLens: String? = null
+
+    /**
+     * Lo que el AE medía SIN destello justo antes de la pre-captura, y lo que mide DURANTE el
+     * pre-flash (tiempo x ISO, o sea "luz"). La diferencia entre las dos es lo único que dice
+     * cuánto aporta de verdad el LED, que es la cifra que hacía falta: medido a 1x, el flash
+     * solo bajaba el ISO de 9591 a 6056 (0,66 pasos) mientras la app le recortaba al ambiente
+     * 1,5 EV a ciegas. Resultado: luminancia 88,7 CON flash contra 91,3 SIN él en la misma
+     * escena, o sea una foto más oscura por destellar.
+     */
+    @Volatile private var ambientLuzBeforeFlash = 0.0
+    @Volatile private var flashLuzAtPrecapture = 0.0
+
+    /**
+     * Ganancias y matriz de color que el HAL deja mientras el PRE-FLASH está encendido: son
+     * las del iluminante del LED, no las del ambiente. Sirven para corregir la dominante verde
+     * del fósforo YAG sin renunciar al trabajo del AWB del aparato.
+     */
+    @Volatile private var flashAwbGains: RggbChannelVector? = null
+    @Volatile private var flashAwbTransform: ColorSpaceTransform? = null
 
     // RAW / DNG
     private var camChars: CameraCharacteristics? = null
@@ -542,6 +582,17 @@ class Camera2Controller(
     private var stackHandler: Handler? = null
     private var lastAeIso = 800
     private var lastAeExpNs = 33_000_000L
+
+    /**
+     * ISO y tiempo POR FOTOGRAMA con que se bloqueó la última ráfaga nocturna. Son los que van
+     * al EXIF de la foto de noche: el visor mide otra cosa completamente distinta y escribir
+     * la suya dejaba el archivo mintiendo sobre cómo se hizo.
+     */
+    /** Exposicion REAL de la ultima foto suelta cuando el piso o el techo la fijaron (0 = la del AE). */
+    @Volatile private var stillShotIso = 0
+    @Volatile private var stillShotExpNs = 0L
+    @Volatile private var nightShotIso = 0
+    @Volatile private var nightShotExpNs = 0L
     private var lastFocusDistance = 0f // última distancia de enfoque real del visor
     private var nightWatchdog: Runnable? = null
     /**
@@ -925,7 +976,11 @@ class Camera2Controller(
 
     /** Tras el enfoque: si hay flash auto/on hace falta la pre-captura para que encienda. */
     private fun proceedAfterAf() {
-        val wantFlash = flashAvailable && (flashMode == 1 || flashMode == 2) && !manualExposure
+        // flashModeEfectivo y no flashMode: en la lente que vela no hay pre-captura de flash
+        // que valga, y de paso se ahorran los hasta 900 ms de AE_PRECAPTURE_MAX_MS que se
+        // pagaban para acabar entregando una foto lechosa.
+        val fm = flashModeEfectivo()
+        val wantFlash = flashAvailable && (fm == 1 || fm == 2) && !manualExposure
         if (wantFlash && captureSession != null && previewRequestBuilder != null) {
             triggerPrecaptureThenCapture()
         } else {
@@ -958,6 +1013,13 @@ class Camera2Controller(
         aeTriggerFrame = Long.MAX_VALUE
         aeSawPrecapture = false
         aeFlashAtPrecapture = null // la decisión del flash se congela al resolverse la espera
+        // Lectura AMBIENTAL, tomada AQUÍ porque es el último instante en que el LED todavía
+        // está apagado. Es la referencia contra la que se mide el aporte real del destello:
+        // sin ella, la app recortaba el ambiente 1,5 EV sin saber si el flash iluminaba algo.
+        ambientLuzBeforeFlash = lastAeExpNs.toDouble() * lastAeIso
+        flashLuzAtPrecapture = 0.0
+        flashAwbGains = null
+        flashAwbTransform = null
         aeWaitAction = go
         val timeout = Runnable {
             // Queda registrado si el HAL llegó a entrar en PRECAPTURE. Si sale siempre con
@@ -1195,9 +1257,10 @@ class Camera2Controller(
             // el HAL vuelve a CONVERGED (lo normal cuando el pre-flash ya iluminó la escena),
             // el flash AUTO no encendía: se pagaban 900 ms de espera y la foto salía sin
             // destello. Solo afecta al AUTO; con flash ON siempre dispara.
+            val fm = flashModeEfectivo()
             val fireFlash = flashAvailable && (
-                flashMode == 2 || (
-                    flashMode == 1 && (
+                fm == 2 || (
+                    fm == 1 && (
                         aeFlashAtPrecapture
                             ?: (lastAeState == CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED)
                         )
@@ -1205,7 +1268,7 @@ class Camera2Controller(
                 )
             if (flashAvailable) {
                 when {
-                    flashMode == 3 ->
+                    fm == 3 ->
                         req.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_TORCH)
                     fireFlash -> {
                         // El AE_MODE tiene que decirle al HAL que VA A HABER flash. Con
@@ -1216,11 +1279,12 @@ class Camera2Controller(
                         // EXIF tres veces).
                         req.set(
                             CaptureRequest.CONTROL_AE_MODE,
-                            if (flashMode == 1) CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH
+                            if (fm == 1) CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH
                             else CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH
                         )
                         req.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_SINGLE)
                         applyFlashExposure(req)
+                        applyFlashWhiteBalance(req)
                     }
                 }
             }
@@ -1255,8 +1319,21 @@ class Camera2Controller(
                 // que va a salir limpia; se estima con ese mismo factor.
                 shotIso = (lastAeIso / FLASH_ISO_DIVISOR).coerceAtLeast(isoMin)
             } else {
-                val floorIso = applyShutterFloor(req)
-                if (floorIso > 0) shotIso = floorIso
+                var expIso = applyShutterFloor(req)
+                // Si el piso de acción no toca nada (el caso normal: el AE ya va rápido), aún
+                // puede estar sobrando GANANCIA. Medido en la misma escena y con la MISMA
+                // lente de 2,3 mm: ISO 2650 a 0.6x, 9591 a 1x y 13778 a 2x, TODAS a 1/60 s.
+                // Son 2,38 pasos de ganancia para 0,66 EV de escena; el AE del HAL se clava en
+                // 1/60 y lo paga entero con ISO aunque haya tiempo de sobra disponible.
+                if (expIso <= 0) expIso = applyGainCeiling(req)
+                if (expIso > 0) shotIso = expIso
+                // Se guarda la exposición REAL de esta foto para el EXIF. Si no, el archivo
+                // recodificado (recorte o filtro) declaraba los valores del VISOR, que es
+                // justo la mentira que se acaba de arreglar para el modo noche: el piso o el
+                // techo pueden haber cambiado tiempo e ISO de esta misma captura.
+                stillShotIso = if (expIso > 0) expIso else 0
+                stillShotExpNs =
+                    if (expIso > 0) req.get(CaptureRequest.SENSOR_EXPOSURE_TIME) ?: 0L else 0L
             }
             applyDetailModes(req, shotIso, still = true)
             // Curva de tono propia SOLO en la foto (en el visor cuesta fotograma y no aporta).
@@ -1325,9 +1402,9 @@ class Camera2Controller(
         //    La versión anterior calculaba una exposición manual "conservando la luz medida"
         //    (exp x ISO), que en interiores dejaba el ambiente EXACTAMENTE igual de expuesto
         //    que sin flash y encima destellaba con el AE en manual: primer plano quemado.
-        if (evMin < 0) {
-            val paso = evStepValue
-            val pasos = if (paso > 0f) Math.round(FLASH_AMBIENT_EV / paso) else 0
+        //    Y el recorte ya NO es fijo: se mide (ver flashAmbientEvSteps).
+        val pasos = flashAmbientEvSteps()
+        if (evMin < 0 && pasos != 0) {
             // lensEvSteps VA TAMBIÉN. applyControls(still = true) acaba de poner
             // (evSteps + lensEvSteps) quince líneas antes y esto lo pisa: sin sumarlo aquí, la
             // calibración por lente física desaparecía SOLO en las fotos con destello. Con
@@ -1341,9 +1418,80 @@ class Camera2Controller(
         }
         Log.i(
             "CamMacro",
-            "flash: AE bloqueado tras pre-captura, ambiente ${FLASH_AMBIENT_EV}EV " +
-                "(el visor medía ${lastAeExpNs / 1000}us ISO$lastAeIso)"
+            "flash: AE bloqueado tras pre-captura, ambiente $pasos pasos " +
+                "(aporte del LED ${String.format(java.util.Locale.US, "%.2f", flashGainStops())} EV; " +
+                "el visor medía ${lastAeExpNs / 1000}us ISO$lastAeIso)"
         )
+    }
+
+    /**
+     * Cuánto aporta REALMENTE el destello, en pasos, comparando la luz que medía el AE sin
+     * flash con la que mide durante el pre-flash. Negativo o cero = el LED no llega al sujeto.
+     */
+    private fun flashGainStops(): Float {
+        val amb = ambientLuzBeforeFlash
+        val con = flashLuzAtPrecapture
+        if (amb <= 0.0 || con <= 0.0) return FLASH_GAIN_MIN_STOPS
+        return (Math.log(amb / con) / Math.log(2.0)).toFloat()
+    }
+
+    /**
+     * Recorte del AMBIENTE en la foto con destello, PROPORCIONAL a lo que el LED aporta de
+     * verdad, en vez de los -1,5 EV a ciegas de antes.
+     *
+     * El síntoma medido: a 1x, con flash la luminancia media salió 88,7 y SIN flash 91,3 en la
+     * misma escena; el ISO solo bajó de 9591 a 6056 (0,66 pasos) y la saturación se hundió de
+     * 32,5 a 12,9. O sea: el LED aportaba 0,66 EV, la app le quitaba 1,5 EV al ambiente, y el
+     * saldo era una foto MÁS OSCURA y sin color por haber destellado. Un flash que empeora la
+     * foto es peor que no tener flash.
+     *
+     * La regla: por debajo de FLASH_GAIN_MIN_STOPS (el LED no llega: escena lejana, sala
+     * grande) no se recorta NADA y el destello se limita a rellenar lo poco que alcance; a
+     * partir de FLASH_GAIN_FULL_STOPS (sujeto cerca, el LED manda) se aplica el recorte
+     * completo, que es lo que evita el primer plano quemado por el que existía la constante.
+     * Entre medias, interpolación lineal.
+     */
+    private fun flashAmbientEvSteps(): Int {
+        val paso = evStepValue
+        if (paso <= 0f || evMin >= 0) return 0
+        val t = ((flashGainStops() - FLASH_GAIN_MIN_STOPS) /
+            (FLASH_GAIN_FULL_STOPS - FLASH_GAIN_MIN_STOPS)).coerceIn(0f, 1f)
+        if (t <= 0f) return 0
+        return Math.round(FLASH_AMBIENT_EV * t / paso)
+    }
+
+    /**
+     * Balance de blancos DEL DESTELLO, no del ambiente.
+     *
+     * Medido: al destellar, el balance pasa de cálido (R/G 1,131, B/G 0,847) a verde dominante
+     * (R/G 0,964, B/G 0,950, con G como canal más alto) y la saturación media cae de 10,1 a
+     * 4,6. Es la firma exacta del fósforo YAG del LED blanco, y es lo que deja las caras con
+     * aspecto enfermizo en cualquier retrato con flash.
+     *
+     * Se corrige SOBRE la solución del propio HAL, no contra ella: las ganancias que se copian
+     * son las que el aparato calculó mientras el PRE-FLASH estaba encendido (o sea, ya para el
+     * iluminante del LED), y encima solo se aplica el empujón magenta que cancela el verde
+     * medido: R x 1/0,964 y B x 1/0,950. Si el HAL no publicó ganancias y matriz —o el usuario
+     * lleva balance manual— no se toca nada y manda el AWB automático, como hasta ahora: nunca
+     * cambiar de sitio a ciegas algo que ya funciona a medias.
+     */
+    private fun applyFlashWhiteBalance(b: CaptureRequest.Builder) {
+        if (manualWb || !awbOffSupported) return
+        val g = flashAwbGains ?: return
+        val t = flashAwbTransform ?: return
+        b.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF)
+        b.set(
+            CaptureRequest.COLOR_CORRECTION_MODE,
+            CameraMetadata.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX
+        )
+        b.set(CaptureRequest.COLOR_CORRECTION_TRANSFORM, t)
+        b.set(
+            CaptureRequest.COLOR_CORRECTION_GAINS,
+            RggbChannelVector(
+                g.red * FLASH_WB_R_GAIN, g.greenEven, g.greenOdd, g.blue * FLASH_WB_B_GAIN
+            )
+        )
+        Log.i("CamMacro", "flash: WB del LED (R x$FLASH_WB_R_GAIN, B x$FLASH_WB_B_GAIN)")
     }
 
     /**
@@ -1962,10 +2110,31 @@ class Camera2Controller(
         return RggbChannelVector(1.0f + t * 1.4f, 1.0f, 1.0f, 2.2f - t * 1.2f)
     }
 
-    val hasFlash: Boolean get() = flashAvailable
+    /**
+     * ¿Se puede usar el flash AHORA? Ya no basta con que el aparato tenga LED: en la lente
+     * tele el destello vela la foto entera (p1=121,8 con flash frente a un histograma normal
+     * sin él), así que ahí la respuesta es NO aunque el hardware diga que sí.
+     */
+    val hasFlash: Boolean get() = flashAvailable && !flashFlareLens
+
+    /** El aparato tiene LED pero ESTA lente lo tiene bloqueado por velo. Para el aviso de la UI. */
+    val flashBlockedOnLens: Boolean get() = flashAvailable && flashFlareLens
+
+    /**
+     * El modo de flash que se va a EJECUTAR de verdad, que no es siempre el que pidió el
+     * usuario: en una lente que vela, cualquier modo (auto, forzado o linterna) se degrada a
+     * apagado. Todo el motor consulta esto y no `flashMode`, para que el EXIF, el visor y la
+     * captura cuenten la misma historia.
+     */
+    private fun flashModeEfectivo(): Int = if (flashFlareLens) 0 else flashMode
 
     fun setFlashMode(m: Int) {
         flashMode = m
+        // Si el usuario lo enciende en una lente bloqueada hay que decírselo AHORA, no cuando
+        // ya haya disparado y perdido la foto.
+        if (m != 0 && flashAvailable && flashFlareLens) {
+            activity.runOnUiThread { onFlashBlocked?.invoke() }
+        }
         applyAndUpdate()
     }
 
@@ -2388,6 +2557,14 @@ class Camera2Controller(
                 iso = Math.round(luz / expNs).toInt().coerceIn(isoMin, isoMax)
             }
             Log.i("CamMacro", "noche: ${expNs / 1000}us ISO$iso (visor ${lastAeExpNs / 1000}us ISO$lastAeIso)")
+            // La exposición REAL de la ráfaga, guardada para el EXIF. Sin esto fillStillExif
+            // escribía la del VISOR: la foto de noche entregada declaraba 1/40 s a ISO 3684
+            // cuando la ráfaga se bloquea hasta a 1/8 s con el ISO dividido, o sea que el
+            // archivo mentía sobre lo que lo produjo y hacía IMPOSIBLE verificar desde fuera
+            // que el camino de tiempo largo llegara a ejecutarse. En un modo de apilado ese es
+            // justo el dato que un juez comprueba primero.
+            nightShotIso = iso
+            nightShotExpNs = expNs
 
             val requests = ArrayList<CaptureRequest>(NIGHT_FRAMES)
             for (n in 0 until NIGHT_FRAMES) {
@@ -3022,21 +3199,53 @@ class Camera2Controller(
      * ~1e-6 de ancho) y el error de interpolación desaparece. Y se usan TODOS los puntos que
      * declara el HAL (512 en esta lente), no 32.
      */
-    private fun buildToneCurve(points: Int): TonemapCurve {
+    private fun buildToneCurve(points: Int, negro: Float, ganancia: Float): TonemapCurve {
         val n = points.coerceIn(8, 512)
         val c = FloatArray(n * 2)
+        // Acotados a lo razonable: nadie puede meter aquí por preferencia una curva que
+        // destruya la foto. negro = 0 y ganancia = 1 dejan la curva EXACTAMENTE como estaba.
+        val b = negro.coerceIn(0f, 0.30f)
+        val g = ganancia.coerceIn(1f, 2.5f)
         for (i in 0 until n) {
             val u = i.toDouble() / (n - 1)
             val x = Math.pow(u, TONE_X_GAMMA).toFloat()
             val s = if (x <= 0.0031308f) 12.92f * x
             else (1.055f * Math.pow(x.toDouble(), 1.0 / 2.4).toFloat() - 0.055f)
-            val lift = Math.pow(s.toDouble().coerceIn(0.0, 1.0), TONE_TOE).toFloat()
+            // RESTA DEL VELO. El tele entrega p1 = 34-35 y p99 = 150,6: NO HAY NEGROS y falta
+            // el 40% superior del rango. La causa es luz parásita del propio módulo, que suma
+            // un pedestal constante a toda la imagen; restarlo es exactamente lo que hace
+            // falta. Con negro = 0 esta línea es la identidad y el gran angular no se entera.
+            val t = ((s - b) / (1f - b)).coerceIn(0f, 1f)
+            // HOMBRO EN VEZ DE MULTIPLICACIÓN. Estirar el blanco con una ganancia recta
+            // quemaría cualquier escena que SÍ tenga altas luces. Esta forma (Reinhard) sube
+            // la pendiente en las sombras y los medios, y pasa exactamente por (1,1), así que
+            // el punto de blanco no se puede recortar por mucha ganancia que se pida.
+            val r = t * g / (1f + (g - 1f) * t)
+            val lift = Math.pow(r.toDouble().coerceIn(0.0, 1.0), TONE_TOE).toFloat()
             c[i * 2] = x
             c[i * 2 + 1] = (TONE_FLOOR + (1f - TONE_FLOOR) * lift).coerceIn(0f, 1f)
         }
         c[(n - 1) * 2] = 1f
         c[(n - 1) * 2 + 1] = 1f
         return TonemapCurve(c.copyOf(), c.copyOf(), c.copyOf())
+    }
+
+    /**
+     * Calibración de tono de ESTA lente física: (resta de velo, ganancia del hombro). Igual
+     * que ev_offset_<id>, se puede afinar desde preferencias sin recompilar, que es lo único
+     * viable cuando el ciclo de compilación está en la nube.
+     */
+    private fun lensToneCalibration(): Pair<Float, Float> {
+        val def = DEFAULT_LENS_TONE[cameraId] ?: Pair(0f, 1f)
+        return try {
+            val p = activity.getSharedPreferences("camara", Context.MODE_PRIVATE)
+            Pair(
+                p.getFloat("tone_negro_$cameraId", def.first),
+                p.getFloat("tone_ganancia_$cameraId", def.second)
+            )
+        } catch (e: Exception) {
+            def
+        }
     }
 
     /**
@@ -3118,6 +3327,99 @@ class Camera2Controller(
         return isoFinal
     }
 
+    /**
+     * Exposición más lenta que se puede sostener A PULSO con el encuadre ACTUAL, por la regla
+     * recíproca: 1/(focal equivalente). Y equivalente EFECTIVA, no la física — un recorte
+     * digital amplía la trepidación igual que amplía el motivo, así que el 2x del gran angular
+     * tiembla como un 50 mm aunque el cristal siga siendo de 2,3 mm.
+     *
+     * Con OIS se concede un paso (OIS_SHUTTER_FACTOR): el aparato declara estabilización
+     * óptica en estas lentes y la app ya la enciende, así que no usarla es tirar el hardware.
+     * Los topes acotan las dos locuras: por arriba 1/25 s, que es el suelo de lo que aguanta
+     * un pulso normal para cualquier focal; por abajo 1/500 s, porque más rápido no compra
+     * nitidez y sí ruido.
+     */
+    private fun handheldMaxExpNs(): Long {
+        val mm = if (effectiveEquivMm > 0) effectiveEquivMm else 28
+        var ns = 1_000_000_000L / mm.coerceAtLeast(1)
+        if (oisAvailable) ns *= OIS_SHUTTER_FACTOR
+        return ns.coerceIn(HANDHELD_MIN_EXP_NS, HANDHELD_MAX_EXP_NS)
+    }
+
+    /**
+     * TECHO DE GANANCIA. El gemelo de applyShutterFloor por el otro lado: aquel acorta la
+     * exposición pagando ISO para congelar el movimiento; este ALARGA la exposición para dejar
+     * de pagar ISO cuando sobra tiempo de obturación.
+     *
+     * El síntoma medido, con la MISMA lente de 2,3 mm y la MISMA escena: ISO 2650 a 0.6x,
+     * 9591 a 1x y 13778 a 2x, las tres a 1/60 s. Son 2,38 pasos de ganancia electrónica para
+     * 0,66 EV de diferencia de escena. El AE del HAL se clava en 1/60 s pase lo que pase y lo
+     * paga todo con el sensor: por eso el 2x salió con sigma 3,21 y manchas de croma que
+     * CRECEN al reducir la imagen (0,59 a 1:1 y 2,32 a 1/8), y es la causa directa de que 1x y
+     * 2x fueran las peores fotos del lote.
+     *
+     * La cuenta CONSERVA la luz medida (tiempo x ISO), exactamente igual que applyShutterFloor:
+     * la foto no puede salir ni un ápice más oscura que lo que enseñaba el visor, solo con
+     * menos grano. Y nunca acorta: si el AE ya iba más lento que el límite de pulso, no toca
+     * nada (ese caso es del piso de acción, no de aquí).
+     *
+     * Devuelve el ISO fijado, o 0 si no tocó nada, para que applyDetailModes elija el perfil de
+     * ruido con el ISO REAL de la foto.
+     */
+    private fun applyGainCeiling(b: CaptureRequest.Builder): Int {
+        if (manualExposure || !manualSensorSupported) return 0
+        if (lastAeExpNs <= 0L || lastAeIso <= 0) return 0
+        // Por debajo de este ISO no hay nada que rescatar: el ruido ya es de sobra aceptable y
+        // alargar el tiempo solo compraría trepidación.
+        if (lastAeIso <= GAIN_CEILING_ISO) return 0
+        // EL PISO DE ACCIÓN DEL USUARIO MANDA si pidió algo MÁS RÁPIDO que el 1/60 por defecto:
+        // quien elige 1/250 en el chip de acción lo hace porque hay movimiento, y ahí prefiere
+        // grano antes que arrastre. Con "automático" (0) o con el 1/60 de fábrica —que nadie ha
+        // elegido, viene puesto— manda la regla recíproca, que es la que arregla el bombeo de
+        // ISO. Sin esta línea, congelar un colibrí a 1/500 dejaría de funcionar con poca luz.
+        val maxExp =
+            if (shutterFloorNs > 0L && shutterFloorNs < DEFAULT_SHUTTER_FLOOR_NS)
+                minOf(handheldMaxExpNs(), shutterFloorNs)
+            else handheldMaxExpNs()
+        if (lastAeExpNs >= maxExp) return 0 // ya se está exprimiendo el pulso: no hay margen
+        val luz = lastAeExpNs.toDouble() * lastAeIso
+        var exp = Math.round(luz / GAIN_CEILING_ISO) // el tiempo que pediría el ISO objetivo
+        if (exp > maxExp) exp = maxExp              // ...acotado por lo que aguanta la mano
+        if (exp <= lastAeExpNs) return 0
+        val iso = Math.round(luz / exp).toInt().coerceIn(isoMin, isoMax)
+        if (iso >= lastAeIso) return 0 // no ganaríamos nada
+        b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+        b.set(CaptureRequest.SENSOR_SENSITIVITY, iso)
+        // coerceAtLeast/coerceAtMost y no coerceIn, por el mismo motivo que en el piso: si la
+        // lente no publicara el rango, expMaxNs valdría 0 y coerceIn lanzaría.
+        b.set(
+            CaptureRequest.SENSOR_EXPOSURE_TIME,
+            exp.coerceAtLeast(expMinNs.coerceAtLeast(1L))
+                .coerceAtMost(if (expMaxNs > 0) expMaxNs else exp)
+        )
+        Log.i(
+            "CamMacro",
+            "techo de ganancia: ISO $lastAeIso -> $iso, ${lastAeExpNs / 1000}us -> " +
+                "${exp / 1000}us (${effectiveEquivMm}mm eq, tope de pulso ${maxExp / 1000}us)"
+        )
+        return iso
+    }
+
+    /**
+     * Riesgo de foto movida: cuántos pasos por debajo de la regla recíproca está disparando el
+     * AE ahora mismo. > 1 significa que a pulso saldrá movida y que hay que apoyarse o usar el
+     * modo noche. Lo publica el motor porque la interfaz es quien puede decírselo al usuario:
+     * las dos tomas de teleobjetivo del expediente salieron a 1/24 s con 70 mm equivalentes,
+     * tres pasos por debajo, y nadie avisó.
+     */
+    val shakeRiskStops: Float
+        get() {
+            if (lastAeExpNs <= 0L) return 0f
+            val lim = handheldMaxExpNs()
+            if (lastAeExpNs <= lim) return 0f
+            return (Math.log(lastAeExpNs.toDouble() / lim) / Math.log(2.0)).toFloat()
+        }
+
     private fun applyControls(b: CaptureRequest.Builder, still: Boolean = false) {
         b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
         if (manualExposure) {
@@ -3128,12 +3430,13 @@ class Camera2Controller(
             // El modo de flash debe ir TAMBIÉN en la petición repetida (el visor), no solo
             // en la foto: si el HAL no lo conoce de antemano no prepara el flash y la
             // captura sale SIN destello (verificado por EXIF: se pedía flash y no encendía).
+            val fm = flashModeEfectivo()
             b.set(
                 CaptureRequest.CONTROL_AE_MODE,
                 when {
-                    !flashAvailable || flashMode == 0 || flashMode == 3 ->
+                    !flashAvailable || fm == 0 || fm == 3 ->
                         CaptureRequest.CONTROL_AE_MODE_ON
-                    flashMode == 1 -> CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH
+                    fm == 1 -> CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH
                     else -> CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH
                 }
             )
@@ -3191,9 +3494,11 @@ class Camera2Controller(
             // El destello de la foto se ordena explícitamente en captureStillNow
             // (FLASH_MODE_SINGLE), porque el builder se reutiliza y "no fijar" la clave
             // dejaría pegado el OFF anterior.
+            // La LINTERNA también se bloquea en la lente que vela: es el mismo LED metiendo la
+            // misma luz parásita en la misma óptica, solo que de forma continua.
             b.set(
                 CaptureRequest.FLASH_MODE,
-                if (flashMode == 3) CameraMetadata.FLASH_MODE_TORCH
+                if (flashModeEfectivo() == 3) CameraMetadata.FLASH_MODE_TORCH
                 else CameraMetadata.FLASH_MODE_OFF
             )
         }
@@ -3307,6 +3612,14 @@ class Camera2Controller(
                     // pre-captura y el flash automático no encendía nunca.
                     aeFlashAtPrecapture =
                         ae == CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED
+                    // En ESTE instante el pre-flash está encendido: la exposición que reporta
+                    // el HAL ya es la de la escena iluminada por el LED, y las ganancias de
+                    // color son las de SU iluminante (no las del ambiente). Es el único sitio
+                    // del ciclo donde se pueden capturar las dos cosas, y son las que
+                    // alimentan flashAmbientEvSteps y applyFlashWhiteBalance.
+                    flashLuzAtPrecapture = lastAeExpNs.toDouble() * lastAeIso
+                    flashAwbGains = result.get(CaptureResult.COLOR_CORRECTION_GAINS)
+                    flashAwbTransform = result.get(CaptureResult.COLOR_CORRECTION_TRANSFORM)
                     val action = aeWaitAction
                     aeWaitAction = null
                     Log.i("CamMacro", "AE listo tras pre-captura (estado=$ae)")
@@ -3614,6 +3927,11 @@ class Camera2Controller(
                         if (manualFocus) manualDiopters else lastFocusDistance
                     )
                 }
+                // Piso de acción, sí. Techo de ganancia, NO: alarga la exposición hasta el
+                // límite de pulso (1/25 s) para bajar el ISO, y eso es exactamente lo contrario
+                // de lo que se le pide a una ráfaga. Una ráfaga existe para congelar acción —un
+                // niño corriendo, un pájaro— y a 1/25 s por fotograma se entregan seis copias
+                // movidas del mismo instante: más grano es preferible a seis fotos inservibles.
                 val iso = applyShutterFloor(b)
                 applyDetailModes(b, if (iso > 0) iso else lastAeIso, still = true)
                 b.set(CaptureRequest.JPEG_QUALITY, JPEG_Q.toByte())
@@ -3996,8 +4314,15 @@ class Camera2Controller(
             tmModes.contains(CameraMetadata.TONEMAP_MODE_CONTRAST_CURVE) && tmPoints >= 8
         // Se usan TODOS los puntos que publica el HAL: capar a 32 con reparto uniforme dejaba el
         // pie de la curva a merced de la interpolación lineal del HAL (ver buildToneCurve).
-        toneCurve = if (toneCurveSupported) buildToneCurve(tmPoints) else null
-        Log.i("CamMacro", "tonemap: puntos=$tmPoints curva=$toneCurveSupported")
+        val toneCal = lensToneCalibration()
+        toneCurve =
+            if (toneCurveSupported) buildToneCurve(tmPoints, toneCal.first, toneCal.second)
+            else null
+        Log.i(
+            "CamMacro",
+            "tonemap: puntos=$tmPoints curva=$toneCurveSupported " +
+                "velo=${toneCal.first} ganancia=${toneCal.second}"
+        )
         // Detección de caras y regiones 3A disponibles. SIMPLE basta (solo el rectángulo) y
         // es mucho más barato que FULL, que además calcula ojos y boca que aquí no se usan.
         val fdModes = characteristics.get(
@@ -4035,6 +4360,27 @@ class Camera2Controller(
         val eis = characteristics.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES) ?: IntArray(0)
         eisAvailable = eis.contains(CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON)
         flashAvailable = characteristics.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) ?: false
+        // ¿VELA el LED en esta lente? Se decide por tabla medida y se puede desmentir sin
+        // recompilar con la preferencia flash_lente_<id> = true (mismo patrón que ev_offset_):
+        // si un día se limpia el módulo o se cambia de aparato, no hace falta un ciclo de
+        // compilación en la nube para volver a permitirlo.
+        flashFlareLens = try {
+            !activity.getSharedPreferences("camara", Context.MODE_PRIVATE)
+                .getBoolean("flash_lente_$cameraId", !FLASH_FLARE_LENSES.contains(cameraId))
+        } catch (e: Exception) {
+            FLASH_FLARE_LENSES.contains(cameraId)
+        }
+        if (flashAvailable && flashFlareLens) {
+            Log.i("CamMacro", "flash BLOQUEADO en la lente $cameraId: velo de flare medido")
+            // El aviso, UNA vez por lente y solo si el usuario lo tenía pedido (mismo criterio
+            // que hdrWarnedLens): al cruzar el zoom hacia el tele con el flash en auto/on.
+            if (flashBlockWarnedLens != cameraId && flashMode != 0) {
+                flashBlockWarnedLens = cameraId
+                activity.runOnUiThread { onFlashBlocked?.invoke() }
+            }
+        } else {
+            flashBlockWarnedLens = null
+        }
         val awbModes = characteristics.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES) ?: IntArray(0)
         awbOffSupported = awbModes.contains(CameraMetadata.CONTROL_AWB_MODE_OFF)
 
@@ -4044,10 +4390,16 @@ class Camera2Controller(
 
         val recSizes = map.getOutputSizes(MediaRecorder::class.java)
         availableVideoSizes = recSizes?.toList() ?: emptyList()
-        videoSize = recSizes?.firstOrNull { it.width == 1920 && it.height == 1080 }
-            ?: recSizes?.filter { it.width <= 1920 }?.maxByOrNull { it.width.toLong() * it.height }
-            ?: recSizes?.maxByOrNull { it.width.toLong() * it.height }
-            ?: Size(1920, 1080)
+        // SIN el tope de 1920 px que había aquí escrito a mano: era un techo de la lista, y en
+        // una lente que publica 4K dejaba fuera de la lista la única rama de bitrate de
+        // 42 Mbps de createRecorder. Ahora manda pickVideoSize, o sea la altura objetivo, y no
+        // un filtro fijo.
+        // NOTA HONESTA: este campo es solo el valor inicial; startVideo vuelve a llamar a
+        // pickVideoSize antes de cada grabación. El 1080p30 que midió el jurado NO lo decide
+        // este filtro, lo decide la altura objetivo por defecto, que vive en la interfaz
+        // (CameraActivity: vresList = [1080, 2160, 720] con vresIndex = 0). Sin cambiar ESE
+        // valor por defecto el vídeo seguirá saliendo a 1080p aunque la lente dé 4K.
+        videoSize = pickVideoSize()
         // ¿Ultra HDR disponible a este tamaño? Si sí y está activado, el stream de la foto
         // es JPEG_R en vez de JPEG: mismo número de streams, mucho más rango dinámico.
         // Antes se exigía que JPEG_R ofreciera EXACTAMENTE el mismo tamaño que el JPEG elegido
@@ -4444,8 +4796,20 @@ class Camera2Controller(
 
     /** Rellena y GUARDA los atributos. Es el cuerpo común de las dos rutas de arriba. */
     private fun fillStillExif(ex: ExifInterface, night: Boolean, frames: Int) {
-        val iso = if (manualExposure) manualIso else lastAeIso
-        val expNs = if (manualExposure) manualExpNs else lastAeExpNs
+        // En NOCHE mandan los valores con los que se bloqueó la ráfaga, no los del visor: son
+        // dos exposiciones distintas y el archivo tiene que contar la que de verdad ocurrió.
+        val iso = when {
+            night && nightShotIso > 0 -> nightShotIso
+            manualExposure -> manualIso
+            !night && stillShotIso > 0 -> stillShotIso
+            else -> lastAeIso
+        }
+        val expNs = when {
+            night && nightShotExpNs > 0L -> nightShotExpNs
+            manualExposure -> manualExpNs
+            !night && stillShotExpNs > 0L -> stillShotExpNs
+            else -> lastAeExpNs
+        }
         ex.setAttribute(ExifInterface.TAG_ISO_SPEED_RATINGS, iso.toString())
         ex.setAttribute(ExifInterface.TAG_EXPOSURE_TIME, (expNs / 1_000_000_000.0).toString())
         if (activeFocalMm > 0f) ex.setAttribute(
@@ -4457,10 +4821,13 @@ class Camera2Controller(
             }
         // Estado REAL del destello: 16 = no disparó (modo apagado), 9 = disparó por orden,
         // 25 = disparó en automático. El apilado nocturno NUNCA destella.
+        // flashModeEfectivo: en la lente que vela el LED NO dispara aunque el chip diga "on",
+        // y el archivo no puede decir lo contrario de lo que pasó.
+        val fm = flashModeEfectivo()
         val flashTag = when {
             night -> 16
-            flashMode == 2 -> 9
-            flashMode == 1 &&
+            fm == 2 -> 9
+            fm == 1 &&
                 lastAeState == CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED -> 25
             else -> 16
         }
@@ -5010,12 +5377,56 @@ class Camera2Controller(
     }
 
     @Suppress("DEPRECATION")
+    /**
+     * ¿Ofrece el aparato esta fuente de audio? No hay API para preguntarlo, así que se
+     * comprueba construyendo un AudioRecord de prueba: si la fuente no existe, el objeto
+     * queda en estado no inicializado en vez de lanzar. Se hace UNA vez y se recuerda.
+     */
+    private fun audioSourceAvailable(source: Int): Boolean {
+        audioSourceOk[source]?.let { return it }
+        val ok = try {
+            val min = android.media.AudioRecord.getMinBufferSize(
+                AUDIO_SAMPLE_RATE,
+                android.media.AudioFormat.CHANNEL_IN_STEREO,
+                android.media.AudioFormat.ENCODING_PCM_16BIT
+            )
+            if (min <= 0) false else {
+                val ar = android.media.AudioRecord(
+                    source, AUDIO_SAMPLE_RATE,
+                    android.media.AudioFormat.CHANNEL_IN_STEREO,
+                    android.media.AudioFormat.ENCODING_PCM_16BIT, min
+                )
+                val vale = ar.state == android.media.AudioRecord.STATE_INITIALIZED
+                ar.release()
+                vale
+            }
+        } catch (e: Exception) {
+            // Falta el permiso de micrófono o el aparato no la admite: se usa MIC, que es
+            // el mínimo común denominador.
+            false
+        }
+        audioSourceOk[source] = ok
+        return ok
+    }
+
+    private val audioSourceOk = HashMap<Int, Boolean>()
+
     private fun createRecorder(withAudio: Boolean): MediaRecorder? {
         return try {
             val recorder = MediaRecorder()
             val out = openVideoOutput() ?: return null
             videoUri = out.second
-            if (withAudio) recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
+            // CAMCORDER, no MIC. MIC es la ruta de VOZ del teléfono: lleva control automático
+            // de ganancia y supresión de ruido pensados para una llamada, y usa un solo
+            // micrófono. CAMCORDER es la matriz orientada a la cámara, que es lo que quiere un
+            // vídeo. Si el aparato no la ofrece, se cae a MIC en vez de fallar la grabación.
+            if (withAudio) {
+                val fuente =
+                    if (audioSourceAvailable(MediaRecorder.AudioSource.CAMCORDER))
+                        MediaRecorder.AudioSource.CAMCORDER
+                    else MediaRecorder.AudioSource.MIC
+                recorder.setAudioSource(fuente)
+            }
             recorder.setVideoSource(MediaRecorder.VideoSource.SURFACE)
             recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             recorder.setOutputFile(out.first)
@@ -5030,7 +5441,18 @@ class Camera2Controller(
             recorder.setVideoEncoder(
                 if (videoHevc) MediaRecorder.VideoEncoder.HEVC else MediaRecorder.VideoEncoder.H264
             )
-            if (withAudio) recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            if (withAudio) {
+                recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                // SIN estas tres líneas MediaRecorder se queda con sus valores por defecto,
+                // que son de la era del AMR: 8000 Hz, MONO y ~12,2 kbps. Verificado leyendo
+                // el descriptor esds de un vídeo real de esta app: el espectro moría a plomo
+                // en 4 kHz. Es calidad de línea telefónica, y convivía con una imagen a
+                // 16,6 Mbps: una desproporción de 1360 a 1 entre vídeo y sonido.
+                // 48 kHz estéreo a 256 kbps es el estándar de vídeo desde hace dos décadas.
+                recorder.setAudioSamplingRate(AUDIO_SAMPLE_RATE)
+                recorder.setAudioChannels(AUDIO_CHANNELS)
+                recorder.setAudioEncodingBitRate(AUDIO_BITRATE)
+            }
             // setCaptureRate son FOTOGRAMAS POR SEGUNDO capturados: un intervalo de 5 s es
             // 0,2. Estaba clavado a 2.0 (dos por segundo), que apenas acelera nada y hacía
             // inútil el modo: un time-lapse de verdad se hace con intervalos de segundos.
@@ -5147,11 +5569,44 @@ class Camera2Controller(
         private const val NR_MINIMAL_MAX_ISO = 1600
         private const val NR_FAST_MAX_ISO = 3200
         /**
-         * Cuánto se recorta la parte AMBIENTAL de una foto con destello. Negativo: el primer
+         * Recorte MÁXIMO de la parte AMBIENTAL de una foto con destello. Negativo: el primer
          * plano lo ilumina el flash y el fondo no tiene por qué salir igual de expuesto que
          * sin flash (que es lo que pasaba, y por eso el sujeto salía quemado).
+         * Ya NO se aplica entero siempre: se escala con lo que el LED aporta de verdad
+         * (ver flashAmbientEvSteps), porque aplicarlo a ciegas dejaba la foto con flash MÁS
+         * OSCURA que la misma foto sin flash (luminancia 88,7 contra 91,3, medido).
          */
         private const val FLASH_AMBIENT_EV = -1.5f
+
+        /**
+         * Aporte del LED por debajo del cual NO se recorta nada del ambiente: si el destello no
+         * llega al sujeto, quitarle luz al ambiente solo estropea la foto. Medido a 1x en este
+         * aparato: el flash bajaba el ISO de 9591 a 6056, o sea 0,66 pasos, por debajo de este
+         * umbral. Y a partir de FLASH_GAIN_FULL_STOPS (sujeto cerca, el LED manda de verdad)
+         * se aplica el recorte completo, que es lo que evita el primer plano quemado.
+         */
+        private const val FLASH_GAIN_MIN_STOPS = 0.8f
+        private const val FLASH_GAIN_FULL_STOPS = 3.0f
+
+        /**
+         * Corrección de la dominante VERDE del LED. Medido con destello: R/G 0,964 y B/G 0,950
+         * con G como canal más alto (sin flash la misma escena daba R/G 1,131 y B/G 0,847).
+         * Los factores son justo los inversos: 1/0,964 y 1/0,950. Es la firma del fósforo YAG
+         * del LED blanco y es lo que deja las caras verdosas en cualquier retrato con flash.
+         */
+        private const val FLASH_WB_R_GAIN = 1.04f
+        private const val FLASH_WB_B_GAIN = 1.05f
+
+        /**
+         * Lentes en las que el LED entra en la óptica y VELA la foto entera. Medido en el
+         * CPH2765 con la ID6 (tele 10,55 mm / 70 mm eq): con destello p1 = 121,8 y p99 = 209,6
+         * (los 8,29 MP de la imagen metidos en 88 de los 255 niveles, sin UN SOLO píxel por
+         * debajo de 114), saturación media 1,9 y nitidez 32,8 frente a 348,6 de la MISMA lente
+         * en la MISMA escena sin flash. Era la única foto del expediente inservible por
+         * decisión de la app. Se puede desmentir por lente sin recompilar con la preferencia
+         * booleana flash_lente_<id> = true.
+         */
+        private val FLASH_FLARE_LENSES = setOf("6")
         /**
          * Con destello el HAL baja mucho la sensibilidad respecto a la medición ambiental del
          * visor: medido en este aparato, de ISO 12209 a ISO 2419 a 2,9x. Sirve para estimar
@@ -5181,6 +5636,44 @@ class Camera2Controller(
          * afina desde la preferencia ev_offset_6 sin recompilar.
          */
         private val DEFAULT_LENS_EV = mapOf("6" to -1.0f)
+
+        /**
+         * Calibración de TONO por lente física: (resta de velo, ganancia del hombro).
+         * Medido en la misma escena y en el mismo instante: el gran angular entrega
+         * p1 = 24,1 / p99 = 214,5 (190 niveles de recorrido) y el tele p1 = 35,1 / p99 = 150,6
+         * (115 niveles, y p99,9 = 173). O sea que el tele —la MEJOR lente del aparato, con
+         * laplaciano 348,6 frente a 77,9— se entrega sin negros y sin blancos, lechosa, y
+         * cambiar de lente cambia el aspecto de la foto delante del usuario.
+         * 0,10 es deliberadamente conservador frente al 0,137 medido (35/255): quitar TODO el
+         * pedestal dejaría sin margen a una escena que sí tenga sombras reales.
+         * Ajustable por lente sin recompilar: tone_negro_<id> y tone_ganancia_<id>.
+         */
+        private val DEFAULT_LENS_TONE = mapOf("6" to Pair(0.10f, 1.5f))
+
+        /**
+         * ISO a partir del cual se prefiere ALARGAR la obturación antes que seguir subiendo la
+         * ganancia (ver applyGainCeiling). El mismo umbral que isoCeilingForFloor, y por el
+         * mismo motivo: por encima de 3200 el ruido de croma de este sensor es lo que domina
+         * la imagen (medido: sigma 3,21 a ISO 13778, con manchas que crecen al reducir).
+         */
+        private const val GAIN_CEILING_ISO = 3200
+
+        /**
+         * El 1/60 s DE FÁBRICA del piso de acción. Hace falta como constante y no como número
+         * suelto porque applyGainCeiling necesita distinguir "el usuario eligió congelar
+         * movimiento" de "esto viene puesto de serie y nadie lo ha tocado".
+         */
+        private const val DEFAULT_SHUTTER_FLOOR_NS = 16_666_667L
+
+        /**
+         * Límites del tiempo de pulso (ver handheldMaxExpNs). 40 ms = 1/25 s es lo más lento
+         * que se sostiene a mano para cualquier focal; 2 ms = 1/500 s es el otro extremo, más
+         * rápido no compra nitidez y sí ruido. El factor de OIS concede un paso: el aparato
+         * declara estabilización óptica en estas lentes y la app ya la enciende.
+         */
+        private const val HANDHELD_MAX_EXP_NS = 40_000_000L
+        private const val HANDHELD_MIN_EXP_NS = 2_000_000L
+        private const val OIS_SHUTTER_FACTOR = 2L
         /** Vigilante del apilado nocturno: base + margen por fotograma. */
         private const val NIGHT_WATCHDOG_BASE_MS = 4000L
         private const val NIGHT_WATCHDOG_PER_FRAME_MS = 2000L
@@ -5192,6 +5685,16 @@ class Camera2Controller(
         private const val EXTRA_HDR = 2
         private const val EXTRA_NIGHT = 3
         private const val EXTRA_QR = 4
+        /**
+         * Audio del vídeo. Sin fijarlos, MediaRecorder hereda 8000 Hz mono a ~12,2 kbps,
+         * que es literalmente el bitrate del AMR de banda estrecha: por encima de 4 kHz no
+         * queda nada, las voces salen sordas y la música se destruye. Medido sobre un vídeo
+         * real de esta app antes de este arreglo.
+         */
+        private const val AUDIO_SAMPLE_RATE = 48_000
+        private const val AUDIO_CHANNELS = 2
+        private const val AUDIO_BITRATE = 256_000
+
         private const val NIGHT_FRAMES = 7
 
         /** Tope de exposición POR FOTOGRAMA en modo noche: 1/8 s, lo que aguanta el OIS a pulso. */

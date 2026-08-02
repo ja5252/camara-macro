@@ -44,6 +44,9 @@ class SettingsActivity : AppCompatActivity() {
     private val floorLabels = arrayOf("Automático", "1/60", "1/125", "1/250", "1/500")
     private var chipFloor: TextView? = null
 
+    private val zebraLabels = arrayOf("70 %", "95 %", "Recorte")
+    private var chipZebra: TextView? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -99,19 +102,32 @@ class SettingsActivity : AppCompatActivity() {
         // puede apagarlo solo al encender RAW, Ultra HDR o el modo noche).
         filaObturacion(cuerpo)
 
+        // Exposición a la cara: setFaceMetering() llevaba implementado en el motor desde
+        // hacía rondas y NADIE lo llamaba. La detección de caras corría igual y su resultado
+        // no se usaba nunca para medir la luz. Va apagado por defecto porque mueve la
+        // exposición de toda la escena en cuanto entra alguien en cuadro, que es justo lo
+        // contrario de lo que quiere una foto macro.
+        interruptor(
+            cuerpo, "Exponer para la cara", "faceMetering", false,
+            "Cuando hay una cara en cuadro, la luz se mide sobre ella y no sobre el fondo."
+        )
+
         seccion(cuerpo, "HERRAMIENTAS DE ANÁLISIS")
         interruptor(cuerpo, "Histograma", "toolHist", true)
         interruptor(
             cuerpo, "Cebras de recorte", "toolZebra", false,
             "Raya lo que ya está quemado o pegado al negro: eso no se recupera después."
         )
+        filaCebras(cuerpo)
         interruptor(
             cuerpo, "Resaltar el enfoque", "toolPeak", false,
             "Marca en ámbar los bordes nítidos. En macro la profundidad de campo son milímetros."
         )
         etiqueta(
             cuerpo,
-            "Se encienden y se apagan con el chip ANÁLISIS del panel «Más», sobre el visor."
+            "Se encienden y se apagan con el chip ANÁLISIS del panel «Más», sobre el visor. " +
+                "Ahora siguen funcionando MIENTRAS se graba vídeo, que es cuando de verdad " +
+                "hacen falta."
         )
 
         seccion(cuerpo, "BOTONES DE VOLUMEN")
@@ -282,6 +298,62 @@ class SettingsActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = dp(6) }
         )
+    }
+
+    /**
+     * Umbral de las cebras. Estaba clavado a fuego en "y >= 250": eso solo raya lo que YA se
+     * ha quemado, o sea que avisa cuando el píxel ya está perdido. Una cebra útil avisa
+     * ANTES, y el 70 % es la referencia de exposición de piel de cualquier rodaje.
+     */
+    private fun filaCebras(padre: LinearLayout) {
+        val fila = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = dp(56)
+        }
+        val textos = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        textos.addView(
+            TextView(this).apply {
+                text = "Umbral de las cebras"
+                textSize = 16f
+                setTextColor(cText)
+            }
+        )
+        textos.addView(
+            TextView(this).apply {
+                text = "70 % es el tono de piel; 95 % avisa antes de quemar; recorte, cuando ya está."
+                textSize = 12f
+                setTextColor(cDim)
+            }
+        )
+        fila.addView(
+            textos,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        val chip = TextView(this, null, 0, R.style.ProChip)
+        chipZebra = chip
+        pintarCebras()
+        chip.setOnClickListener {
+            val i = (prefs.getInt("zebraLevel", 2) + 1) % zebraLabels.size
+            prefs.edit().putInt("zebraLevel", i).apply()
+            pintarCebras()
+        }
+        fila.addView(chip)
+        padre.addView(
+            fila,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(6) }
+        )
+    }
+
+    private fun pintarCebras() {
+        val i = prefs.getInt("zebraLevel", 2).coerceIn(0, zebraLabels.size - 1)
+        chipZebra?.let {
+            it.text = zebraLabels[i]
+            it.setTextColor(if (i < 2) cAccent else cDim)
+            it.contentDescription = "Umbral de las cebras: ${zebraLabels[i]}"
+        }
     }
 
     private fun pintarObturacion() {

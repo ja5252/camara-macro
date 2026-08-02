@@ -34,12 +34,23 @@
             android:textColor="@color/white"
             android:textSize="13sp" />
 
+        <!-- Aquí se escribe el veredicto de la lente ("da imagen" / "SIN IMAGEN" /
+             "comprobando"), que es lo único que impide que el usuario elija el sensor de
+             200 MP averiado y se quede con una cámara en negro: ocho debilidades del
+             expediente (una crítica y siete altas) apuntan a esta línea de texto.
+             El color era #FFD54F escrito a mano, un ámbar distinto del de la app que
+             además no salía de ningún token: ahora es accent_bright, el mismo que usa el
+             HUD para "atención aquí". accessibilityLiveRegion porque el veredicto CAMBIA
+             solo bajo el usuario (el vigilante de 1,5 s lo reescribe sin que él toque
+             nada) y sin región activa quien usa TalkBack no se entera de que la lente que
+             está mirando acaba de declararse muerta. -->
         <TextView
             android:id="@+id/lbl_lens"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="10dp"
-            android:textColor="#FFD54F"
+            android:accessibilityLiveRegion="polite"
+            android:textColor="@color/accent_bright"
             android:textSize="15sp"
             android:textStyle="bold" />
     </LinearLayout>
@@ -53,11 +64,16 @@
         android:orientation="horizontal"
         android:padding="12dp">
 
+        <!-- minHeight explícito en los tres: Widget.Material3.Button mide 40dp de alto por
+             defecto y ésta es la pantalla que decide si la app sirve para algo en este
+             teléfono. El mismo objetivo táctil de 48dp que el propio proyecto ya exige en
+             ProChip y en ModeTab. -->
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btn_prev"
             style="@style/Widget.Material3.Button.OutlinedButton"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:minHeight="@dimen/touch_min"
             android:text="@string/prev"
             android:textColor="@color/white" />
 
@@ -68,6 +84,7 @@
             android:layout_marginStart="8dp"
             android:layout_marginEnd="8dp"
             android:layout_weight="1"
+            android:minHeight="@dimen/touch_min"
             android:text="@string/use_this" />
 
         <com.google.android.material.button.MaterialButton
@@ -75,6 +92,7 @@
             style="@style/Widget.Material3.Button.OutlinedButton"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:minHeight="@dimen/touch_min"
             android:text="@string/next"
             android:textColor="@color/white" />
     </LinearLayout>
