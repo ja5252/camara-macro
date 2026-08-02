@@ -61,6 +61,15 @@ import kotlin.math.sqrt
  *      normal (que sí pasa por el denoiser del ISP) y a la vez con más laplaciano.
  *      Que es literalmente lo que midió el jurado: sigma 0,63 contra 0,50 y
  *      laplaciano 140,9 contra 77,9.
+ *      OJO, ESTA HIPÓTESIS SIGUE SIN COMPROBARSE: nadie ha mirado todavía el
+ *      "descartados=" de un logcat real, y la corrección de R8 (convertir el tope
+ *      en un suelo) se aplicó a ciegas y creó un fallo PEOR — con el suelo, un
+ *      primer fotograma movido calibraba el listón alto y entraba la ráfaga entera,
+ *      desalineada incluida, y el apilado promediaba contornos desplazados. R9
+ *      devuelve el techo (subido a 40, que es donde el ruido puro ya no llega) y
+ *      vuelve a aprender la referencia del MEJOR fotograma ACEPTADO. El número que
+ *      zanja el debate es una sola línea de logcat: "apilados=n/7 descartados=d" y
+ *      "efectivos=x/n".
  *   A. EL UMBRAL DE FANTASMAS ERA FIJO (14 blando / 42 duro en códigos gamma) Y ESA
  *      ERA LA CAUSA PRINCIPAL. El peso de cada fotograma se decidía comparándolo
  *      con la media ACUMULADA, que en el segundo fotograma es un solo fotograma
@@ -205,6 +214,16 @@ class NightStacker(private val width: Int, private val height: Int) {
     var outputSigma = 0f
         private set
 
+    /**
+     * Sigma que DEBERÍA tener la salida si el apilado funcionase como dice la teoría:
+     * pendiente de la curva de tono x sigma de un fotograma / raíz(fotogramas
+     * efectivos). Comparada con outputSigma es la prueba de cargo o de descargo del
+     * modo noche: si la medida se dispara por encima de esta, lo que sobra es
+     * desregistro, no ruido. Vale 0 hasta que se llama a result().
+     */
+    var predictedSigma = 0f
+        private set
+
     /** Fracción de píxeles que se quedaron con un solo fotograma (0..1). */
     var lonelyPixels = 0.0
         private set
@@ -254,45 +273,78 @@ class NightStacker(private val width: Int, private val height: Int) {
         // Un fotograma que ni siquiera después de alinearlo se parece a la
         // referencia es basura (temblor mayor que el rango de búsqueda, temblor
         // DURANTE la propia exposición, o alguien que cruzó delante): apilarlo
-        // mete borrón en vez de quitar ruido. Antes se apilaba siempre, y por eso
-        // una sola ráfaga movida arruinaba la foto entera.
-        // EL SUELO SE APRENDE SIEMPRE, TAMBIÉN DE UN FOTOGRAMA QUE SE DESCARTE, y
-        // este cambio es el segundo motivo por el que el apilado podía no bajar el
-        // ruido. Antes refMad solo se fijaba DESPUÉS de aceptar un fotograma y el
-        // límite del primer intento era el absoluto de 24 a secas. Pero el residuo
-        // de un fotograma perfectamente alineado es ruido puro y vale 1,128*sigma:
-        // con la sigma de un YUV_420_888 nocturno que NO ha pasado por el reductor
-        // del ISP (20-22 códigos es normal a ISO 3684) eso ya son 23-25. O sea que
-        // en una escena de verdad oscura el primer fotograma se pasaba de 24, se
-        // descartaba, refMad seguía sin fijarse, y LOS SEIS SIGUIENTES corrían la
-        // misma suerte: el "apilado de siete" entregaba UN fotograma en crudo, sin
-        // reducción de ruido de ninguna clase. Eso explica exactamente lo medido
-        // (sigma 0,63 frente a 0,50 de la foto normal y a la vez laplaciano 140,9
-        // frente a 77,9: más textura Y más ruido = un fotograma sin denoiser).
-        // Ahora el suelo se fija con el primer residuo visto, el tope absoluto pasa
-        // a ser solo el suelo de los casos limpios, y lo que decide es la relación
-        // con el mejor residuo de la ráfaga, que es lo único que distingue "ruido"
-        // de "alguien cruzó por delante".
+        // mete borrón en vez de quitar ruido.
+        //
+        // R9 — EL LÍMITE VUELVE A SER UN TECHO. En R8 se convirtió en un SUELO
+        //     limite = max(REJECT_MAD, refMad*K, refMad+6)
+        // y encima refMad se aprendía del PRIMER residuo visto, ANTES de decidir si
+        // ese fotograma valía algo. Las dos cosas juntas dejaban el rechazo sin
+        // efecto: si el primer fotograma de la ráfaga venía movido y daba MAD 60, el
+        // límite se calibraba en 132 y a partir de ahí entraba TODO, incluida la
+        // basura que el rechazo existía para tirar. Y apilar fotogramas desalineados
+        // NO quita ruido: promedia contornos desplazados, o sea que la foto sale más
+        // blanda que un disparo suelto. Es exactamente lo que midió el jurado, y no
+        // se arregla en ningún otro sitio: la limpieza de cleanByWeight solo toca
+        // píxeles con déficit de peso, y un fotograma movido que entra con peso 8 en
+        // todas partes deja déficit CERO — el borrón que mete no lo limpia nadie.
+        //
+        // Lo que sigue vigente de R8, y por eso el techo NO vuelve a 24: el residuo
+        // de un fotograma PERFECTAMENTE alineado no es cero, es ruido puro, y vale
+        // 1,128*sigma. Con la sigma de un YUV_420_888 nocturno (hasta SIGMA_MAX = 26
+        // códigos en el peor caso contemplado aquí) eso son 29, POR ENCIMA del techo
+        // viejo de 24: con 24 absoluto una escena de verdad oscura se quedaba sin
+        // ráfaga y el "apilado de siete" entregaba un solo fotograma en crudo. Así
+        // que el techo absoluto sube a REJECT_MAD_CEILING = 40 (los 29 del ruido puro
+        // más margen para la rotación residual que una alineación de solo traslación
+        // no puede corregir) y el 24 se queda como BASE del límite relativo, para que
+        // un trípode con refMad ~2 no se ponga a rechazar fotogramas limpios por
+        // pura cuantización.
+        //
+        //   limite = min(TECHO, max(BASE, mejorAceptado*K, mejorAceptado+SLACK))
+        //
+        // El techo es el que acota el daño en el peor caso: refMad no puede pasar de
+        // 40 NUNCA, porque solo se aprende de fotogramas ACEPTADOS y ninguno con MAD
+        // por encima del techo lo es. Y aprender solo de los aceptados no pierde
+        // información: como el límite nunca baja de min(TECHO, BASE) y refMad <=
+        // TECHO, cualquier residuo MENOR que el mejor aceptado cae por debajo del
+        // límite y entra — el mínimo sobre los aceptados es el mismo mínimo que sobre
+        // todos los vistos.
+        //
         // Guardia contra el centinela de madAt (Float.MAX_VALUE cuando el
         // desplazamiento no cabe en la imagen): un MAD de códigos de 8 bits no puede
-        // pasar de 255 ni en el peor caso. Sin esto el centinela entraría como suelo
-        // y el límite se volvería infinito, aceptando justo el fotograma imposible.
+        // pasar de 255 ni en el peor caso. Sin esto el centinela entraría como
+        // referencia y el límite se volvería infinito, aceptando justo el fotograma
+        // imposible.
         if (alignMad >= MAD_SENTINEL) {
             dropped++
             Log.i("CamMacro", "noche: descartado, alineación imposible")
             return
         }
-        if (refMad < 0f || alignMad < refMad) refMad = alignMad
-        val limit = maxOf(REJECT_MAD, maxOf(refMad * REJECT_K, refMad + 6f))
+        val limit = if (refMad < 0f) {
+            // Primer fotograma comparado: no hay con qué relativizar, así que manda
+            // el techo absoluto a secas. Es el único momento en que el techo trabaja
+            // solo, y por eso tiene que estar puesto donde el ruido puro no llegue.
+            REJECT_MAD_CEILING
+        } else {
+            minOf(
+                REJECT_MAD_CEILING,
+                maxOf(REJECT_MAD_BASE, maxOf(refMad * REJECT_K, refMad + REJECT_SLACK))
+            )
+        }
         if (alignMad > limit) {
             dropped++
             Log.i(
                 "CamMacro",
                 "noche: descartado, MAD=${"%.1f".format(alignMad)} > " +
-                        "${"%.1f".format(limit)} (suelo ${"%.1f".format(refMad)})"
+                        "limite=${"%.1f".format(limit)} " +
+                        "(mejor aceptado=${"%.1f".format(refMad)}, techo=$REJECT_MAD_CEILING)"
             )
             return
         }
+        // Aceptado: SOLO AHORA se aprende la referencia, y como mínimo de los
+        // aceptados. Fijarla antes de la comprobación era lo que permitía que un
+        // primer fotograma malo calibrara el listón a su propia altura.
+        if (refMad < 0f || alignMad < refMad) refMad = alignMad
         updateGhostThresholds()
         accumulateAligned(y, u, v, alignDx, alignDy)
         frames++
@@ -315,9 +367,12 @@ class NightStacker(private val width: Int, private val height: Int) {
      *
      * El estimador de sigma sale gratis: el MAD de alineación es la media de
      * |ref - actual| píxel a píxel, y para dos muestras gaussianas del mismo valor
-     * eso vale 1,128*sigma. Se usa refMad (el MÍNIMO de la ráfaga) porque es el
-     * fotograma mejor registrado y por tanto el que menos contamina la estimación
-     * con desalineación residual.
+     * eso vale 1,128*sigma. Se usa refMad (el MÍNIMO de los fotogramas ACEPTADOS)
+     * porque es el mejor registrado y por tanto el que menos contamina la estimación
+     * con desalineación residual. Que sea de los aceptados importa: mientras se
+     * aprendía del primer residuo visto, un fotograma movido inflaba esta sigma y con
+     * ella los umbrales de fantasma, así que el mismo fallo apagaba las DOS defensas
+     * a la vez (rechazo de fotograma y rechazo por píxel).
      */
     private fun updateGhostThresholds() {
         val mad = if (refMad >= 0f) refMad else alignMad
@@ -421,13 +476,46 @@ class NightStacker(private val width: Int, private val height: Int) {
         cleanByWeight(out, dhAntes)
         val dhDespues = medianDh(out)
         outputSigma = dhDespues * DH_TO_SIGMA
+
+        // GANANCIA REAL DEL APILADO, CALCULADA EN EL PROPIO TELÉFONO. La acusación
+        // del jurado ("el apilado no baja el ruido de forma medible") no se contesta
+        // con teoría, y hasta ahora el log daba sigmaFot y sigmaSalida sin poder
+        // compararlas: la primera es ruido de UN fotograma ANTES de la curva de tono
+        // y la segunda es ruido DESPUÉS, y la curva tiene su propia pendiente. Aquí
+        // se saca esa pendiente de la propia LUT en la mediana de la escena y se
+        // predice lo que DEBERÍA medir la salida:
+        //
+        //   sigmaPredicha = pendiente * sigmaFot / raíz(fotogramas efectivos)
+        //
+        // Leerlo es inmediato:
+        //  - medida ~= predicha  -> el apilado está entregando su raíz(N) entera.
+        //  - medida >> predicha  -> lo que sobra NO es ruido del sensor sino
+        //    desregistro: estructura desplazada colándose en la diferencia entre
+        //    vecinos (o sea, fotogramas mal alineados que entraron igual).
+        //  - efectivos ~= 1      -> no hubo apilado, hubo un fotograma en crudo, que
+        //    es la única hipótesis que explica "más ruido Y más laplaciano" a la vez.
+        val medG8 = GAMMA8[medLin.coerceIn(0, LIN_MAX)]
+        val gHi = (medG8 + 4).coerceAtMost(255)
+        val gLo = (medG8 - 4).coerceAtLeast(0)
+        val dLinDg = (DEGAMMA[gHi] - DEGAMMA[gLo]).toDouble() /
+                (gHi - gLo).coerceAtLeast(1)          // unidades lineales por código gamma
+        val lHi = (medLin + 16).coerceAtMost(LIN_MAX)
+        val lLo = (medLin - 16).coerceAtLeast(0)
+        val dOutDlin = (lut[lHi] - lut[lLo]).toDouble() /
+                (256.0 * (lHi - lLo).coerceAtLeast(1)) // códigos de salida por unidad lineal
+        val pendiente = dOutDlin * dLinDg
+        val nEf = effectiveFrames.coerceAtLeast(1.0)
+        predictedSigma = (pendiente * sigmaFrame / sqrt(nEf)).toFloat()
         Log.i(
             "CamMacro",
             "noche: efectivos=${"%.2f".format(effectiveFrames)}/$frames " +
                     "solos=${"%.2f".format(lonelyPixels * 100.0)}% " +
                     "sigmaFot=${"%.1f".format(sigmaFrame)} " +
+                    "pendiente=${"%.2f".format(pendiente)} " +
+                    "sigmaPredicha=${"%.2f".format(predictedSigma)} " +
                     "sigmaSalida=${"%.2f".format(dhAntes * DH_TO_SIGMA)}" +
-                    "->${"%.2f".format(outputSigma)}"
+                    "->${"%.2f".format(outputSigma)} " +
+                    "(bajada por apilar x${"%.2f".format(sqrt(nEf))})"
         )
 
         // Croma NV21: V y luego U, intercalados, a resolución cw x ch.
@@ -1236,14 +1324,40 @@ class NightStacker(private val width: Int, private val height: Int) {
         private const val SHADOW_P1_RANGE = 20.0
 
         /**
-         * SUELO de la diferencia media tolerable tras alinear. Ya no es un techo:
-         * como techo absoluto se cargaba la ráfaga entera en cuanto la escena era lo
-         * bastante oscura para que el ruido por sí solo pasara de 24 (ver addFrame).
+         * TECHO ABSOLUTO de la diferencia media tolerable tras alinear. Ningún
+         * fotograma con un residuo por encima de esto entra en el apilado, pase lo
+         * que pase con el resto de la ráfaga: es la garantía de que un primer
+         * fotograma movido no pueda recalibrar el listón a su propia altura y colar
+         * detrás toda la basura (el fallo de R8, ver addFrame).
+         *
+         * Por qué 40 y no los 24 de antes: el residuo de un fotograma perfectamente
+         * alineado es ruido puro y vale 1,128*sigma. Con SIGMA_MAX = 26 (el peor caso
+         * de ruido que este motor contempla en un YUV nocturno) salen 29,3, o sea que
+         * un techo de 24 descartaba fotogramas IMPECABLES en las escenas más oscuras
+         * — que es justo donde el modo noche tiene que funcionar. Los 10,7 códigos que
+         * van de 29,3 a 40 son el margen para la rotación residual: la alineación es
+         * de solo traslación y un balanceo de 0,15° deja ~6 px de error en las
+         * esquinas de un fotograma de 4000 px que ninguna traslación corrige.
          */
-        private const val REJECT_MAD = 24f
+        private const val REJECT_MAD_CEILING = 40f
 
-        /** Cuántas veces el mejor residuo de la ráfaga se tolera antes de descartar. */
+        /**
+         * BASE del límite relativo: por debajo de esto el límite no se estrecha. Sin
+         * ella, una ráfaga sobre trípode con refMad ~2 pondría el listón en 8 y se
+         * dedicaría a rechazar fotogramas limpios por cuantización y por el propio
+         * ruido de la escena.
+         */
+        private const val REJECT_MAD_BASE = 24f
+
+        /** Cuántas veces el MEJOR residuo ACEPTADO se tolera antes de descartar. */
         private const val REJECT_K = 2.2f
+
+        /**
+         * Holgura aditiva del límite relativo. Manda cuando el mejor residuo es muy
+         * pequeño (trípode): ahí multiplicar por 2,2 daría un margen ridículo frente
+         * a la variación normal del propio estimador de MAD.
+         */
+        private const val REJECT_SLACK = 6f
 
         /** Un MAD real de códigos de 8 bits no llega a 255; por encima es centinela. */
         private const val MAD_SENTINEL = 255f

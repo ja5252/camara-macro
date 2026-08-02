@@ -88,14 +88,10 @@
     <dimen name="magnifier_bottom_inset">168dp</dimen>
 
     <!--
-        Vúmetro de la fila de estado de vídeo. El jurado buscó "micro", "audio", "vumetro"
-        y "ganancia" en este layout y en strings.xml y no encontró ni una sola cadena: la
-        toma medida salió a -50,6 dBFS de media y -28,7 dBTP de pico y no había forma de
-        saberlo mientras se grababa. 80dp es lo que queda para la barra en 351dp de ancho
-        una vez descontados formato, micrófono y cifra de pico; en sw600dp hay sitio de
-        sobra y crece. maxHeight = layout_height porque ProgressBar escala su drawable a
-        maxHeight y sin fijarlo la barra sale con el alto por defecto del tema.
+        audio_meter_width / audio_meter_height BORRADAS con el vúmetro que medían, junto
+        con el drawable audio_meter.xml. No hay ninguna fuente de nivel de audio a la que
+        conectar la barra: el MediaRecorder es privado en Camera2Controller y abrir un
+        AudioRecord propio pelearía por el micrófono con la grabación en curso. Una barra
+        que no se mueve nunca dice "no entra sonido" y eso es mentira.
     -->
-    <dimen name="audio_meter_width">80dp</dimen>
-    <dimen name="audio_meter_height">6dp</dimen>
 </resources>

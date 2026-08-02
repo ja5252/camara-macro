@@ -513,6 +513,21 @@ class Camera2Controller(
     @Volatile private var flashAwbGains: RggbChannelVector? = null
     @Volatile private var flashAwbTransform: ColorSpaceTransform? = null
 
+    /**
+     * Las ganancias del AWB en el ÚLTIMO fotograma del visor, y la copia congelada justo antes
+     * de la pre-captura (o sea, las del AMBIENTE, con el LED todavía apagado).
+     *
+     * Existen porque flashAwbGains es UNA SOLA muestra de UN SOLO fotograma y con ella se
+     * apagaba el AWB de la foto: si esa muestra es mala, el viraje queda clavado en el JPEG y
+     * ya no hay quien lo corrija. La única forma barata de saber si la muestra vale es
+     * compararla con el ambiente: si el HAL de verdad reconvergió para el iluminante del LED,
+     * las dos soluciones tienen que ser DISTINTAS (medido: R/G 1,131 -> 0,964 y B/G 0,847 ->
+     * 0,950, o sea 14,8% y 12,2% de diferencia). Si salen prácticamente iguales, el HAL nos
+     * devolvió la solución del ambiente y congelarla no aporta nada y sí arriesga.
+     */
+    @Volatile private var lastPreviewAwbGains: RggbChannelVector? = null
+    @Volatile private var ambientAwbGains: RggbChannelVector? = null
+
     // RAW / DNG
     private var camChars: CameraCharacteristics? = null
     private var rawSupported = false
@@ -976,6 +991,14 @@ class Camera2Controller(
 
     /** Tras el enfoque: si hay flash auto/on hace falta la pre-captura para que encienda. */
     private fun proceedAfterAf() {
+        // LAS MEDIDAS DEL PRE-FLASH SON DE ESTE DISPARO O NO VALEN. Este es el único camino
+        // hacia captureStillNow, y no todos sus ramales pasan por la pre-captura: con
+        // exposición manual, wantFlash sale false y se va derecho a capturar, pero fireFlash
+        // puede seguir siendo true y encender el LED. Sin este borrado, esa foto se llevaba
+        // las ganancias de color y la luz medidas en la foto ANTERIOR —otra escena, otra
+        // distancia, otra luz— y las congelaba en el JPEG. Un dato viejo es peor que ninguno:
+        // ninguno se detecta (ver flashGainStops) y el viejo pasa por bueno.
+        clearFlashMeasurements()
         // flashModeEfectivo y no flashMode: en la lente que vela no hay pre-captura de flash
         // que valga, y de paso se ahorran los hasta 900 ms de AE_PRECAPTURE_MAX_MS que se
         // pagaban para acabar entregando una foto lechosa.
@@ -1016,7 +1039,10 @@ class Camera2Controller(
         // Lectura AMBIENTAL, tomada AQUÍ porque es el último instante en que el LED todavía
         // está apagado. Es la referencia contra la que se mide el aporte real del destello:
         // sin ella, la app recortaba el ambiente 1,5 EV sin saber si el flash iluminaba algo.
+        // Y el balance del ambiente, por el mismo motivo: es la vara con la que se comprueba
+        // que la muestra del pre-flash es de verdad OTRA solución y no la misma de siempre.
         ambientLuzBeforeFlash = lastAeExpNs.toDouble() * lastAeIso
+        ambientAwbGains = lastPreviewAwbGains
         flashLuzAtPrecapture = 0.0
         flashAwbGains = null
         flashAwbTransform = null
@@ -1327,14 +1353,21 @@ class Camera2Controller(
                 // 1/60 y lo paga entero con ISO aunque haya tiempo de sobra disponible.
                 if (expIso <= 0) expIso = applyGainCeiling(req)
                 if (expIso > 0) shotIso = expIso
-                // Se guarda la exposición REAL de esta foto para el EXIF. Si no, el archivo
-                // recodificado (recorte o filtro) declaraba los valores del VISOR, que es
-                // justo la mentira que se acaba de arreglar para el modo noche: el piso o el
-                // techo pueden haber cambiado tiempo e ISO de esta misma captura.
-                stillShotIso = if (expIso > 0) expIso else 0
-                stillShotExpNs =
-                    if (expIso > 0) req.get(CaptureRequest.SENSOR_EXPOSURE_TIME) ?: 0L else 0L
             }
+            // EXPOSICIÓN REAL DE ESTA PETICIÓN, para el EXIF, y leída AQUÍ —fuera de las tres
+            // ramas— en vez de dentro de una sola. Antes solo la rama SIN flash escribía estos
+            // campos y nadie los limpiaba: la foto con destello y la de exposición larga se
+            // llevaban al EXIF el tiempo y el ISO de la ÚLTIMA foto sin flash, de otra escena.
+            // Un dato viejo es peor que ninguno; declarar la exposición de otra foto es
+            // exactamente la mentira en el archivo que se acaba de arreglar en el modo noche.
+            // Y solo se declara lo que se controla: si el AE de ESTA petición no está en
+            // manual, quien fija tiempo e ISO es el HAL y desde aquí no se sabe cuáles son, así
+            // que se deja en 0 y fillStillExif cae a la medición del visor, igual que antes.
+            val aeManual =
+                req.get(CaptureRequest.CONTROL_AE_MODE) == CaptureRequest.CONTROL_AE_MODE_OFF
+            stillShotIso = if (aeManual) req.get(CaptureRequest.SENSOR_SENSITIVITY) ?: 0 else 0
+            stillShotExpNs =
+                if (aeManual) req.get(CaptureRequest.SENSOR_EXPOSURE_TIME) ?: 0L else 0L
             applyDetailModes(req, shotIso, still = true)
             // Curva de tono propia SOLO en la foto (en el visor cuesta fotograma y no aporta).
             if (toneCurveSupported) toneCurve?.let {
@@ -1416,10 +1449,16 @@ class Camera2Controller(
                 (evSteps + lensEvSteps + pasos).coerceIn(evMin, evMax)
             )
         }
+        // El aporte del LED se imprime como "SIN MEDIDA" y no como NaN: es el caso que hay que
+        // poder contar en el logcat para saber cuántas fotos con flash de este HAL acaban en el
+        // recorte a ciegas en vez de en el proporcional.
+        val ev = flashGainStops()
+        val aporte =
+            if (ev.isNaN()) "SIN MEDIDA" else String.format(java.util.Locale.US, "%.2f EV", ev)
         Log.i(
             "CamMacro",
             "flash: AE bloqueado tras pre-captura, ambiente $pasos pasos " +
-                "(aporte del LED ${String.format(java.util.Locale.US, "%.2f", flashGainStops())} EV; " +
+                "(aporte del LED $aporte; " +
                 "el visor medía ${lastAeExpNs / 1000}us ISO$lastAeIso)"
         )
     }
@@ -1427,11 +1466,19 @@ class Camera2Controller(
     /**
      * Cuánto aporta REALMENTE el destello, en pasos, comparando la luz que medía el AE sin
      * flash con la que mide durante el pre-flash. Negativo o cero = el LED no llega al sujeto.
+     *
+     * Devuelve NaN cuando NO SE PUDO MEDIR, y esa distinción es el arreglo: antes esta función
+     * devolvía FLASH_GAIN_MIN_STOPS en ese caso, que sale del interpolador como cero pasos de
+     * recorte, o sea EXACTAMENTE lo mismo que "medido y el LED no aporta". Las dos situaciones
+     * son opuestas y hay que tratarlas distinto: sin medida no se sabe nada, y en este HAL pasa
+     * de verdad —el propio timeout de la pre-captura registra "AE sin pre-captura" porque el
+     * aparato puede saltarse la fase entera— y entonces flashLuzAtPrecapture se queda en 0 y
+     * el primer plano volvía a quemarse por la puerta de atrás.
      */
     private fun flashGainStops(): Float {
         val amb = ambientLuzBeforeFlash
         val con = flashLuzAtPrecapture
-        if (amb <= 0.0 || con <= 0.0) return FLASH_GAIN_MIN_STOPS
+        if (amb <= 0.0 || con <= 0.0) return Float.NaN
         return (Math.log(amb / con) / Math.log(2.0)).toFloat()
     }
 
@@ -1450,11 +1497,19 @@ class Camera2Controller(
      * partir de FLASH_GAIN_FULL_STOPS (sujeto cerca, el LED manda) se aplica el recorte
      * completo, que es lo que evita el primer plano quemado por el que existía la constante.
      * Entre medias, interpolación lineal.
+     *
+     * Y SIN MEDIDA (NaN: este HAL puede saltarse la pre-captura entera) se vuelve al recorte
+     * conservador de siempre, el -1,5 EV completo. No es un capricho: los dos errores no
+     * cuestan lo mismo. Recortar de más deja un fondo hasta 0,84 EV oscuro —feo, pero la
+     * información sigue ahí y se recupera—; no recortar con el LED mandando quema el primer
+     * plano, y un blanco recortado no vuelve nunca. Sin datos se elige el error reversible.
      */
     private fun flashAmbientEvSteps(): Int {
         val paso = evStepValue
         if (paso <= 0f || evMin >= 0) return 0
-        val t = ((flashGainStops() - FLASH_GAIN_MIN_STOPS) /
+        val pasos = flashGainStops()
+        if (pasos.isNaN()) return Math.round(FLASH_AMBIENT_EV / paso)
+        val t = ((pasos - FLASH_GAIN_MIN_STOPS) /
             (FLASH_GAIN_FULL_STOPS - FLASH_GAIN_MIN_STOPS)).coerceIn(0f, 1f)
         if (t <= 0f) return 0
         return Math.round(FLASH_AMBIENT_EV * t / paso)
@@ -1474,11 +1529,18 @@ class Camera2Controller(
      * medido: R x 1/0,964 y B x 1/0,950. Si el HAL no publicó ganancias y matriz —o el usuario
      * lleva balance manual— no se toca nada y manda el AWB automático, como hasta ahora: nunca
      * cambiar de sitio a ciegas algo que ya funciona a medias.
+     *
+     * Y LA MUESTRA SE VALIDA ANTES DE CONGELARLA (ver flashAwbSampleUsable). Apagar el AWB es
+     * irreversible dentro del JPEG: si la única muestra que se copió —un fotograma, el primero
+     * que reportó PRECAPTURE/CONVERGED— era mala, la foto sale con un viraje fijo y ya no hay
+     * quien lo deshaga. Por eso solo se apaga el automático cuando se puede demostrar que la
+     * muestra es la del LED y no la del ambiente disfrazada.
      */
     private fun applyFlashWhiteBalance(b: CaptureRequest.Builder) {
         if (manualWb || !awbOffSupported) return
         val g = flashAwbGains ?: return
         val t = flashAwbTransform ?: return
+        if (!flashAwbSampleUsable(g)) return
         b.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF)
         b.set(
             CaptureRequest.COLOR_CORRECTION_MODE,
@@ -1492,6 +1554,78 @@ class Camera2Controller(
             )
         )
         Log.i("CamMacro", "flash: WB del LED (R x$FLASH_WB_R_GAIN, B x$FLASH_WB_B_GAIN)")
+    }
+
+    /**
+     * R/G y B/G de unas ganancias del AWB, o null si el vector no es utilizable. El verde se
+     * promedia entre las dos filas del patrón de Bayer porque el HAL puede publicarlas
+     * distintas. Se descarta cualquier cosa no finita o no positiva: una división por cero o un
+     * infinito aquí acabaría escrito en el JPEG.
+     */
+    private fun awbRatios(v: RggbChannelVector): Pair<Float, Float>? {
+        val g = (v.greenEven + v.greenOdd) / 2f
+        if (!g.isFinite() || g <= 0f) return null
+        if (!v.red.isFinite() || !v.blue.isFinite() || v.red <= 0f || v.blue <= 0f) return null
+        return Pair(v.red / g, v.blue / g)
+    }
+
+    /**
+     * ¿Merece la pena apagar el AWB y congelar ESTA muestra?
+     *
+     * Solo si la solución que el HAL calculó durante el pre-flash es de verdad DISTINTA de la
+     * que tenía para el ambiente. Ese es el único indicio, con lo que se puede leer desde la
+     * app, de que el aparato reconvergió para el iluminante del LED en vez de devolver la
+     * misma solución de antes. Medido en este aparato al destellar: R/G 1,131 -> 0,964 (14,8%)
+     * y B/G 0,847 -> 0,950 (12,2%), muy por encima del umbral.
+     *
+     * Si la diferencia es despreciable, la muestra NO es del LED: congelarla no corrige nada
+     * (el empujón magenta se aplicaría sobre el balance del ambiente y le metería un viraje
+     * rosa que nadie ha pedido) y encima renuncia al AWB de la foto. Se deja el automático.
+     *
+     * Y si la diferencia es absurda se descarta igual: no es un umbral estético sino un filtro
+     * de basura, porque esto es UNA sola muestra de UN solo fotograma y un resultado corrupto
+     * o leído a mitad de transición quedaría clavado en el JPEG para siempre. Ni el salto de
+     * iluminante más brutal (una vela contra el LED) mueve estas relaciones al doble.
+     */
+    private fun flashAwbSampleUsable(pre: RggbChannelVector): Boolean {
+        val p = awbRatios(pre) ?: return false
+        val amb = ambientAwbGains?.let { awbRatios(it) }
+        if (amb == null) {
+            // Sin referencia del ambiente no hay forma de validar nada. Antes se congelaba
+            // igual; ahora manda el AWB automático, que es lo que ya funcionaba a medias.
+            Log.i("CamMacro", "flash: WB del LED descartado (sin referencia del ambiente)")
+            return false
+        }
+        val dR = Math.abs(p.first - amb.first) / amb.first
+        val dB = Math.abs(p.second - amb.second) / amb.second
+        val d = Math.max(dR, dB)
+        if (d < FLASH_WB_MIN_DELTA || d > FLASH_WB_MAX_DELTA) {
+            Log.i(
+                "CamMacro",
+                "flash: WB del LED descartado, manda el AWB automático " +
+                    "(diferencia con el ambiente ${String.format(java.util.Locale.US, "%.3f", d)}; " +
+                    "ambiente R/G ${String.format(java.util.Locale.US, "%.3f", amb.first)} " +
+                    "B/G ${String.format(java.util.Locale.US, "%.3f", amb.second)}; " +
+                    "pre-flash R/G ${String.format(java.util.Locale.US, "%.3f", p.first)} " +
+                    "B/G ${String.format(java.util.Locale.US, "%.3f", p.second)})"
+            )
+            return false
+        }
+        return true
+    }
+
+    /**
+     * Borra TODO lo que se midió durante el pre-flash de la foto anterior. Se llama al empezar
+     * cada disparo: estos valores solo valen para la captura que los produjo, y arrastrar los
+     * de otra escena es peor que no tener ninguno, porque un valor viejo pasa por bueno
+     * mientras que la ausencia sí se detecta (flashGainStops devuelve NaN).
+     */
+    private fun clearFlashMeasurements() {
+        ambientLuzBeforeFlash = 0.0
+        flashLuzAtPrecapture = 0.0
+        ambientAwbGains = null
+        flashAwbGains = null
+        flashAwbTransform = null
     }
 
     /**
@@ -2735,6 +2869,34 @@ class Camera2Controller(
         finishShot(ok)
     }
 
+    /**
+     * Cancelación del modo noche a petición del USUARIO, desde el botón de la tarjeta de
+     * progreso. Antes solo existía la vía privada, así que la interfaz no tenía forma de
+     * abortar una ráfaga de hasta 18 segundos: la única salida era cerrar la cámara, y eso
+     * dejaba el callback de takeNightPhoto sin invocar, o sea el obturador muerto para
+     * siempre. Aquí se cancela Y se contesta al que pidió la foto.
+     *
+     * Si ya hay material suficiente NO se tira la foto: se entrega lo apilado, igual que
+     * hace el vigilante. Cancelar no debería costarle al usuario los seis fotogramas que
+     * ya esperó.
+     *
+     * Devuelve true si de verdad había una ráfaga que cancelar.
+     */
+    fun cancelNightCapture(): Boolean {
+        if (!nightActive.get()) return false
+        if (nightStacked >= 2) {
+            Log.i("CamMacro", "noche: cancelada por el usuario con $nightStacked; se entrega")
+            finishNightStack()
+        } else {
+            cancelNight()
+            finishShot(false)
+        }
+        return true
+    }
+
+    /** ¿Hay una ráfaga nocturna en curso? Para que la interfaz sepa si pintar la tarjeta. */
+    val nightCapturing: Boolean get() = nightActive.get()
+
     private fun abortNight() {
         // Si ya hay material suficiente, ENTREGAR la foto en vez de tirarla: se perdía la
         // foto entera por unos segundos de reloj aunque estuvieran apilados 6 de los 7
@@ -3559,13 +3721,16 @@ class Camera2Controller(
             result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let { lastFocusDistance = it }
             maybeSwitchPreviewFps()
             checkPreviewCadence(result)
+            // Ganancias del AWB de ESTE fotograma. Se leen UNA vez y sirven para dos cosas:
+            // el anclaje de los preajustes de balance (abajo) y la referencia AMBIENTAL con
+            // la que se valida después la muestra del pre-flash (ver applyFlashWhiteBalance).
+            val gainsAhora = result.get(CaptureResult.COLOR_CORRECTION_GAINS)
+            if (gainsAhora != null) lastPreviewAwbGains = gainsAhora
             // Ganancias reales del preajuste de balance de blancos que se acaba de pedir.
             val anclaK = awbAnchorPending
-            if (anclaK > 0) {
-                result.get(CaptureResult.COLOR_CORRECTION_GAINS)?.let { g ->
-                    awbAnchors[anclaK] = g
-                    awbAnchorPending = 0
-                }
+            if (anclaK > 0 && gainsAhora != null) {
+                awbAnchors[anclaK] = gainsAhora
+                awbAnchorPending = 0
             }
             if (!firstFrameNotified) {
                 firstFrameNotified = true
@@ -5596,6 +5761,17 @@ class Camera2Controller(
          */
         private const val FLASH_WB_R_GAIN = 1.04f
         private const val FLASH_WB_B_GAIN = 1.05f
+
+        /**
+         * Cuánto tiene que cambiar el balance entre el ambiente y el pre-flash para creerse la
+         * muestra (ver flashAwbSampleUsable). Medido al destellar: 14,8% en R/G y 12,2% en B/G.
+         * El mínimo, 4%, queda tres veces por debajo de lo medido: no descarta un destello de
+         * verdad, pero sí descarta al HAL devolviendo la solución del ambiente sin reconverger.
+         * El máximo es un filtro de basura, no un criterio de calidad: apagar el AWB congela
+         * UNA muestra de UN fotograma dentro del JPEG y de ahí no se sale.
+         */
+        private const val FLASH_WB_MIN_DELTA = 0.04f
+        private const val FLASH_WB_MAX_DELTA = 1.0f
 
         /**
          * Lentes en las que el LED entra en la óptica y VELA la foto entera. Medido en el

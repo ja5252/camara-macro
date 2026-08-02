@@ -254,9 +254,19 @@
                     android:text="@string/night_stacking"
                     android:visibility="gone" />
 
-                <!-- Tarjeta de PROGRESO del modo noche. night_label (la de arriba) se
-                     queda como está y sigue sirviendo para el apilado de enfoque y el
-                     horquillado: los dos son ráfagas cortas y con un rótulo basta.
+                <!-- Tarjeta de PROGRESO del modo noche. AHORA SÍ LA USA EL CÓDIGO: hasta
+                     esta ronda estaba en el layout con un comentario que afirmaba que el
+                     código la usaba, y no la tocaba nadie (cero coincidencias de nightCard,
+                     nightProgress y btnNightCancel en CameraActivity). El progreso real que
+                     manda el motor por onNightProgress se escribía en night_label, una vista
+                     COMPARTIDA con el apilado de enfoque y el horquillado, y por eso hacía
+                     falta una bandera (nightStacking) para que unos no pisaran el rótulo de
+                     otros. Con una tarjeta propia esa bandera sobra: el dueño del rótulo se
+                     sabe mirando qué vista está visible.
+
+                     night_label (la de arriba) se queda como está y sigue sirviendo para el
+                     apilado de enfoque y el horquillado: los dos son ráfagas cortas y con un
+                     rótulo basta.
 
                      Esta es para el modo noche de verdad, y existe por dos medidas del
                      jurado: el vigilante permite NIGHT_WATCHDOG_BASE_MS 4000 + 2000 x 7
@@ -305,14 +315,26 @@
                         android:layout_marginTop="6dp"
                         android:text="@string/night_hold_still" />
 
-                    <!-- 18 s son muchos para no poder arrepentirse. Objetivo táctil
-                         completo (@dimen/touch_min) porque se pulsa con prisa. -->
+                    <!-- Cancelar la ráfaga. 18 s son demasiados para no poder arrepentirse. Se
+                         borró en su día porque no había API pública a la que cablearlo; ahora
+                         Camera2Controller.cancelNightCapture() existe y además ENTREGA lo
+                         apilado si ya hay material, en vez de tirar la foto entera. -->
                     <TextView
                         android:id="@+id/btn_night_cancel"
-                        style="@style/ProChip.Action"
+                        style="@style/Hud.Label"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
                         android:layout_marginTop="14dp"
+                        android:background="@drawable/chip_action_bg"
+                        android:clickable="true"
                         android:contentDescription="@string/cd_night_cancel"
-                        android:text="@string/night_cancel" />
+                        android:focusable="true"
+                        android:minWidth="48dp"
+                        android:minHeight="48dp"
+                        android:gravity="center"
+                        android:paddingHorizontal="20dp"
+                        android:text="@string/night_cancel"
+                        android:textColor="@color/accent" />
                 </LinearLayout>
 
                 <LinearLayout
@@ -545,21 +567,30 @@
              Debilidad ALTA 44: "En la captura de modo vídeo no hay absolutamente nada
              sobre lo que se va a grabar. El usuario pulsa REC sin saber si está en
              1080p30 H.264 o en 4K60 HEVC. Los chips existen en el layout (chip_vres,
-             chip_vfps, chip_vcodec, chip_tl) pero viven DENTRO de video_panel". Y las
-             debilidades CRÍTICAS 22 y 24: "no grabar mudo en silencio" y "un vúmetro en
-             vivo con pico y aviso de saturación en el HUD de grabación".
+             chip_vfps, chip_vcodec, chip_tl) pero viven DENTRO de video_panel". Y la
+             debilidad CRÍTICA 22: "no grabar mudo en silencio", que es lo que resuelve
+             badge_mic. (La 24 pedía además un vúmetro; ver más abajo por qué no está.)
 
-             Por qué aquí y no en top_bar. En top_bar, con la barra de opciones oculta al
-             grabar (optionsScroll pasa a GONE), esta fila caería en y≈52..86dp y lens_chip
-             vive en y≈76..106dp: se solapan. Y con la barra visible caería a y≈110dp,
-             encima del chip de lente en la mitad de los casos. Aquí no puede chocar con
-             nada, está donde ya mira el pulgar y —lo importante— sólo existe en modo
-             vídeo: en modo foto va GONE y la banda de controles NO crece ni un dp, que es
-             lo que piden las bajas 9 y 22 ("la banda inferior ocupa cerca de un tercio de
-             la pantalla").
+             DUEÑO ÚNICO, Y ESTE ES EL PUNTO IMPORTANTE. Había DOS rótulos de vídeo vivos a
+             la vez: esta fila, que no la tocaba nadie, y otro TextView que CameraActivity
+             fabricaba por código en buildVideoHud() y metía dentro de top_bar. El comentario
+             de aquel método justificaba el duplicado con "activity_camera.xml es de otro
+             integrador"; ya no lo es, así que sobra el de código y manda éste.
+
+             Y aquí abajo es además el sitio correcto: en top_bar, con la barra de opciones
+             oculta al grabar (optionsScroll pasa a GONE), el rótulo caía en y≈52..86dp y
+             lens_chip vive en y≈76..106dp, o sea que se solapaban; con la barra visible
+             caía a y≈110dp, encima del chip de lente en la mitad de los casos. Aquí no
+             puede chocar con nada, está donde ya mira el pulgar y —lo importante— sólo
+             existe en modo vídeo: en modo foto va GONE y la banda de controles NO crece ni
+             un dp, que es lo que piden las bajas 9 y 22 ("la banda inferior ocupa cerca de
+             un tercio de la pantalla").
 
              DUEÑO DEL ESTADO: CameraActivity. Este XML no decide nada, sólo deja el sitio
-             hecho y con los contrastes ya resueltos. -->
+             hecho y con los contrastes ya resueltos.
+
+             Es PULSABLE: abre el panel de vídeo. Un rótulo que dice "4K · 60 fps · HEVC"
+             es justo donde el usuario va a tocar para cambiarlo. -->
         <LinearLayout
             android:id="@+id/video_hud"
             android:layout_width="wrap_content"
@@ -569,15 +600,25 @@
             android:layout_marginBottom="10dp"
             android:background="@drawable/zoom_pill_bg"
             android:baselineAligned="false"
+            android:clickable="true"
+            android:focusable="true"
             android:gravity="center_vertical"
+            android:minHeight="@dimen/touch_min"
             android:orientation="horizontal"
             android:paddingHorizontal="12dp"
             android:paddingVertical="7dp"
             android:visibility="gone">
 
-            <!-- "4K · 60 · HEVC". Peso 1 y ellipsize para que un códec de nombre largo no
-                 empuje al vúmetro fuera de la pantalla de cubierta (351dp de ancho).
-                 Lo escribe CameraActivity con @string/video_format. -->
+            <!-- "4K · 60 fps · HEVC". Lo escribe CameraActivity con @string/video_format
+                 (antes era un String.format con literales en castellano dentro del Kotlin,
+                 así que en un teléfono en inglés la fila salía a medias). ellipsize+maxLines
+                 para que un códec de nombre largo no empuje la insignia de micrófono fuera
+                 de la pantalla de cubierta (351dp de ancho).
+
+                 importantForAccessibility=no en éste y en badge_mic: la fila ENTERA es un
+                 solo botón y CameraActivity le pone una descripción completa ("Se va a
+                 grabar en 4K, 60 fps, códec HEVC. Sonido del vídeo: mudo"). Sin esto,
+                 TalkBack recitaría la fila tres veces, una por hijo. -->
             <TextView
                 android:id="@+id/txt_video_format"
                 style="@style/Hud.Value"
@@ -585,15 +626,17 @@
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:ellipsize="end"
+                android:importantForAccessibility="no"
                 android:maxLines="1"
                 android:minWidth="88dp"
                 android:text="" />
 
             <!-- Insignia de micrófono. PERMANENTE mientras el vídeo vaya a salir mudo, que
-                 es lo que pide la debilidad crítica 22: hoy el callback del permiso tiene
-                 el cuerpo vacío y startRec(withAudio=false) no dice nada, así que "el
-                 usuario graba una toma entera y descubre en casa que no hay sonido".
-                 El icono nace tachado a propósito: si el código no llega a tocarlo, el
+                 es lo que pide la debilidad crítica 22 ("el usuario graba una toma entera y
+                 descubre en casa que no hay sonido"). Ya la escribe updateAudioUi(): icono
+                 tachado + "SIN SONIDO" en naranja de aviso cuando no va a haber pista, y un
+                 micrófono discreto y sin rótulo cuando sí.
+                 El icono nace tachado a propósito: si el código no llegara a tocarlo, el
                  estado que se enseña es el pesimista, no el optimista. -->
             <TextView
                 android:id="@+id/badge_mic"
@@ -601,46 +644,28 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="10dp"
-                android:contentDescription="@string/cd_badge_muted"
                 android:drawableStart="@drawable/ic_mic_off"
                 android:drawableTint="@color/meter_clip"
                 android:gravity="center_vertical"
+                android:importantForAccessibility="no"
                 android:text="" />
 
-            <!-- Vúmetro. El nivel instantáneo va en `progress` y la retención de pico en
-                 `secondaryProgress` (ver audio_meter.xml): la toma que midió el jurado dio
-                 -50,6 dBFS de media y -28,7 dBTP de pico, 22 dB de diferencia, así que una
-                 sola barra no habría contado la mitad de la historia.
-                 maxHeight junto a layout_height porque ProgressBar escala su drawable a
-                 maxHeight y sin fijarlo sale con el alto por defecto del tema.
-                 EL AVISO DE SATURACIÓN ES DEL CÓDIGO: el umbral en dBFS no lo conoce este
-                 fichero. Se pinta con setProgressTintList(meter_clip) y el rótulo
-                 @string/audio_clipping. -->
-            <ProgressBar
-                android:id="@+id/audio_meter"
-                style="?android:attr/progressBarStyleHorizontal"
-                android:layout_width="@dimen/audio_meter_width"
-                android:layout_height="@dimen/audio_meter_height"
-                android:layout_marginStart="10dp"
-                android:contentDescription="@string/cd_audio_meter"
-                android:max="100"
-                android:maxHeight="@dimen/audio_meter_height"
-                android:minHeight="@dimen/audio_meter_height"
-                android:progress="0"
-                android:progressDrawable="@drawable/audio_meter"
-                android:secondaryProgress="0" />
+            <!-- AQUÍ VIVÍAN UN VÚMETRO (audio_meter) Y UNA CIFRA DE PICO (txt_audio_peak).
+                 Se han BORRADO, y el motivo es de fondo, no de gusto: no existe ninguna
+                 fuente de nivel de audio a la que enchufarlos.
 
-            <!-- Cifra de pico en dBFS. Cifras tabulares (Hud.Value) para que no baile al
-                 pasar de -9 a -10, que es justo el tramo que hay que vigilar. -->
-            <TextView
-                android:id="@+id/txt_audio_peak"
-                style="@style/Hud.Value"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:minWidth="46dp"
-                android:gravity="end"
-                android:text="" />
+                 · MediaRecorder.getMaxAmplitude() es el único camino real, y el
+                   MediaRecorder es un campo PRIVADO de Camera2Controller; el motor no
+                   publica ni el nivel ni el audioSessionId.
+                 · Abrir un AudioRecord propio en paralelo NO vale: el grabador ya tiene
+                   tomado el micrófono por AudioSource.CAMCORDER y pelearse por él es
+                   arriesgar la toma entera, que es exactamente lo contrario de lo que
+                   pedía la debilidad.
+
+                 Una barra que no se mueve nunca es peor que ninguna barra: el usuario la
+                 mira, la ve plana y concluye que no está entrando sonido. Cuando el motor
+                 publique el nivel, esto vuelve; hasta entonces el estado del micrófono lo
+                 cuenta badge_mic, que sí es cierto. -->
         </LinearLayout>
 
         <!-- Ranura ÚNICA de paneles: la exclusión mutua es estructural (showPanel deja
@@ -851,9 +876,15 @@
                             style="@style/ProChip"
                             android:text="H264" />
 
-                        <!-- Sonido sí / no. Hoy el único camino que apaga el audio es el
-                             time-lapse y "el usuario no puede saber si está entrando
-                             sonido hasta que reproduce el fichero" (medio 8 y 17). -->
+                        <!-- Sonido sí / no. DUEÑO ÚNICO: éste. CameraActivity fabricaba
+                             además un chip "SONIDO" por código (insertChip junto a chip_tl,
+                             ver buildExtraChips) que hacía exactamente lo mismo, así que en
+                             el panel salían DOS interruptores de sonido seguidos y sólo uno
+                             respondía. Se ha borrado el de código y se cablea éste.
+                             Sin letra, como chip_flash: el icono ya distingue micrófono de
+                             micrófono tachado y el estado completo va en contentDescription
+                             (medio 8 y 17: "el usuario no puede saber si está entrando
+                             sonido hasta que reproduce el fichero"). -->
                         <TextView
                             android:id="@+id/chip_audio"
                             style="@style/ProChip.Icon"
@@ -861,42 +892,34 @@
                             android:drawableStart="@drawable/ic_mic"
                             android:text="" />
 
-                        <!-- Filtro contra el viento y el ruido de manejo (medio 57): "para
-                             grabar en exterior con el teléfono en la mano son el enemigo
-                             número uno, y hoy no hay ninguna defensa ni ningún control". -->
-                        <TextView
-                            android:id="@+id/chip_wind"
-                            style="@style/ProChip"
-                            android:contentDescription="@string/cd_wind"
-                            android:text="@string/chip_wind" />
+                        <!-- BORRADOS DE ESTA FILA: chip_wind (filtro de viento), chip_agc
+                             (control automático de ganancia) y chip_stab (estabilización).
+                             Los tres estaban VISIBLES y sin un solo setOnClickListener, o
+                             sea que el usuario los pulsaba, no pasaba nada y concluía que
+                             la app está rota. No se han cableado porque no hay a qué:
 
-                        <!-- AGC conmutable, pedido por la crítica 24 junto al vúmetro. -->
-                        <TextView
-                            android:id="@+id/chip_agc"
-                            style="@style/ProChip"
-                            android:contentDescription="@string/cd_agc"
-                            android:text="@string/chip_agc" />
+                             · viento y AGC son efectos de audio (AcousticEchoCanceler /
+                               AutomaticGainControl / NoiseSuppressor) y se enganchan al
+                               audioSessionId del MediaRecorder, que es un campo privado
+                               del motor.
+                             · la estabilización se decide dentro de applyControls con
+                               "useEis = videoSessionActive && eisAvailable", ambos
+                               privados, y no hay ningún setter público que la apague.
 
-                        <!-- Bloqueo de AE y AWB durante la grabación (medio 41 y 56): "sin
+                             Vuelven el día que Camera2Controller los exponga. Mientras
+                             tanto, mejor un panel corto y verdadero que uno largo y falso.
+
+                             Bloqueo de AE/AF durante la grabación (medio 41 y 56): "sin
                              bloqueo un clip respira y no hay forma de casarlo con la toma
-                             siguiente; el motor ya sabe hacerlo (CONTROL_AE_LOCK y
-                             CONTROL_AWB_LOCK aparecen en el controlador) pero no está
-                             expuesto para vídeo". -->
+                             siguiente". Éste SÍ se cablea: controller.lockAeAf() es público
+                             y funciona con la sesión de vídeo montada. Comparte estado con
+                             la pulsación larga sobre el visor y con ae_lock_badge: un solo
+                             dueño (CameraActivity.toggleAeAfLock) y una sola variable. -->
                         <TextView
                             android:id="@+id/chip_ae_lock"
                             style="@style/ProChip"
-                            android:contentDescription="@string/cd_ae_awb_lock"
+                            android:contentDescription="@string/cd_ae_af_lock"
                             android:text="@string/chip_ae_lock" />
-
-                        <!-- Estabilización apagable para trípode y gimbal (medio 38): hoy
-                             "useEis = videoSessionActive && eisAvailable" la enciende sin
-                             opción de apagarla, con su recorte permanente, que es justo la
-                             crítica que el expediente le hace al rival. -->
-                        <TextView
-                            android:id="@+id/chip_stab"
-                            style="@style/ProChip"
-                            android:contentDescription="@string/cd_stab"
-                            android:text="@string/chip_stab" />
 
                         <TextView
                             android:id="@+id/chip_tl"

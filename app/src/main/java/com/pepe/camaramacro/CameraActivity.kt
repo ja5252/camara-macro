@@ -101,12 +101,13 @@ class CameraActivity : AppCompatActivity() {
     private var nightOn = false
 
     /**
-     * Hay un apilado NOCTURNO en marcha y el rótulo central es suyo. night_label lo comparten
-     * tres operaciones (noche, apilado de enfoque y horquillado) y cada una escribe su propio
-     * contador encima: sin esta marca, el progreso que manda el motor por onNightProgress
-     * pisaría el "Apilado de enfoque 3/5" del apilado de enfoque.
+     * Ya NO existe `nightStacking`. Era una bandera para saber de quién era el rótulo
+     * central: night_label lo compartían tres operaciones (noche, apilado de enfoque y
+     * horquillado) y cada una escribía su contador encima de la anterior. El apilado
+     * nocturno tiene ahora su propia tarjeta en el layout (night_card, que estaba puesta y
+     * no la usaba nadie), así que el dueño del rótulo se sabe mirando qué vista está
+     * visible y la bandera sobra: una variable menos que se puede quedar desincronizada.
      */
-    private var nightStacking = false
 
     /**
      * Última parada de zoom que se centró en la tira. highlightZoomStrip() se llama en CADA
@@ -161,11 +162,13 @@ class CameraActivity : AppCompatActivity() {
     /** ¿Está concedido RECORD_AUDIO? Se relee al entrar en vídeo y al pulsar REC. */
     private var audioGranted = false
 
-    /** Interruptor de sonido del panel de vídeo (creado por código, ver buildExtraChips). */
-    private var chipMic: TextView? = null
-
-    /** Rótulo permanente de lo que se va a grabar: resolución · fps · códec · sonido. */
-    private var videoHud: TextView? = null
+    // El interruptor de sonido (chipMic) y el rótulo de formato (videoHud) YA NO SE CREAN
+    // POR CÓDIGO. Los dos existían por duplicado: en el layout estaban chip_audio y la fila
+    // video_hud (con txt_video_format y badge_mic) sin que nadie los escuchara, y aquí se
+    // fabricaban otros dos con insertChip() y buildVideoHud(). El resultado en pantalla eran
+    // DOS interruptores de sonido seguidos en el panel de vídeo -sólo uno respondía- y dos
+    // rótulos de formato. La coartada de buildVideoHud ("activity_camera.xml es de otro
+    // integrador") ya no vale: los dos ficheros son del mismo dueño. Manda el XML.
 
     /**
      * El zoom actual coincide con una parada de la tira. Si NO coincide, la píldora del
@@ -336,6 +339,8 @@ class CameraActivity : AppCompatActivity() {
     private val cWarm by lazy { ContextCompat.getColor(this, R.color.warm_white) }
     private val cFocusOk by lazy { ContextCompat.getColor(this, R.color.focus_ok) }
     private val cFocusFail by lazy { ContextCompat.getColor(this, R.color.focus_fail) }
+    /** Naranja de aviso de la insignia de micrófono: "esta toma va a salir muda". */
+    private val cMuted by lazy { ContextCompat.getColor(this, R.color.meter_clip) }
 
     private var recStart = 0L
     private val tick = object : Runnable {
@@ -377,7 +382,7 @@ class CameraActivity : AppCompatActivity() {
             // instante y, si dijo que no, se le dice con todas las letras.
             audioGranted = granted
             updateAudioUi()
-            if (!granted) hint("Sin permiso de micrófono: los vídeos saldrán MUDOS")
+            if (!granted) hint(getString(R.string.hint_no_audio_permission))
         }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -468,6 +473,12 @@ class CameraActivity : AppCompatActivity() {
                 syncPreviewGravity()
                 syncRatioChip()
                 updateLensChip()
+                // El bloqueo del flash es POR LENTE (flashFlareLens se recalcula al leer las
+                // características de la cámara que se acaba de abrir), y onReady se dispara
+                // en cada configuración de sesión: también cuando el zoom cruza a la lente
+                // tele. Sin repintar aquí, el chip seguía anunciando "flash automático" en
+                // una lente donde el motor ya no lo va a disparar.
+                applyFlashChip()
                 buildZoomStrip()
                 // Aquí y no en restoreSettings: supports4kVideo se rellena leyendo el
                 // StreamConfigurationMap de la lente, que no existe hasta que la sesión
@@ -524,15 +535,37 @@ class CameraActivity : AppCompatActivity() {
         // había colgado. Ese es literalmente el fallo que el callback venía a cerrar.
         controller.onNightProgress = { hechos, total ->
             runOnUiThread {
-                // night_label es una vista COMPARTIDA: stackNext() (apilado de enfoque) y
-                // bracketNext() (horquillado) escriben ahí sus propios contadores. Sin la
-                // guarda, un apilado nocturno les pisaría el rótulo. nightStacking distingue
-                // de quién es el rótulo AHORA; la visibilidad sola no bastaría.
-                if (nightStacking && binding.nightLabel.visibility == View.VISIBLE) {
-                    binding.nightLabel.text =
-                        getString(R.string.night_stacking) + "  $hechos/$total"
+                // Escribe en night_card, que es SUYA. Antes escribía en night_label, una
+                // vista compartida con stackNext() (apilado de enfoque) y bracketNext()
+                // (horquillado), y por eso hacía falta una bandera para saber de quién era
+                // el rótulo. Con una tarjeta propia basta con mirar si está visible: si no
+                // lo está, este progreso llega tarde (ráfaga cancelada por un onPause) y no
+                // hay nada que pintar.
+                if (binding.nightCard.visibility == View.VISIBLE) {
+                    binding.nightProgress.text =
+                        getString(R.string.night_progress, hechos, total)
                 }
             }
+        }
+
+        // Cancelar la ráfaga nocturna. Vuelve a existir porque el motor ya publica
+        // cancelNightCapture(), que además ENTREGA lo apilado si hay dos fotogramas o más:
+        // arrepentirse no debería costar los seis que ya esperaste. Hasta ahora la única
+        // salida de una toma de 18 s era cerrar la app.
+        binding.btnNightCancel.setOnClickListener {
+            if (controller.cancelNightCapture()) showCenterSlot(null)
+        }
+
+        // AVISO DE FLASH BLOQUEADO. El motor publicaba onFlashBlocked y NADIE lo escuchaba:
+        // en la lente tele el LED vela la foto entera (p1=121,8 con flash, niebla blanca
+        // monocroma) y el motor degrada el flash a apagado por su cuenta, en silencio. El
+        // usuario pulsaba el rayo, veía el chip en ámbar, disparaba y se llevaba una foto
+        // destruida o una sin flash sin ninguna explicación. El motor ya lo invoca en el
+        // hilo de UI y sólo una vez por lente (mismo criterio que onHdrUnavailable), así que
+        // aquí no hace falta ni runOnUiThread ni antirrebote.
+        controller.onFlashBlocked = {
+            hint(getString(R.string.hint_flash_tele_blocked))
+            applyFlashChip()
         }
 
         scaleDetector = ScaleGestureDetector(
@@ -693,6 +726,26 @@ class CameraActivity : AppCompatActivity() {
         binding.chipVfps.setOnClickListener { toggleVfps() }
         binding.chipVcodec.setOnClickListener { toggleVcodec() }
         binding.chipTl.setOnClickListener { toggleTl() }
+        // CONTROLES DEL LAYOUT QUE NO ESCUCHABA NADIE. Los cinco chips nuevos del panel de
+        // vídeo estaban VISIBLES y sin un solo setOnClickListener: el usuario los pulsaba,
+        // no ocurría nada y la conclusión razonable es que la app está rota. De los cinco
+        // sobreviven dos, que son los que tienen a qué llamar:
+        //   · chip_audio  -> toggleAudio(), el mismo que movía el chip duplicado por código.
+        //   · chip_ae_lock -> toggleAeAfLock(), controller.lockAeAf() es público y funciona
+        //     con la sesión de vídeo montada (applyAndUpdate reprograma la petición repetida,
+        //     que durante la grabación es la del TEMPLATE_RECORD; el zoom ya hace lo mismo
+        //     mientras se rueda).
+        // chip_wind, chip_agc y chip_stab se han BORRADO del layout: no hay API pública en el
+        // motor para ninguno de los tres (ver el comentario del XML).
+        binding.chipAudio.setOnClickListener { toggleAudio() }
+        binding.chipAeLock.setOnClickListener { toggleAeAfLock() }
+        // El rótulo de formato es pulsable: "4K · 60 fps · HEVC" es justo donde el pulgar va
+        // a buscar el cambio de formato. Antes esto lo hacía el rótulo duplicado que se
+        // construía en buildVideoHud(), que ya no existe.
+        binding.videoHud.setOnClickListener {
+            if (controller.isRecording) hint(getString(R.string.hint_format_locked))
+            else toggleVideoPanel()
+        }
 
         setUpCoverMirror()
         buildExtraChips()
@@ -729,14 +782,12 @@ class CameraActivity : AppCompatActivity() {
         chipTools = insertChip(binding.chipFilter, "ANÁLISIS", antes = false)?.also { chip ->
             chip.setOnClickListener { toggleTools() }
         }
-        // Interruptor de SONIDO, en la fila del panel de vídeo junto a TL. No existía
-        // NINGÚN control de audio en toda la app: ni silenciar, ni nivel, ni indicación de
-        // que se estuviera grabando con sonido (busqué "micro", "audio", "vumetro" y
-        // "ganancia" en el layout y en strings.xml: cero coincidencias, y el jurado también).
-        chipMic = insertChip(binding.chipTl, "SONIDO", antes = false)?.also { chip ->
-            chip.setOnClickListener { toggleAudio() }
-        }
-        buildVideoHud()
+        // AQUÍ SE CREABA UN TERCER CHIP, "SONIDO", junto a chip_tl, y se llamaba a
+        // buildVideoHud(). Los dos duplicaban controles que YA estaban en el layout
+        // (chip_audio y la fila video_hud) y que simplemente no tenían listener. Resultado
+        // en pantalla: dos interruptores de sonido pegados en el panel de vídeo, de los
+        // cuales sólo respondía el de código, y dos rótulos de formato en sitios distintos.
+        // Ahora el dueño es el XML y aquí no se fabrica nada.
         // El overlay de análisis cuelga del HUD del visor, que PreviewFrameLayout coloca
         // exactamente sobre el rectángulo VISIBLE de la imagen: así las cebras caen sobre
         // los píxeles que de verdad se están quemando y no sobre la franja negra.
@@ -751,40 +802,6 @@ class CameraActivity : AppCompatActivity() {
         // histograma tiene que leerse sobre el degradado, no taparlo.
         hud.addView(v, (hud.indexOfChild(binding.gridOverlay) + 1).coerceIn(0, hud.childCount))
         analysisOverlay = v
-    }
-
-    /**
-     * Rótulo permanente de LO QUE SE VA A GRABAR: resolución, cadencia, códec y sonido.
-     *
-     * En la captura de modo vídeo que juzgó el jurado no había absolutamente nada en
-     * pantalla sobre el formato: el usuario pulsaba REC sin saber si iba a 1080p30 H.264 o a
-     * 4K60 HEVC, y sobre todo sin saber si entraba sonido. Los chips existen (chip_vres,
-     * chip_vfps, chip_vcodec) pero viven DENTRO del panel de vídeo, que además se cierra al
-     * empezar a rodar. Este rótulo vive en la barra superior y sigue visible durante toda la
-     * toma, que es cuando el estado del micrófono importa de verdad.
-     *
-     * Se crea por código porque activity_camera.xml es de otro integrador y añadir ahí un id
-     * nuevo rompería su compilación. top_bar es un LinearLayout vertical (fila de chips
-     * arriba, cronómetro debajo) y el rótulo se mete en medio: el orden en que se leen es
-     * "qué voy a grabar" y después "cuánto llevo grabando".
-     */
-    private fun buildVideoHud() {
-        val barra = binding.topBar
-        val tv = TextView(this, null, 0, R.style.ProChip)
-        tv.visibility = View.GONE
-        tv.setOnClickListener {
-            if (controller.isRecording) hint("El formato no se puede cambiar a mitad de la toma")
-            else toggleVideoPanel()
-        }
-        markAsButton(tv)
-        val lp = LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply {
-            gravity = android.view.Gravity.CENTER_HORIZONTAL
-            topMargin = dp(6f).toInt()
-        }
-        barra.addView(tv, 1.coerceAtMost(barra.childCount), lp)
-        videoHud = tv
     }
 
     /** Crea un chip ProChip y lo mete en la MISMA fila que [ref]. */
@@ -981,6 +998,12 @@ class CameraActivity : AppCompatActivity() {
         mfDiopters = prefs.getFloat("mfDiopters", 0f)
         mfOn = false
         updateMfChip()
+
+        // El chip de bloqueo AE/AF arranca apagado, igual que la insignia: sin esto se
+        // quedaba con el color por defecto del estilo y con la descripción SIN RELLENAR del
+        // XML (cd_ae_af_lock lleva un %1$s), o sea que TalkBack leía el marcador de formato
+        // hasta la primera pulsación.
+        setChipState(binding.chipAeLock, aeAfLocked, R.string.cd_ae_af_lock)
 
         // Deja la ranura de paneles cerrada Y de paso pone el color y la descripción
         // accesible de los cuatro chips que abren panel, que si no arrancaban sin nada.
@@ -1190,8 +1213,10 @@ class CameraActivity : AppCompatActivity() {
         mfOn = false
         updateMfChip()
         // Un apilado nocturno interrumpido por un onPause no llega a devolver su callback:
-        // sin esto, la marca del rótulo se quedaría puesta con la cámara ya reabierta.
-        nightStacking = false
+        // sin esto, la tarjeta de progreso se quedaba EN PANTALLA con la cámara ya reabierta,
+        // anunciando un apilado que murió al cerrar. Antes aquí sólo se bajaba una bandera
+        // (nightStacking) y la vista se quedaba visible igual.
+        if (binding.nightCard.visibility == View.VISIBLE) showCenterSlot(null)
         // El estado del HUD tiene que volver atrás con la cámara. Tras bloquear la
         // pantalla estando en la frontal, se reabría la trasera pero el chip seguía
         // diciendo "frontal", y la insignia AE/AF BLOQUEADO se quedaba encendida con
@@ -1214,6 +1239,10 @@ class CameraActivity : AppCompatActivity() {
     private fun clearAeAfLock() {
         aeAfLocked = false
         binding.aeLockBadge.visibility = View.GONE
+        // El chip del panel de vídeo va con la insignia: si no, tras un flip o una reapertura
+        // se quedaba en ámbar con el bloqueo ya deshecho por open(), que es exactamente el
+        // fallo que esta función arreglaba para la insignia.
+        setChipState(binding.chipAeLock, false, R.string.cd_ae_af_lock)
     }
 
     /**
@@ -1258,8 +1287,9 @@ class CameraActivity : AppCompatActivity() {
         binding.chipVid.visibility = if (photo) View.GONE else View.VISIBLE
         if (photo && binding.videoPanel.visibility == View.VISIBLE) showPanel(null)
         // El rótulo de formato solo tiene sentido en vídeo, pero ahí tiene que estar SIEMPRE:
-        // es lo único que dice qué se va a grabar y si va a entrar sonido.
-        videoHud?.visibility = if (photo) View.GONE else View.VISIBLE
+        // es lo único que dice qué se va a grabar y si va a entrar sonido. En modo foto va
+        // GONE y control_band NO crece ni un dp, que es lo que pedían las bajas 9 y 22.
+        binding.videoHud.visibility = if (photo) View.GONE else View.VISIBLE
         audioGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
         if (!photo && !audioGranted) requestAudio.launch(Manifest.permission.RECORD_AUDIO)
@@ -1406,10 +1436,20 @@ class CameraActivity : AppCompatActivity() {
         return String.format(Locale.US, "%+.1f EV", v)
     }
 
+    /**
+     * UN SOLO DUEÑO del bloqueo AE/AF. Lo disparan tres cosas —la pulsación larga sobre el
+     * visor, la acción accesible del visor y ahora chip_ae_lock del panel de vídeo— y las
+     * tres pasan por aquí, con una sola variable (aeAfLocked) y un solo repintado. El chip
+     * estaba en el layout desde la ronda anterior sin ningún listener: es el que pedían los
+     * medios 41 y 56 ("sin bloqueo un clip respira y no hay forma de casarlo con la toma
+     * siguiente"), y hasta ahora la única forma de bloquear era una pulsación larga que nadie
+     * descubre y que además no se puede hacer cómodamente con la cámara ya rodando.
+     */
     private fun toggleAeAfLock() {
         aeAfLocked = !aeAfLocked
         controller.lockAeAf(aeAfLocked)
         binding.aeLockBadge.visibility = if (aeAfLocked) View.VISIBLE else View.GONE
+        setChipState(binding.chipAeLock, aeAfLocked, R.string.cd_ae_af_lock)
         binding.gestureArea.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
         binding.gestureArea.announceForAccessibility(
             getString(if (aeAfLocked) R.string.ae_af_locked else R.string.ae_af_unlocked)
@@ -2041,8 +2081,9 @@ class CameraActivity : AppCompatActivity() {
             }.start()
         val cb: (Boolean) -> Unit = { ok ->
             capturing = false
-            nightStacking = false
-            if (binding.nightLabel.visibility == View.VISIBLE) showCenterSlot(null)
+            // La tarjeta de noche se cierra sola al terminar. Ya no hace falta bajar ninguna
+            // bandera: el dueño del rótulo central es la vista que esté visible.
+            if (binding.nightCard.visibility == View.VISIBLE) showCenterSlot(null)
             if (ok) {
                 // La miniatura YA la pintó onPhotoThumb desde el JPEG en memoria, al
                 // instante y sin tocar disco. refreshThumbnail lanzaba además una
@@ -2060,14 +2101,17 @@ class CameraActivity : AppCompatActivity() {
             }
         }
         if (nightOn) {
-            // Apilado multi-frame: sin destello, con indicador de procesado.
-            // El rótulo se REPONE antes de enseñarlo: stackNext() y bracketNext() lo dejan
-            // escrito con SU contador ("Apilado de enfoque 5/5", "Horquillado 3/3") y no lo
-            // devuelven nunca a su texto, así que la siguiente foto de noche arrancaba
-            // anunciando la operación anterior hasta que llegase el primer progreso.
-            nightStacking = true
-            binding.nightLabel.setText(R.string.night_stacking)
-            showCenterSlot(binding.nightLabel)
+            // Apilado multi-frame: sin destello, con tarjeta de progreso PROPIA (night_card,
+            // que llevaba puesta en el layout sin que la usara nadie). Antes esto escribía en
+            // night_label, la vista que comparten el apilado de enfoque y el horquillado, y
+            // había que reponerle el texto a mano porque stackNext() y bracketNext() lo
+            // dejaban con SU contador ("Apilado de enfoque 5/5"): la siguiente foto de noche
+            // arrancaba anunciando la operación anterior hasta el primer progreso. Con una
+            // vista propia ese arreglo sobra, pero el contador sí se pone a cero: el motor
+            // tarda un fotograma en mandar el primer onNightProgress y sin esto se vería el
+            // "Apilando 7 de 7" de la foto anterior.
+            binding.nightProgress.setText(R.string.night_stacking)
+            showCenterSlot(binding.nightCard)
             playShutterSound()
             controller.takeNightPhoto(cb)
         } else {
@@ -2179,11 +2223,13 @@ class CameraActivity : AppCompatActivity() {
         // absolutamente nada, y el usuario se enteraba con la toma ya perdida.
         if (!withAudio) {
             hint(
-                when {
-                    tlOn -> "Time-lapse: se graba SIN SONIDO"
-                    !audioGranted -> "SIN SONIDO: falta el permiso de micrófono"
-                    else -> "Grabando en MUDO"
-                }
+                getString(
+                    when {
+                        tlOn -> R.string.hint_timelapse_muted
+                        !audioGranted -> R.string.hint_no_audio_permission
+                        else -> R.string.hint_recording_muted
+                    }
+                )
             )
         }
         // El pitido de inicio va AQUÍ, antes de que arranque el grabador. Cuando se
@@ -2194,15 +2240,39 @@ class CameraActivity : AppCompatActivity() {
         // configuración de la sesión de captura, que es donde se consume el pitido.
         playShutterSound(android.media.MediaActionSound.START_VIDEO_RECORDING)
         if (controller.startVideo(withAudio)) return
-        // Red de seguridad del 4K. Si el códec no puede con la resolución o el bitrate
-        // pedidos, createRecorder revienta en prepare() y startVideo devuelve false: antes
-        // eso era un Toast y ninguna grabación. Ahora se baja a 1080p y se reintenta, que es
-        // lo que el usuario quería (grabar), diciéndoselo en vez de dejarlo sin toma.
+        // ============================ RED DE SEGURIDAD DEL 4K ============================
+        // Si el códec no puede con la resolución o el bitrate pedidos, createRecorder revienta
+        // en prepare() y startVideo devuelve false. Bajar a 1080p y reintentar está bien: es
+        // lo que el usuario quería (grabar). Lo que estaba MAL era el diagnóstico:
+        //
+        //   1. Se le achacaba a la resolución CUALQUIER fallo de startVideo(). createRecorder
+        //      configura también el audio a 48 kHz estéreo 256 kbps, el códec HEVC, la
+        //      cadencia y el fichero de salida: si revienta por cualquiera de esas cosas, el
+        //      4K no tenía nada que ver.
+        //   2. Y encima se PERSISTÍA en preferencias en el PRIMER intento, así que un fallo
+        //      puntual (otra app tocando el códec, un archivo que no se pudo abrir) dejaba al
+        //      usuario en 1080p PARA SIEMPRE, sin aviso y sin forma de saber por qué su 4K
+        //      había desaparecido.
+        //
+        // Ahora: el primer fallo baja la resolución SOLO PARA ESTA SESIÓN (no toca prefs, así
+        // que al reabrir la app vuelve el 4K que el usuario eligió). Se persiste únicamente al
+        // segundo fallo, que ya es un patrón y no un accidente, y diciéndolo con todas las
+        // letras. Y si el 1080p falla TAMBIÉN, entonces la resolución queda descartada como
+        // causa: se le devuelve al usuario su ajuste y se le dice la verdad.
         if (vresList[vresIndex] > 1080) {
+            val pedido = vresIndex
             vresIndex = vresList.indexOf(1080).coerceAtLeast(0)
-            prefs.edit().putInt("vres", vresIndex).apply()
+            // OJO: applyVideoSettings() NO escribe en preferencias, solo aplica al motor y
+            // repinta. Es justo lo que hace falta aquí.
             applyVideoSettings()
-            hint("Esta lente no acepta 4K: grabando en 1080p")
+            val fallos = prefs.getInt("vres4kFails", 0) + 1
+            prefs.edit().putInt("vres4kFails", fallos).apply()
+            if (fallos >= 2) {
+                prefs.edit().putInt("vres", vresIndex).apply()
+                hint(getString(R.string.hint_video_4k_sticky))
+            } else {
+                hint(getString(R.string.hint_video_4k_fallback))
+            }
             // El reintento va con retraso A PROPÓSITO. startVideo devuelve false por dos
             // caminos distintos: uno síncrono (createRecorder revienta en prepare) que no
             // toca la sesión, y otro asíncrono en el que el motor ya ha ejecutado su
@@ -2210,9 +2280,17 @@ class CameraActivity : AppCompatActivity() {
             // otra sesión encima de esa reconstrucción es exactamente el escenario que
             // cuelga este HAL, y aquí no hay forma de distinguir cuál de los dos fue.
             ui.postDelayed({
-                if (resumed && !controller.isRecording && !controller.startVideo(withAudio)) {
-                    Toast.makeText(this, R.string.photo_error, Toast.LENGTH_SHORT).show()
-                }
+                if (!resumed || controller.isRecording) return@postDelayed
+                if (controller.startVideo(withAudio)) return@postDelayed
+                // Falla también en 1080p: la resolución NO era el problema. Se deshace la
+                // rebaja (incluida la persistida, si la hubo) para no dejar castigado un
+                // ajuste que era inocente, y se cuenta lo que de verdad ha pasado.
+                vresIndex = pedido
+                prefs.edit().remove("vres4kFails").apply()
+                if (fallos >= 2) prefs.edit().putInt("vres", pedido).apply()
+                applyVideoSettings()
+                hint(getString(R.string.hint_video_not_resolution))
+                Toast.makeText(this, R.string.photo_error, Toast.LENGTH_SHORT).show()
             }, 500)
             return
         }
@@ -2231,7 +2309,7 @@ class CameraActivity : AppCompatActivity() {
         if (controller.isRecording) {
             // MediaRecorder fija la pista al preparar el archivo: cambiarla a mitad de la
             // toma obligaría a cortar y volver a empezar, que es peor que no poder.
-            hint("El sonido no se puede cambiar a mitad de la toma")
+            hint(getString(R.string.hint_audio_locked))
             return
         }
         if (!audioOn && !audioGranted) {
@@ -2246,47 +2324,74 @@ class CameraActivity : AppCompatActivity() {
         audioOn = !audioOn
         prefs.edit().putBoolean("vaudio", audioOn).apply()
         updateAudioUi()
-        hint(if (audioActive()) "Sonido activado" else "Vídeo MUDO")
+        hint(getString(if (audioActive()) R.string.hint_audio_on else R.string.hint_audio_off))
     }
 
     /**
-     * Repinta el interruptor de sonido y el rótulo de formato. El estado del micrófono tiene
-     * que ser visible ANTES de rodar y DURANTE toda la toma, no descubrirse al reproducir el
-     * archivo: es exactamente la clase de fallo que hace desinstalar una app de vídeo.
+     * Repinta el interruptor de sonido y la fila de estado de vídeo. El estado del micrófono
+     * tiene que ser visible ANTES de rodar y DURANTE toda la toma, no descubrirse al
+     * reproducir el archivo: es exactamente la clase de fallo que hace desinstalar una app de
+     * vídeo.
+     *
+     * Los dos dueños son ahora del XML: chip_audio (panel de vídeo) y badge_mic (fila de
+     * estado, visible también mientras se rueda). Antes esto pintaba un chip creado por
+     * código y el rótulo duplicado, y los del layout se quedaban con lo que dijera el XML.
      */
     private fun updateAudioUi() {
         val activo = audioActive()
-        chipMic?.let { c ->
-            c.text = if (activo) "SONIDO" else "MUDO"
-            setExtraChip(
-                c, activo,
-                "Sonido del vídeo: " + when {
-                    activo -> "activado"
-                    tlOn -> "el time-lapse graba sin sonido"
-                    !audioGranted -> "sin permiso de micrófono"
-                    else -> "silenciado"
-                }
-            )
-        }
-        updateVideoHud()
+        // Estado en lenguaje humano, UNA sola vez: lo usan el chip y la insignia.
+        val estado = getString(
+            when {
+                activo -> R.string.audio_on
+                tlOn -> R.string.audio_timelapse
+                !audioGranted -> R.string.audio_no_permission
+                else -> R.string.audio_muted
+            }
+        )
+        // Sin letra, como chip_flash: es un ProChip.Icon de 56dp y el rótulo lo rompería.
+        // El icono distingue micrófono de micrófono tachado y el estado va por descripción.
+        binding.chipAudio.text = ""
+        setChipState(
+            binding.chipAudio, activo, R.string.cd_audio, estado,
+            if (activo) R.drawable.ic_mic else R.drawable.ic_mic_off
+        )
+        updateVideoHud(estado)
     }
 
-    /** Resolución · cadencia · códec · sonido, en la barra superior y en lenguaje llano. */
-    private fun updateVideoHud() {
-        val v = videoHud ?: return
+    /**
+     * Fila de estado de vídeo: resolución · cadencia · códec, más la insignia de micrófono.
+     *
+     * Ya no se construye ningún rótulo por código: se escribe en txt_video_format y
+     * badge_mic, que llevaban puestos en el layout sin que nadie los tocara. El texto sale de
+     * @string/video_format y @string/cd_video_format en vez de un String.format con literales
+     * en castellano, así que en un teléfono en inglés deja de salir a medias.
+     */
+    private fun updateVideoHud(estadoAudio: String) {
         val activo = audioActive()
         val res = vresLabels[vresIndex]
+        val fps = "$vfps fps"
         val codec = if (vhevc) "HEVC" else "H.264"
-        val sonido = if (activo) "SONIDO" else "MUDO"
-        v.text = String.format(Locale.US, "%s · %d fps · %s · %s", res, vfps, codec, sonido)
-        // Ámbar = hay algo que mirar antes de disparar. Aquí lo único de verdad peligroso es
-        // ponerse a rodar sin sonido sin saberlo.
-        v.setTextColor(if (activo) cWarm else cAccent)
-        v.isSelected = !activo
-        val codecHablado = if (vhevc) "HEVC" else "H punto 264"
-        val sonidoHablado = if (activo) "con sonido" else "SIN SONIDO"
-        v.contentDescription =
-            "Se grabará a $res, $vfps fotogramas por segundo, $codecHablado, $sonidoHablado"
+        binding.txtVideoFormat.text = getString(R.string.video_format, res, fps, codec)
+        binding.txtVideoFormat.setTextColor(cWarm)
+        // Insignia de micrófono. PERMANENTE mientras la toma vaya a salir muda: nace tachada
+        // en el XML a propósito (si el código no llegara a tocarla, el estado que se enseña es
+        // el pesimista). Con sonido se queda como un icono discreto sin rótulo; sin sonido
+        // grita "SIN SONIDO" en el naranja de aviso.
+        val badge = binding.badgeMic
+        badge.text = if (activo) "" else getString(R.string.badge_muted)
+        badge.setCompoundDrawablesRelativeWithIntrinsicBounds(
+            if (activo) R.drawable.ic_mic else R.drawable.ic_mic_off, 0, 0, 0
+        )
+        val color = if (activo) cDim else cMuted
+        badge.setTextColor(color)
+        badge.compoundDrawableTintList = ColorStateList.valueOf(color)
+        badge.compoundDrawablePadding = if (activo) 0 else dp(5f).toInt()
+        // La insignia NO lleva descripción propia (es importantForAccessibility=no en el
+        // XML): la fila entera es un solo botón y se lee de un tirón, formato + sonido, que
+        // es el orden en que hacen falta ("qué voy a grabar" y "va a entrar sonido").
+        binding.videoHud.contentDescription =
+            getString(R.string.cd_video_format, res, fps, codec) + ". " +
+                getString(R.string.cd_audio, estadoAudio)
     }
 
     /**
@@ -2325,17 +2430,23 @@ class CameraActivity : AppCompatActivity() {
                 binding.modeToggle.alpha = 0.4f
                 binding.tabPhoto.isEnabled = false
                 binding.tabVideo.isEnabled = false
-                // Literal: strings.xml no es nuestro y no existe una cadena para esto.
-                binding.btnShutter.contentDescription = "Detener la grabación"
+                // Ya no es un literal en castellano: cd_stop_recording estaba en strings.xml
+                // esperando justo a esta línea (y en values-en, que era lo que se perdía).
+                binding.btnShutter.contentDescription = getString(R.string.cd_stop_recording)
                 // El cronómetro y la fila de chips compartían cota (y=54..85 contra
                 // y=40..88) y options_bar se declaraba después: el 0:00 salía MORDIDO.
                 // Grabando no hace falta ningún ajuste de foto en pantalla.
                 binding.optionsScroll.visibility = View.GONE
                 binding.chipMore.visibility = View.GONE
                 showPanel(null)
-                // El rótulo de formato NO se esconde con el resto de la barra: durante la
-                // toma es lo único que dice a qué se está grabando y si hay pista de sonido.
-                videoHud?.visibility = View.VISIBLE
+                // La fila de estado NO se esconde con el resto de la barra: durante la toma
+                // es lo único que dice a qué se está grabando y si hay pista de sonido.
+                binding.videoHud.visibility = View.VISIBLE
+                // 4K que SÍ arrancó: se borra el historial de fallos de la red de seguridad.
+                // Sin esto, un fallo antiguo (por ejemplo el de una lente distinta) se sumaría
+                // a uno nuevo y bajaría al usuario a 1080p de forma permanente por dos
+                // incidentes que no tienen nada que ver.
+                if (vresList[vresIndex] > 1080) prefs.edit().remove("vres4kFails").apply()
                 // El pitido de inicio ya sonó en startRec(), ANTES de recorder.start().
                 // Aquí llegaría con el grabador YA corriendo y se grababa a sí mismo dentro
                 // de la toma; el jurado lo midió como un transitorio de banda ancha en el
@@ -2980,6 +3091,24 @@ class CameraActivity : AppCompatActivity() {
     }
 
     private fun applyFlashChip() {
+        // LENTE QUE VELA: el chip no puede mentir. controller.flashBlockedOnLens y
+        // controller.hasFlash llevaban publicados sin que los leyera nadie. En la lente tele
+        // el LED mete luz parásita en la óptica y el motor degrada CUALQUIER modo de flash a
+        // apagado por su cuenta (flashModeEfectivo()); el chip, en cambio, seguía enseñando
+        // el rayo en ámbar y anunciando "automático". El usuario disparaba convencido de que
+        // llevaba flash. Aquí se pinta lo que va a PASAR, no lo que se pidió.
+        if (::controller.isInitialized && controller.flashBlockedOnLens) {
+            binding.chipFlash.text = ""
+            setChipState(
+                binding.chipFlash, false, R.string.cd_flash,
+                getString(R.string.state_flash_blocked), R.drawable.ic_flash_off
+            )
+            // Se atenúa además de apagarse: es la única señal visual de "aquí no se puede",
+            // frente a un simple "está apagado" que invitaría a volver a pulsarlo.
+            binding.chipFlash.alpha = 0.45f
+            return
+        }
+        binding.chipFlash.alpha = 1f
         // El ciclo tiene CUATRO estados (apagado / automático / encendido / linterna) y el
         // chip pintaba el MISMO icono para automático que para encendido, así que no había
         // manera de saber si el flash iba a dispararse o no. ic_flash_auto (el rayo con la A)
@@ -3093,8 +3222,13 @@ class CameraActivity : AppCompatActivity() {
             binding.chipEv, binding.chipIso, binding.chipVel, binding.chipWb,
             binding.chipK, binding.chipAuto, binding.tabPhoto, binding.tabVideo,
             binding.btnQrCopy, binding.btnQrOpen, binding.btnQrClose, binding.qrHint,
-            binding.chipQr, binding.chipFit
+            binding.chipQr, binding.chipFit,
+            // Los dos chips del panel de vídeo que acaban de dejar de ser decorativos.
+            binding.chipAudio, binding.chipAeLock
         ).forEach { markAsButton(it) }
+        // La fila de estado de vídeo es pulsable (abre el panel): TalkBack la leía como
+        // texto suelto y no había forma de saber que se podía tocar.
+        markAsButton(binding.videoHud)
     }
 
     // ---- Ajustes de video ----
@@ -3209,12 +3343,42 @@ class CameraActivity : AppCompatActivity() {
         announceChip(binding.chipFlip)
     }
 
+    /**
+     * Última vez que se avisó del riesgo de trepidación, para no repetirlo en cada disparo.
+     */
+    private var lastShakeWarnMs = 0L
+
+    /**
+     * AVISO DE FOTO MOVIDA. controller.shakeRiskStops llevaba publicado desde hace rondas y
+     * no lo leía NADIE: dice cuántos pasos por debajo de la regla recíproca (1/focal
+     * equivalente) está exponiendo el AE ahora mismo. Las dos tomas de teleobjetivo del
+     * expediente salieron a 1/24 s con 70 mm equivalentes —tres pasos por debajo, movida
+     * asegurada a pulso— y la app no dijo una palabra.
+     *
+     * Va en startPhotoOrTimer y no en el callback de la foto por dos motivos: es el ÚNICO
+     * punto por el que pasan las tres formas de disparar (obturador, teclas de volumen y
+     * pantalla externa), y llega ANTES de perder la toma; con el temporizador puesto, además,
+     * el usuario tiene los 3 o 10 s de la cuenta atrás para apoyar el teléfono.
+     *
+     * Umbral en 1 paso entero y no en cuanto asoma el riesgo: por debajo de eso la mayoría de
+     * la gente saca fotos nítidas y un aviso constante se convierte en ruido que se ignora.
+     */
+    private fun avisarSiVaAMoverse() {
+        if (nightOn || mode != "photo") return // en noche el apilado ya es la respuesta
+        if (controller.shakeRiskStops <= 1f) return
+        val ahora = SystemClock.elapsedRealtime()
+        if (ahora - lastShakeWarnMs < 8000L) return
+        lastShakeWarnMs = ahora
+        hint(getString(R.string.hint_shake_risk))
+    }
+
     private fun startPhotoOrTimer() {
         if (capturing) return
         // Segunda pulsación durante la cuenta atrás: CANCELAR, no reiniciarla. Antes la
         // única forma de detener un temporizador de 10 s era salir de la app, y salir
         // tampoco lo paraba de verdad.
         if (countdownRunnable != null) { cancelCountdown(); return }
+        avisarSiVaAMoverse()
         if (timerSec <= 0) {
             takePhoto()
             return

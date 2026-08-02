@@ -167,42 +167,38 @@
     <!-- Audio de vídeo. AGC, EIS, dB y las siglas técnicas no se repiten: son iguales en
          los dos idiomas y una traducción duplicada es una que algún día se queda vieja
          sólo en un sitio. -->
-    <string name="chip_audio">SOUND</string>
     <string name="cd_audio">Video sound: %1$s</string>
     <string name="audio_on">with sound</string>
     <string name="audio_muted">muted</string>
+    <string name="audio_no_permission">no microphone permission</string>
+    <string name="audio_timelapse">time-lapse records without sound</string>
+    <string name="hint_audio_on">Sound on</string>
+    <string name="hint_audio_off">Video MUTED</string>
+    <string name="hint_audio_locked">Sound cannot be changed mid-take</string>
     <string name="badge_muted">NO SOUND</string>
-    <string name="cd_badge_muted">Warning: this video is being recorded without sound</string>
     <string name="hint_recording_muted">You are about to record WITHOUT sound</string>
     <string name="hint_no_audio_permission">No microphone permission: the video will be silent</string>
-    <string name="cd_audio_meter">Audio level</string>
-    <string name="cd_audio_level">Audio level: %1$d decibels, peak %2$d</string>
-    <string name="audio_clipping">CLIP</string>
-    <string name="cd_audio_clipping">Audio is clipping: lower the gain or move away from the source</string>
-    <string name="hint_audio_silent">No sound coming in: check that you are not covering the microphone</string>
-    <string name="cd_agc">Automatic gain control: %1$s</string>
-    <string name="chip_gain">GAIN</string>
-    <string name="cd_gain">Microphone gain</string>
-    <string name="chip_wind">WIND</string>
-    <string name="cd_wind">Wind and handling noise filter: %1$s</string>
-    <string name="audio_ext_mic">EXT. MIC</string>
-    <string name="cd_ext_mic">External microphone in use: %1$s</string>
-    <string name="hint_ext_mic_on">External microphone connected: %1$s</string>
-    <string name="hint_ext_mic_off">External microphone disconnected: back to the phone one</string>
+    <string name="hint_timelapse_muted">Time-lapse: recorded WITHOUT SOUND</string>
+    <!-- Borradas junto con sus controles (vúmetro, AGC, ganancia, viento y micrófono
+         externo): ver el bloque equivalente en values/strings.xml. -->
 
     <!-- Estado de grabación en pantalla -->
     <string name="cd_video_format">About to record at %1$s, %2$s, codec %3$s</string>
     <string name="cd_stop_recording">Stop recording</string>
+    <string name="hint_format_locked">The format cannot be changed mid-take</string>
+    <string name="hint_video_4k_fallback">This lens did not accept 4K: recording at 1080p</string>
+    <string name="hint_video_4k_sticky">4K failed twice: staying at 1080p</string>
+    <string name="hint_video_not_resolution">1080p fails too: resolution is not the problem</string>
     <string name="cd_exposure_readout">Metered exposure: ISO %1$d, %2$s</string>
     <string name="chip_zebra">ZEBRA</string>
     <string name="cd_zebra">Exposure zebras: %1$s</string>
     <string name="zebra_level">ZEBRA %1$s</string>
-    <string name="cd_stab">Video stabilisation: %1$s</string>
     <string name="chip_ae_lock">LOCK</string>
-    <string name="cd_ae_awb_lock">Exposure and colour lock while recording: %1$s</string>
+    <string name="cd_ae_af_lock">Exposure and focus lock: %1$s</string>
 
     <!-- Avisos de flash -->
     <string name="hint_flash_tele_blocked">The flash veils the shot on the telephoto: turned off for this lens</string>
+    <string name="state_flash_blocked">not available on this lens</string>
     <string name="hint_flash_switched_wide">Flash: switching to the ultra wide so the shot is not veiled</string>
     <string name="hint_flash_out_of_range">The subject is beyond flash range (about 2 m)</string>
     <string name="hint_flash_veiled">Veiled flash: retaking the shot without it</string>
@@ -210,9 +206,10 @@
     <!-- Modo noche -->
     <string name="night_progress">Stacking %1$d of %2$d</string>
     <string name="night_hold_still">Hold the phone still</string>
-    <string name="night_cancel">Cancel</string>
-    <string name="cd_night_cancel">Cancel the night shot</string>
+    <!-- night_cancel / cd_night_cancel borradas con btn_night_cancel: cancelNight() es
+         privada en Camera2Controller. -->
     <string name="hint_night_crop">Night mode delivers fewer pixels than a normal shot</string>
+    <string name="hint_shake_risk">Low light: this may come out blurry. Brace the phone or use night mode</string>
     <string name="chip_ambience">AMBIENCE</string>
     <string name="cd_ambience">How much night to keep</string>
 
@@ -250,4 +247,6 @@
     <!-- Accesos directos del lanzador -->
     <string name="shortcut_video_short">Video</string>
     <string name="shortcut_video_long">Record video</string>
+    <string name="night_cancel">CANCEL</string>
+    <string name="cd_night_cancel">Cancel the night capture</string>
 </resources>

@@ -193,50 +193,43 @@
         consumidores van anotados uno a uno para el dueño de CameraActivity.
     -->
 
-    <!-- Chip conmutable de la fila de vídeo: grabar con sonido o mudo a propósito. -->
-    <string name="chip_audio">SONIDO</string>
+    <!-- Chip conmutable de la fila de vídeo: grabar con sonido o mudo a propósito.
+         chip_audio ya no lleva texto (es un ProChip.Icon con micrófono / micrófono
+         tachado, igual que chip_flash): el estado entero va por cd_audio. -->
     <string name="cd_audio">Sonido del vídeo: %1$s</string>
     <string name="audio_on">con sonido</string>
     <string name="audio_muted">mudo</string>
+    <string name="audio_no_permission">sin permiso de micrófono</string>
+    <string name="audio_timelapse">el time-lapse graba sin sonido</string>
+    <string name="hint_audio_on">Sonido activado</string>
+    <string name="hint_audio_off">Vídeo MUDO</string>
+    <string name="hint_audio_locked">El sonido no se puede cambiar a mitad de la toma</string>
 
     <!-- Insignia PERMANENTE del visor cuando el vídeo va a salir sin pista de audio.
          Debilidad crítica 22: "no grabar mudo en silencio". -->
+    <!-- badge_muted es el TEXTO de la insignia. NO lleva cd_ propia: badge_mic es
+         importantForAccessibility=no y la descripción la pone la fila video_hud entera, que
+         es un solo botón; dos nodos accesibles para la misma información hacían que TalkBack
+         recitase la fila dos veces. Por eso cd_badge_muted se ha borrado. -->
     <string name="badge_muted">SIN SONIDO</string>
-    <string name="cd_badge_muted">Aviso: este vídeo se está grabando sin sonido</string>
     <!-- Aviso ANTES de empezar, no al descubrirlo en casa. -->
     <string name="hint_recording_muted">Vas a grabar SIN sonido</string>
     <string name="hint_no_audio_permission">Sin permiso de micrófono: el vídeo saldrá mudo</string>
+    <string name="hint_timelapse_muted">Time-lapse: se graba SIN SONIDO</string>
 
-    <!-- Vúmetro. El pico va aparte de la media porque la toma medida por el jurado dio
-         -50,6 dBFS de media y -28,7 dBTP de pico: 22 dB de diferencia. -->
-    <string name="cd_audio_meter">Nivel de audio</string>
-    <string name="audio_level_db">%1$d dB</string>
-    <string name="cd_audio_level">Nivel de audio: %1$d decibelios, pico %2$d</string>
-    <string name="audio_clipping">SATURA</string>
-    <string name="cd_audio_clipping">El audio está saturando: baja la ganancia o aléjate de la fuente</string>
-    <string name="hint_audio_silent">No entra sonido: comprueba que no tapas el micrófono</string>
+    <!--
+        BORRADAS EN ESTA RONDA, con sus controles: cd_audio_meter, audio_level_db,
+        cd_audio_level, audio_clipping, cd_audio_clipping, hint_audio_silent (vúmetro),
+        chip_agc, cd_agc, chip_gain, cd_gain, gain_value (ganancia y AGC), chip_wind,
+        cd_wind (filtro de viento) y audio_ext_mic, cd_ext_mic, hint_ext_mic_on,
+        hint_ext_mic_off (micrófono externo).
 
-    <!-- Ganancia y AGC conmutable (debilidad crítica 24). -->
-    <string name="chip_agc">AGC</string>
-    <string name="cd_agc">Control automático de ganancia: %1$s</string>
-    <string name="chip_gain">GANANCIA</string>
-    <string name="cd_gain">Ganancia del micrófono</string>
-    <!-- %1$s y no %1$+d: el argumento llega ya formateado con su signo ("+6", "-3"). Los
-         indicadores con bandera y el escape %% son válidos en Java pero no hay UNA sola
-         cadena así en todo el proyecto, no hay compilador local para probarlo y un fallo
-         de AAPT2 cuesta un ciclo entero de Actions. No es sitio para estrenar sintaxis. -->
-    <string name="gain_value">%1$s dB</string>
-
-    <!-- Filtro contra el viento (medio 57): "el rumble de manejo y el viento son el
-         enemigo número uno y hoy no hay ninguna defensa ni ningún control". -->
-    <string name="chip_wind">VIENTO</string>
-    <string name="cd_wind">Filtro contra el viento y el ruido de manejo: %1$s</string>
-
-    <!-- Micrófono externo USB-C o Bluetooth (medio 58: "es una portería vacía"). -->
-    <string name="audio_ext_mic">MICRO EXT.</string>
-    <string name="cd_ext_mic">Micrófono externo en uso: %1$s</string>
-    <string name="hint_ext_mic_on">Micrófono externo conectado: %1$s</string>
-    <string name="hint_ext_mic_off">Micrófono externo desconectado: se vuelve al del teléfono</string>
+        No es que sobren las funciones: es que NINGUNA de ellas tiene hoy un punto de
+        entrada en el motor (el MediaRecorder, su audioSessionId y el nivel de audio son
+        privados en Camera2Controller) y los chips que las anunciaban estaban en pantalla
+        sin escuchar a nadie. Cadenas huérfanas de controles borrados sólo sirven para que
+        la siguiente ronda crea que la función existe. Vuelven con su control.
+    -->
 
     <!--
         ==================================================================
@@ -253,6 +246,16 @@
     <!-- Pedida por escrito desde CameraActivity.onRecordingChanged, que hoy lleva el
          literal en castellano con la nota "strings.xml no es nuestro". -->
     <string name="cd_stop_recording">Detener la grabación</string>
+    <string name="hint_format_locked">El formato no se puede cambiar a mitad de la toma</string>
+
+    <!-- Red de seguridad del 4K. Antes CUALQUIER fallo de startVideo() se le achacaba a la
+         resolución Y se guardaba en preferencias en el primer intento: si createRecorder
+         reventaba por otra cosa (por ejemplo el audio nuevo a 48 kHz estéreo), el usuario
+         se quedaba en 1080p PARA SIEMPRE sin saber por qué. Ahora hay dos mensajes
+         distintos porque son dos diagnósticos distintos. -->
+    <string name="hint_video_4k_fallback">Esta lente no ha aceptado 4K: se graba en 1080p</string>
+    <string name="hint_video_4k_sticky">4K ha fallado dos veces: se queda en 1080p</string>
+    <string name="hint_video_not_resolution">Tampoco graba en 1080p: el fallo no es la resolución</string>
 
     <!-- Lectura real del AE en el HUD (medio 42): "sin ISO ni obturador en pantalla el
          modo pro está incompleto". El motor todavía no publica aeIso/aeExposureNs; la
@@ -266,10 +269,14 @@
     <!-- Igual que gain_value: el argumento llega con su unidad puesta ("70%"), para no
          meter %% en un fichero donde no hay ninguno y no se puede compilar en local. -->
     <string name="zebra_level">CEBRAS %1$s</string>
-    <string name="chip_stab">EIS</string>
-    <string name="cd_stab">Estabilización de vídeo: %1$s</string>
+    <!-- chip_stab / cd_stab borradas con su chip: la estabilización se decide dentro de
+         applyControls (useEis = videoSessionActive && eisAvailable, las dos privadas) y no
+         hay setter público que apagarla. -->
     <string name="chip_ae_lock">BLOQUEO</string>
-    <string name="cd_ae_awb_lock">Bloqueo de exposición y color durante la grabación: %1$s</string>
+    <!-- Antes se llamaba cd_ae_awb_lock y decía "exposición y color". Era MENTIRA: lo que
+         hay en el motor es lockAeAf(), que bloquea exposición y ENFOQUE, no el balance de
+         blancos. Un texto accesible que promete lo que no hace es peor que ninguno. -->
+    <string name="cd_ae_af_lock">Bloqueo de exposición y enfoque: %1$s</string>
 
     <!--
         ==================================================================
@@ -282,6 +289,10 @@
         usuario se entere ANTES, no al ver la foto. Sin aviso escrito no hay arreglo.
     -->
     <string name="hint_flash_tele_blocked">El flash vela la foto con el teleobjetivo: desactivado en esta lente</string>
+    <!-- Estado del chip de flash cuando la lente activa lo tiene bloqueado por velo. El
+         chip no puede seguir diciendo "automático" si el motor va a disparar sin flash:
+         controller.flashBlockedOnLens es justo para esto. -->
+    <string name="state_flash_blocked">no disponible en esta lente</string>
     <string name="hint_flash_switched_wide">Flash: se cambia al gran angular para no velar la foto</string>
     <string name="hint_flash_out_of_range">El sujeto está fuera del alcance del flash (unos 2 m)</string>
     <string name="hint_flash_veiled">Destello velado: se repite la foto sin flash</string>
@@ -298,9 +309,19 @@
     -->
     <string name="night_progress">Apilando %1$d de %2$d</string>
     <string name="night_hold_still">No muevas el teléfono</string>
-    <string name="night_cancel">Cancelar</string>
-    <string name="cd_night_cancel">Cancelar la foto de noche</string>
+    <!-- night_cancel y cd_night_cancel borradas con btn_night_cancel: Camera2Controller
+         declara cancelNight() y abortNight() como privadas y no hay forma pública de
+         abortar la ráfaga nocturna. Vuelven con el botón cuando el motor la exponga. -->
     <string name="hint_night_crop">El modo noche entrega menos píxeles que una foto normal</string>
+
+    <!--
+        RIESGO DE FOTO MOVIDA
+        Camera2Controller.shakeRiskStops lleva publicado desde hace rondas y no lo leía
+        NADIE: dice cuántos pasos por debajo de la regla recíproca está disparando el AE
+        ahora mismo. Las dos tomas de teleobjetivo del expediente salieron a 1/24 s con 70
+        mm equivalentes -tres pasos por debajo- y la app no dijo una palabra.
+    -->
+    <string name="hint_shake_risk">Poca luz: puede salir movida. Apóyate o usa el modo noche</string>
     <!-- Medio 66: el NightStacker ya calcula k y el techo en función de "ambience", y el
          propio comentario del código dice "No lo toca nadie todavía". -->
     <string name="chip_ambience">AMBIENTE</string>
@@ -377,4 +398,6 @@
     -->
     <string name="shortcut_video_short">Vídeo</string>
     <string name="shortcut_video_long">Grabar vídeo</string>
+    <string name="night_cancel">CANCELAR</string>
+    <string name="cd_night_cancel">Cancelar la toma nocturna</string>
 </resources>

@@ -49,8 +49,5 @@
     <dimen name="magnifier_top_inset">170dp</dimen>
     <dimen name="magnifier_bottom_inset">320dp</dimen>
 
-    <!-- Aquí sobra ancho: el vúmetro puede ser largo de verdad, que es lo que hace
-         legible la diferencia entre -20 y -6 dBFS de un vistazo. -->
-    <dimen name="audio_meter_width">160dp</dimen>
-    <dimen name="audio_meter_height">7dp</dimen>
+    <!-- audio_meter_width / audio_meter_height borradas con el vúmetro: ver values/dimens.xml. -->
 </resources>
