@@ -2282,13 +2282,15 @@ class CameraActivity : AppCompatActivity() {
             ui.postDelayed({
                 if (!resumed || controller.isRecording) return@postDelayed
                 if (controller.startVideo(withAudio)) return@postDelayed
-                // Falla también en 1080p: la resolución NO era el problema. Se deshace la
-                // rebaja (incluida la persistida, si la hubo) para no dejar castigado un
-                // ajuste que era inocente, y se cuenta lo que de verdad ha pasado.
-                vresIndex = pedido
+                // Falla también en 1080p: la resolución NO era el problema. Se limpia la
+                // preferencia PERSISTIDA para no dejar castigado un ajuste inocente en la
+                // próxima sesión... pero NO se restaura el 4K en memoria. Si se restaurase,
+                // el siguiente intento volvería a pedir la resolución que acaba de fallar y
+                // el usuario se quedaría en un bucle de errores; quedándose en 1080p al
+                // menos tiene una posibilidad de grabar algo ahora, que es lo único que
+                // puede querer alguien a quien le acaba de fallar la grabación dos veces.
                 prefs.edit().remove("vres4kFails").apply()
                 if (fallos >= 2) prefs.edit().putInt("vres", pedido).apply()
-                applyVideoSettings()
                 hint(getString(R.string.hint_video_not_resolution))
                 Toast.makeText(this, R.string.photo_error, Toast.LENGTH_SHORT).show()
             }, 500)

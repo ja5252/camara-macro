@@ -1508,7 +1508,13 @@ class Camera2Controller(
         val paso = evStepValue
         if (paso <= 0f || evMin >= 0) return 0
         val pasos = flashGainStops()
-        if (pasos.isNaN()) return Math.round(FLASH_AMBIENT_EV / paso)
+        // "No se pudo medir" NO es lo mismo que "el flash aporta mucho". Este HAL puede
+        // saltarse la fase de pre-captura, y ahí no hay ninguna medida del pre-flash. Antes
+        // se aplicaba el recorte COMPLETO a ciegas, que es justo el camino por el que la foto
+        // con flash salía más oscura que sin él (medido: luminancia 88,7 contra 91,3).
+        // Sin medida se aplica la MITAD: protege el primer plano de quemarse sin arriesgar
+        // una foto entera subexpuesta por una suposición.
+        if (pasos.isNaN()) return Math.round(FLASH_AMBIENT_EV * 0.5f / paso)
         val t = ((pasos - FLASH_GAIN_MIN_STOPS) /
             (FLASH_GAIN_FULL_STOPS - FLASH_GAIN_MIN_STOPS)).coerceIn(0f, 1f)
         if (t <= 0f) return 0
